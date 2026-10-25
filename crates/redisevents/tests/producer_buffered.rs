@@ -42,24 +42,31 @@ fn producer(topic: &str, max_batch: u32, max_wait_ms: u32, max_queue: u32) -> Pr
     }
 }
 
-/// The `b` (body) and `t` (type) fields of every entry of one stream, in stream order.
+/// The `b` (body) and `t` (type) fields of every entry of one stream, in stream order. Paged, so a
+/// large stream does not run into the connection's response timeout.
 async fn bodies(conn: &mut ConnectionManager, key: &str) -> Vec<(Vec<u8>, String)> {
-    let reply: redis::streams::StreamRangeReply = redis::cmd("XRANGE")
-        .arg(key)
-        .arg("-")
-        .arg("+")
-        .query_async(conn)
-        .await
-        .expect("XRANGE");
-    reply
-        .ids
-        .into_iter()
-        .map(|e| {
+    let mut out = Vec::new();
+    let mut start = "-".to_owned();
+    loop {
+        let reply: redis::streams::StreamRangeReply = redis::cmd("XRANGE")
+            .arg(key)
+            .arg(&start)
+            .arg("+")
+            .arg("COUNT")
+            .arg(1_000)
+            .query_async(conn)
+            .await
+            .expect("XRANGE");
+        let Some(last) = reply.ids.last().map(|e| e.id.clone()) else {
+            return out;
+        };
+        for e in reply.ids {
             let b: Vec<u8> = e.get("b").expect("b");
             let t: String = e.get("t").expect("t");
-            (b, t)
-        })
-        .collect()
+            out.push((b, t));
+        }
+        start = format!("({last}");
+    }
 }
 
 /// C# `S16_buffered_producer_delivers_every_enqueue_after_flush`: 100 000 enqueues on four
