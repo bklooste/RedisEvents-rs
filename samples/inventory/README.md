@@ -101,6 +101,19 @@ What runs today:
 cargo test -p inventory-domain
 ```
 
+Interop matrix (C# write/read x Rust write/read; the Rust slots SKIP until their images exist).
+It needs Docker, .NET 10 and a checkout of the C# sample:
+
+```bash
+git clone https://github.com/bklooste/cqrs-simple-micro-service ../cqrs-simple-micro-service
+CSHARP_SAMPLE_DIR=../cqrs-simple-micro-service samples/inventory/matrix.sh
+# one pairing:  PAIRINGS=csharp/rust ...   Rust images: RUST_COMMAND_IMAGE / RUST_VIEWS_IMAGE
+```
+
+For each pairing it starts the pair from `compose.yml`, POSTs an item to the write side and polls the
+read side for it, runs both C# Scenarify suites against the pair, and prints a result table. The CI job
+`sample-matrix` runs it.
+
 When E5b and E5c land:
 
 ```bash

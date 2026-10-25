@@ -1,0 +1,54 @@
+# Inventory sample stack. Pick a pairing with profiles; the C# and Rust variants of a side share the
+# same host port, so run exactly one write side and one read side:
+#   docker compose -f compose.yml --profile csharp-command --profile csharp-views up -d --build
+#   docker compose -f compose.yml --profile rust-command   --profile rust-views   up -d
+# C# images build from a checkout of bklooste/cqrs-simple-micro-service (CSHARP_SAMPLE_DIR).
+# Rust images (E5b/E5c) are expected as ${RUST_COMMAND_IMAGE} / ${RUST_VIEWS_IMAGE}; matrix.sh skips a
+# pairing whose image is not present locally.
+name: inventory
+services:
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6479:6379"]
+
+  csharp-command:
+    profiles: [csharp-command]
+    build:
+      context: ${CSHARP_SAMPLE_DIR:?set CSHARP_SAMPLE_DIR to a cqrs-simple-micro-service checkout}/redis/inventory-logic
+      dockerfile: src/SimpleCQRS.API/Dockerfile
+    environment:
+      Streams__ConnectionString: redis:6379,allowAdmin=false
+    depends_on: [redis]
+    ports: ["54105:8080"]
+
+  csharp-views:
+    profiles: [csharp-views]
+    build:
+      context: ${CSHARP_SAMPLE_DIR:?set CSHARP_SAMPLE_DIR to a cqrs-simple-micro-service checkout}/redis/inventory-views
+      dockerfile: src/SimpleCQRS.Views/Dockerfile
+    environment:
+      Streams__ConnectionString: redis:6379,allowAdmin=false
+    depends_on: [redis]
+    ports: ["54106:8080"]
+
+  # Rust services (WP E5b / E5c). Contract: listen on 8080 in the container, read REDIS_URL.
+  rust-command:
+    profiles: [rust-command]
+    image: ${RUST_COMMAND_IMAGE:-redisevents-inventory-command:local}
+    pull_policy: never
+    environment:
+      REDIS_URL: redis://redis:6379
+      PORT: "8080"
+    depends_on: [redis]
+    ports: ["54105:8080"]
+
+  rust-views:
+    profiles: [rust-views]
+    image: ${RUST_VIEWS_IMAGE:-redisevents-inventory-views:local}
+    pull_policy: never
+    environment:
+      REDIS_URL: redis://redis:6379
+      PORT: "8080"
+    depends_on: [redis]
+    ports: ["54106:8080"]
