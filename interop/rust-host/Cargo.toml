@@ -1,0 +1,19 @@
+[package]
+name = "interop-rust-host"
+description = "Interop harness host: the Rust side of the cross-language scenarios (CLI twin of interop/dotnet/InteropHost)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "interop-rust-host"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
