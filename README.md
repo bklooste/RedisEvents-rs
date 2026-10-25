@@ -10,7 +10,7 @@ It is **wire-compatible** with the C# library. A Rust producer can feed a C# con
 reverse, on the same Redis, the same topics and the same consumer positions. The contract is
 written down in [`wire-spec/WIRE.md`](wire-spec/WIRE.md) and enforced in CI.
 
-> **Status: core library functional.** The event-sourcing crate and the sample services are still in progress.
+> **Status: core library and event-sourcing crate merged.** The sample services are still in progress.
 > The roadmap is in [`docs/PLAN.md`](docs/PLAN.md).
 
 ## Quick start

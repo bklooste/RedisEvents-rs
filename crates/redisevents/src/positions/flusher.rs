@@ -50,7 +50,7 @@
 //! (dropping the pre-reset pending position and releasing the hold) before it seeks; a later tick
 //! sees the slot taken and deletes the field with a compare-and-delete (only if it still holds the
 //! value we read, so a newer marker written in between survives), then clears the slot. Every
-//! flush (the tick's, a `Sync*` worker's and the final one at [`stop`](PositionFlusher::stop))
+//! flush (the tick's, a `Sync*` worker's and the final one at `stop`)
 //! first deletes taken markers the same way, and a taken partition's post-rewind position is
 //! written only after its marker is gone: a crash leaves either the marker next to the reset
 //! target (the reset applies once more) or no marker, never a marker next to a newer position
