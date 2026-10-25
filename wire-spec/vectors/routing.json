@@ -1,0 +1,354 @@
+{
+  "routes": [
+    {
+      "key": "a",
+      "partitions": 1,
+      "partition": 0
+    },
+    {
+      "key": "a",
+      "partitions": 2,
+      "partition": 1
+    },
+    {
+      "key": "a",
+      "partitions": 3,
+      "partition": 1
+    },
+    {
+      "key": "a",
+      "partitions": 4,
+      "partition": 3
+    },
+    {
+      "key": "a",
+      "partitions": 7,
+      "partition": 1
+    },
+    {
+      "key": "a",
+      "partitions": 8,
+      "partition": 7
+    },
+    {
+      "key": "a",
+      "partitions": 16,
+      "partition": 15
+    },
+    {
+      "key": "a",
+      "partitions": 64,
+      "partition": 31
+    },
+    {
+      "key": "a",
+      "partitions": 100,
+      "partition": 19
+    },
+    {
+      "key": "order-1",
+      "partitions": 1,
+      "partition": 0
+    },
+    {
+      "key": "order-1",
+      "partitions": 2,
+      "partition": 0
+    },
+    {
+      "key": "order-1",
+      "partitions": 3,
+      "partition": 2
+    },
+    {
+      "key": "order-1",
+      "partitions": 4,
+      "partition": 2
+    },
+    {
+      "key": "order-1",
+      "partitions": 7,
+      "partition": 6
+    },
+    {
+      "key": "order-1",
+      "partitions": 8,
+      "partition": 6
+    },
+    {
+      "key": "order-1",
+      "partitions": 16,
+      "partition": 6
+    },
+    {
+      "key": "order-1",
+      "partitions": 64,
+      "partition": 54
+    },
+    {
+      "key": "order-1",
+      "partitions": 100,
+      "partition": 94
+    },
+    {
+      "key": "customer:42",
+      "partitions": 1,
+      "partition": 0
+    },
+    {
+      "key": "customer:42",
+      "partitions": 2,
+      "partition": 0
+    },
+    {
+      "key": "customer:42",
+      "partitions": 3,
+      "partition": 0
+    },
+    {
+      "key": "customer:42",
+      "partitions": 4,
+      "partition": 2
+    },
+    {
+      "key": "customer:42",
+      "partitions": 7,
+      "partition": 1
+    },
+    {
+      "key": "customer:42",
+      "partitions": 8,
+      "partition": 2
+    },
+    {
+      "key": "customer:42",
+      "partitions": 16,
+      "partition": 2
+    },
+    {
+      "key": "customer:42",
+      "partitions": 64,
+      "partition": 34
+    },
+    {
+      "key": "customer:42",
+      "partitions": 100,
+      "partition": 66
+    },
+    {
+      "key": "é",
+      "partitions": 1,
+      "partition": 0
+    },
+    {
+      "key": "é",
+      "partitions": 2,
+      "partition": 1
+    },
+    {
+      "key": "é",
+      "partitions": 3,
+      "partition": 0
+    },
+    {
+      "key": "é",
+      "partitions": 4,
+      "partition": 3
+    },
+    {
+      "key": "é",
+      "partitions": 7,
+      "partition": 6
+    },
+    {
+      "key": "é",
+      "partitions": 8,
+      "partition": 3
+    },
+    {
+      "key": "é",
+      "partitions": 16,
+      "partition": 3
+    },
+    {
+      "key": "é",
+      "partitions": 64,
+      "partition": 51
+    },
+    {
+      "key": "é",
+      "partitions": 100,
+      "partition": 95
+    },
+    {
+      "key": "✓ unicode \uD83C\uDF89",
+      "partitions": 1,
+      "partition": 0
+    },
+    {
+      "key": "✓ unicode \uD83C\uDF89",
+      "partitions": 2,
+      "partition": 1
+    },
+    {
+      "key": "✓ unicode \uD83C\uDF89",
+      "partitions": 3,
+      "partition": 2
+    },
+    {
+      "key": "✓ unicode \uD83C\uDF89",
+      "partitions": 4,
+      "partition": 1
+    },
+    {
+      "key": "✓ unicode \uD83C\uDF89",
+      "partitions": 7,
+      "partition": 2
+    },
+    {
+      "key": "✓ unicode \uD83C\uDF89",
+      "partitions": 8,
+      "partition": 1
+    },
+    {
+      "key": "✓ unicode \uD83C\uDF89",
+      "partitions": 16,
+      "partition": 1
+    },
+    {
+      "key": "✓ unicode \uD83C\uDF89",
+      "partitions": 64,
+      "partition": 49
+    },
+    {
+      "key": "✓ unicode \uD83C\uDF89",
+      "partitions": 100,
+      "partition": 81
+    },
+    {
+      "key": "",
+      "partitions": 1,
+      "partition": 0
+    },
+    {
+      "key": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij",
+      "partitions": 1,
+      "partition": 0
+    },
+    {
+      "key": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij",
+      "partitions": 2,
+      "partition": 0
+    },
+    {
+      "key": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij",
+      "partitions": 3,
+      "partition": 1
+    },
+    {
+      "key": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij",
+      "partitions": 4,
+      "partition": 2
+    },
+    {
+      "key": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij",
+      "partitions": 7,
+      "partition": 0
+    },
+    {
+      "key": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij",
+      "partitions": 8,
+      "partition": 2
+    },
+    {
+      "key": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij",
+      "partitions": 16,
+      "partition": 2
+    },
+    {
+      "key": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij",
+      "partitions": 64,
+      "partition": 2
+    },
+    {
+      "key": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij",
+      "partitions": 100,
+      "partition": 42
+    },
+    {
+      "key": "3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c",
+      "partitions": 1,
+      "partition": 0
+    },
+    {
+      "key": "3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c",
+      "partitions": 2,
+      "partition": 0
+    },
+    {
+      "key": "3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c",
+      "partitions": 3,
+      "partition": 0
+    },
+    {
+      "key": "3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c",
+      "partitions": 4,
+      "partition": 0
+    },
+    {
+      "key": "3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c",
+      "partitions": 7,
+      "partition": 1
+    },
+    {
+      "key": "3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c",
+      "partitions": 8,
+      "partition": 0
+    },
+    {
+      "key": "3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c",
+      "partitions": 16,
+      "partition": 8
+    },
+    {
+      "key": "3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c",
+      "partitions": 64,
+      "partition": 8
+    },
+    {
+      "key": "3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c",
+      "partitions": 100,
+      "partition": 36
+    }
+  ],
+  "xxh3": [
+    {
+      "key": "a",
+      "hash_u64_decimal_string": "16629034431890738719"
+    },
+    {
+      "key": "order-1",
+      "hash_u64_decimal_string": "6900751593513035894"
+    },
+    {
+      "key": "customer:42",
+      "hash_u64_decimal_string": "7446690690941263266"
+    },
+    {
+      "key": "é",
+      "hash_u64_decimal_string": "17839895020865391795"
+    },
+    {
+      "key": "✓ unicode \uD83C\uDF89",
+      "hash_u64_decimal_string": "5320203248086416881"
+    },
+    {
+      "key": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij",
+      "hash_u64_decimal_string": "4172810494756687042"
+    },
+    {
+      "key": "3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c",
+      "hash_u64_decimal_string": "17242847666839832136"
+    }
+  ]
+}

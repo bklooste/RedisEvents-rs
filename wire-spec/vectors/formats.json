@@ -1,0 +1,218 @@
+{
+  "stream_id_format": [
+    {
+      "formatted": "0-0",
+      "ms": "0",
+      "seq": "0"
+    },
+    {
+      "formatted": "1-0",
+      "ms": "1",
+      "seq": "0"
+    },
+    {
+      "formatted": "1726000000000-42",
+      "ms": "1726000000000",
+      "seq": "42"
+    },
+    {
+      "formatted": "9223372036854775807-9223372036854775807",
+      "ms": "9223372036854775807",
+      "seq": "9223372036854775807"
+    }
+  ],
+  "stream_id_parse": [
+    {
+      "input": "0-0",
+      "valid": true,
+      "ms": "0",
+      "seq": "0"
+    },
+    {
+      "input": "1-0",
+      "valid": true,
+      "ms": "1",
+      "seq": "0"
+    },
+    {
+      "input": "1726000000000-42",
+      "valid": true,
+      "ms": "1726000000000",
+      "seq": "42"
+    },
+    {
+      "input": "9223372036854775807-9223372036854775807",
+      "valid": true,
+      "ms": "9223372036854775807",
+      "seq": "9223372036854775807"
+    },
+    {
+      "input": "9223372036854775808-0",
+      "valid": false,
+      "ms": null,
+      "seq": null
+    },
+    {
+      "input": "18446744073709551615-0",
+      "valid": false,
+      "ms": null,
+      "seq": null
+    },
+    {
+      "input": "",
+      "valid": false,
+      "ms": null,
+      "seq": null
+    },
+    {
+      "input": "-",
+      "valid": false,
+      "ms": null,
+      "seq": null
+    },
+    {
+      "input": "1-",
+      "valid": false,
+      "ms": null,
+      "seq": null
+    },
+    {
+      "input": "-1",
+      "valid": false,
+      "ms": null,
+      "seq": null
+    },
+    {
+      "input": "-1-2",
+      "valid": false,
+      "ms": null,
+      "seq": null
+    },
+    {
+      "input": "1",
+      "valid": false,
+      "ms": null,
+      "seq": null
+    },
+    {
+      "input": "1-2-3",
+      "valid": false,
+      "ms": null,
+      "seq": null
+    },
+    {
+      "input": "a-1",
+      "valid": false,
+      "ms": null,
+      "seq": null
+    },
+    {
+      "input": "1-b",
+      "valid": false,
+      "ms": null,
+      "seq": null
+    },
+    {
+      "input": " 1-2",
+      "valid": false,
+      "ms": null,
+      "seq": null
+    },
+    {
+      "input": "+1-2",
+      "valid": false,
+      "ms": null,
+      "seq": null
+    },
+    {
+      "input": "1--2",
+      "valid": false,
+      "ms": null,
+      "seq": null
+    },
+    {
+      "input": "1- 2",
+      "valid": false,
+      "ms": null,
+      "seq": null
+    }
+  ],
+  "position_value": [
+    {
+      "id": "1726000000000-42",
+      "instanceId": "3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c",
+      "value": "1726000000000-42|3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c"
+    },
+    {
+      "id": "0-0",
+      "instanceId": "6f72616e-6765-4164-6d69-6e5265736574",
+      "value": "0-0|6f72616e-6765-4164-6d69-6e5265736574"
+    }
+  ],
+  "reset_marker": {
+    "target": "1726000000000-42",
+    "issuedUtc": "2026-10-25T12:00:00.1234567+00:00",
+    "field": "__reset:3",
+    "value": "1726000000000-42|2026-10-25T12:00:00.1234567+00:00"
+  },
+  "reset_marker_parse": [
+    {
+      "value": "1726000000000-42|2026-10-25T12:00:00.1234567+00:00",
+      "valid": true,
+      "target": "1726000000000-42",
+      "issuedUtc": "2026-10-25T12:00:00.1234567+00:00"
+    },
+    {
+      "value": "1726000000000-42|2026-10-25T14:00:00.5000000+02:00",
+      "valid": true,
+      "target": "1726000000000-42",
+      "issuedUtc": "2026-10-25T14:00:00.5000000+02:00"
+    },
+    {
+      "value": "5-0",
+      "valid": true,
+      "target": "5-0",
+      "issuedUtc": "0001-01-01T00:00:00.0000000+00:00"
+    }
+  ],
+  "owner_value": [
+    {
+      "instanceId": "3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c",
+      "pod": "orders-consumer-0",
+      "value": "3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c|orders-consumer-0"
+    },
+    {
+      "instanceId": "3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c",
+      "pod": "",
+      "value": "3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c|"
+    }
+  ],
+  "admin_instance_id": "6f72616e-6765-4164-6d69-6e5265736574",
+  "datetime_offset_o": [
+    {
+      "ticks": "621355968000000000",
+      "offsetMinutes": 0,
+      "o": "1970-01-01T00:00:00.0000000+00:00"
+    },
+    {
+      "ticks": "639285264000000000",
+      "offsetMinutes": 0,
+      "o": "2026-10-25T12:00:00.0000000+00:00"
+    },
+    {
+      "ticks": "639285264001234567",
+      "offsetMinutes": 0,
+      "o": "2026-10-25T12:00:00.1234567+00:00"
+    },
+    {
+      "ticks": "639029198450000000",
+      "offsetMinutes": 330,
+      "o": "2026-01-02T03:04:05.0000000+05:30"
+    },
+    {
+      "ticks": "639103446000000000",
+      "offsetMinutes": -480,
+      "o": "2026-03-29T01:30:00.0000000-08:00"
+    }
+  ]
+}
