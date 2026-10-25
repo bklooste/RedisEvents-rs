@@ -1,0 +1,15 @@
+[package]
+name = "redisevents-msgpack"
+description = "MessagePack typed publish/consume for redisevents, with MessagePack-CSharp compatible size-gated LZ4."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+redisevents = { path = "../redisevents" }

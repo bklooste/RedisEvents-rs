@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+.idea/
+.vscode/
+.DS_Store
+# interop host (.NET)
+bin/
+obj/
