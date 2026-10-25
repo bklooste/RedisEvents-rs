@@ -454,6 +454,53 @@ partition counts as `0-0`; no staleness timeout (as C#). Only the release valve 
 target, one `streams.clamp.released` per transition into the released state. A failed scan or
 command fails the sweep and trims nothing; the loop logs and retries next interval.
 
+### D4 testing doubles (`testing.rs`, feature `testing`, public)
+In-memory doubles for code that publishes or handles messages, with no Redis. **E2 and E4 tests
+build on these.** Owner D4; the module is `redisevents::testing` and needs `features = ["testing"]`.
+- `InMemoryPublisher::new(partitions: u32) -> Result<Self>` implements `Publisher`. Routing is the
+  wire router (`partition_for_key`, a per-instance `RoundRobin` for empty keys), so partitions match
+  production. An explicit partition wins and is range-checked. `published()`, `count()`,
+  `for_partition(p)`, `partition_for(key)` (advances the round-robin for an empty key), `clear()`.
+  Each `PublishedMessage` keeps `partition` (routed) apart from `requested_partition` (asked for).
+  Ids are per instance from `1-0`; `clear()` does not reset them.
+- `InMemoryBufferedPublisher::new(partitions)` implements `BufferedPublisher`. `enqueue` buffers and
+  nothing is published until `flush`, so a test that forgets to flush fails. Direct publishes bypass
+  the buffer. `pending()` / `pending_count()` inspect the buffer. `arm_flush_failure(Error)` makes the
+  next flush fail and keep the batch (one-shot); `disarm_flush_failure()` cancels it. There is no
+  background pump, batch trigger, bounded queue or backpressure: those are tested against Redis.
+- `MemoryPositionStore::new()` implements `PositionStore` with the real load / save / reset rules
+  (single-partition reset creates it; all-partition reset touches only stored positions).
+- `StreamTestHarness::new(topic)` (plus `with_consumer`, `with_cancellation`) drives handlers the way
+  the worker does, with no host:
+  - `context(partition) -> PartitionContext` for direct calls.
+  - `build_raw(msg_type, body, &PublishOptions) -> Result<StreamMsg>` and `build::<C, M>(&msg, &opts)`
+    (type from `M::TYPE`, body from codec `C`) make the `StreamMsg` a handler receives. Options are
+    stamped on it (partition, correlation id, headers). Ids are unique process-wide.
+  - `deliver(&handler, &msg)` for a `MessageHandler`; `deliver_batch(&handler, &[StreamMsg])` for a
+    `BatchHandler` (one call, partition from the first message, an empty batch still called).
+  - `deliver_typed::<C, M, _>(&handler, &value, &opts)` and `deliver_typed_batch::<C, M, _>(..)` for
+    `TypedHandler` / `TypedBatchHandler`, round-tripping through the codec as `Typed` does.
+  - Each returns the handler's `HandleResult` unchanged, so `Ok`, `Err(Skip)` and `Err(Block)` are
+    asserted directly. A handler panic becomes `Err(Skip)` (the worker's `catch_unwind` rule).
+    **Not modelled:** `on_error` policy, `Block` retry and back-off, positions, the type filter,
+    and the batch's pooled memory. Those are the worker's and are tested there.
+
+```rust
+use redisevents::testing::{InMemoryBufferedPublisher, StreamTestHarness};
+use redisevents::producer::{BufferedPublisher, PublishOptions, Publisher};
+
+let publisher = InMemoryBufferedPublisher::new(8)?;
+publisher.enqueue("order-42", body, "OrderPlaced", &PublishOptions::new()).await?;
+assert!(publisher.published().is_empty());          // buffered, not yet on the stream
+publisher.flush().await?;
+let sent = publisher.published();                   // sent[0].partition == publisher.partition_for("order-42")
+
+let harness = StreamTestHarness::new("orders");
+let msg = StreamTestHarness::build::<Json, OrderPlaced>(&event, &PublishOptions::new())?;
+let outcome = harness.deliver(&my_handler, &msg).await;   // HandleResult, as the worker would see it
+assert!(outcome.is_ok());
+```
+
 ## 5. Positions, ownership, admin, diagnostics
 
 ```rust
