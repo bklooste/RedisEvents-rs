@@ -95,18 +95,26 @@ async fn both_routes_serve_the_projected_views() {
         .await
         .unwrap();
 
+    // Events of one item may sit on different partitions, so the projection can apply the
+    // deactivation before or after the count. Wait for the whole settled state, not one row.
     let detail = format!("/items/{id}");
+    let gone_path = format!("/items/{gone}");
     wait_until_async(
         || {
             let app = app.clone();
-            let detail = detail.clone();
+            let (detail, gone_path) = (detail.clone(), gone_path.clone());
             async move {
                 let (status, body) = get(&app, &detail).await;
-                status == StatusCode::OK && body["currentCount"] == json!(15)
+                let (gone_status, _) = get(&app, &gone_path).await;
+                let (_, list) = get(&app, "/items/").await;
+                status == StatusCode::OK
+                    && body["currentCount"] == json!(15)
+                    && gone_status == StatusCode::NOT_FOUND
+                    && list == json!([{ "id": id, "name": "gadget" }])
             }
         },
         Some(Duration::from_secs(30)),
-        "the detail view reaches count 15",
+        "the views settle: count 15, the deactivated item gone",
     )
     .await;
 
@@ -119,8 +127,8 @@ async fn both_routes_serve_the_projected_views() {
     assert_eq!(body["id"], json!(id));
     assert_eq!(body["name"], json!("gadget"));
     assert_eq!(body["currentCount"], json!(15));
-    assert!(body["streamPosition"]["ms"].is_u64());
-    assert!(body["streamPosition"]["seq"].as_u64().unwrap() > 0);
+    // Redis stream ids: ms is the wall clock, seq is 0 for the first entry of a millisecond.
+    assert!(body["streamPosition"]["ms"].as_u64().unwrap() > 0);
 
     let (status, _) = get(&app, &format!("/items/{gone}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "deactivated items are gone");
