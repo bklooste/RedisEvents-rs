@@ -94,7 +94,7 @@ jobs:
           echo "DOTNET_ARGS=-p:RedisEventsVersion=$v" >> "$GITHUB_ENV"
       - name: Point the host at RedisEvents@main
         if: matrix.csharp == 'main'
-        run: echo "DOTNET_ARGS=-p:UseLocalRedisEvents=$GITHUB_WORKSPACE/csharp" >> "$GITHUB_ENV"
+        run: echo "DOTNET_ARGS=-p:UseLocalRedisEvents=$GITHUB_WORKSPACE/csharp -p:TargetFrameworks=net10.0" >> "$GITHUB_ENV"
       - name: Build the C# host
         run: dotnet build interop/dotnet/InteropHost -c Release -o interop/dotnet/out $DOTNET_ARGS
       - name: Build the Rust host
