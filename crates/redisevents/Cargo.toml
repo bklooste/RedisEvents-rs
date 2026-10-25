@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 bytes = "1.12.1"
+opentelemetry = { version = "0.33.1", default-features = false, features = ["metrics", "trace"], optional = true }
 redis = { version = "1.8.0", features = ["tokio-comp", "connection-manager", "streams", "script"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
@@ -28,5 +29,8 @@ xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
 
 [features]
+## OpenTelemetry export: spans and metrics through the `opentelemetry` API (global tracer and meter
+## named `RedisEvents`). Without it spans are `tracing` spans and metrics are no-ops.
+otel = ["dep:opentelemetry"]
 ## In-memory test doubles (`redisevents::testing`).
 testing = []
