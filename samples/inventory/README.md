@@ -30,7 +30,7 @@ two small services sharing one Redis.
 | Crate | What | Status |
 | --- | --- | --- |
 | [`inventory-domain`](inventory-domain) | events (wire-compatible with C#), aggregate rules, projections as pure functions | ✅ done, tested |
-| `inventory-command` | axum service: the write side on `redisevents-eventsourcing` | plan WP E5b, after E3 |
+| [`inventory-command`](inventory-command) | axum service: the write side on `redisevents-eventsourcing` | ✅ done, tested |
 | [`inventory-views`](inventory-views) | axum service: the read side on `redisevents-projections` | ✅ done, tested |
 
 The domain has no Redis dependency. The services only wire it into the event store, the projector

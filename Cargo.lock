@@ -1305,6 +1305,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "inventory-command"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "inventory-domain",
+ "redis",
+ "redisevents",
+ "redisevents-eventsourcing",
+ "redisevents-projections",
+ "redisevents-test-support",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "uuid",
+]
+
+[[package]]
 name = "inventory-domain"
 version = "0.1.0"
 dependencies = [
