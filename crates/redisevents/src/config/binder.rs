@@ -64,11 +64,122 @@ struct Root {
 /// [`Error::Config`] when the JSON does not parse, a value has the wrong type or sign, or the two
 /// delivery spellings disagree.
 pub fn bind_json(json: &str) -> Result<StreamOptions> {
-    let root: Root = serde_json::from_str(json)
+    let mut document: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| Error::config(format!("{SECTION_NAME}: invalid configuration: {e}")))?;
+    canonicalise_keys(&mut document);
+    let root: Root = serde_json::from_value(document)
         .map_err(|e| Error::config(format!("{SECTION_NAME}: invalid configuration: {e}")))?;
     let mut options = root.streams.unwrap_or_default();
     migrate_legacy_delivery(&mut options)?;
     Ok(options)
+}
+
+/// Every configuration key, in the `snake_case` of its field. The PascalCase serde name is derived
+/// from it, so this table is the one place a new option must be listed for case-insensitive binding.
+const CONFIG_KEYS: &[&str] = &[
+    "streams",
+    "connection_string",
+    "consumer",
+    "topics",
+    "consumers",
+    "producers",
+    "partitions",
+    "max_len",
+    "trim",
+    "retention_seconds",
+    "background_trim_interval_seconds",
+    "co_locate_partitions",
+    "state_metadata",
+    "clamp_release_threshold",
+    "topic",
+    "batch_size",
+    "filter",
+    "start_from",
+    "start_from_date",
+    "persist",
+    "persist_interval_ms",
+    "backpressure",
+    "read_mode",
+    "block_ms",
+    "max_idle_delay_ms",
+    "on_error",
+    "unhealthy_block_seconds",
+    "unhealthy_stopped_seconds",
+    "unhealthy_behind_seconds",
+    "degraded_silence_seconds",
+    "contested_grace_seconds",
+    "contested_recheck_seconds",
+    "delivery",
+    "use_consumer_group",
+    "instances",
+    "reader_threads",
+    "shutdown_timeout_seconds",
+    "unhealthy_lag_ms",
+    "start_from_when_missing",
+    "reset_on_start",
+    "enabled",
+    "capacity",
+    "mode",
+    "count",
+    "index",
+    "lease_ttl_seconds",
+    "lease_renew_seconds",
+    "buffered",
+    "max_wait_ms",
+    "max_batch",
+    "max_queue",
+    "drop_oldest",
+];
+
+/// The serde (PascalCase) name for a configuration key written in any case, or `None` when the key
+/// is not one of ours. Case and underscores are ignored, as in C#.
+fn canonical_key(key: &str) -> Option<String> {
+    let folded: String = key
+        .chars()
+        .filter(|c| *c != '_')
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    CONFIG_KEYS
+        .iter()
+        .find(|known| known.replace('_', "") == folded)
+        .map(|known| {
+            known
+                .split('_')
+                .map(|word| {
+                    let mut chars = word.chars();
+                    chars
+                        .next()
+                        .map(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+}
+
+/// Rewrites every known key to its canonical spelling, so `streams`, `STREAMS` and `Streams` bind
+/// alike. Unknown keys are left alone (serde ignores them, as C# does). Topic names are data (they
+/// become Redis key names), so the keys of `Topics` are kept exactly as written.
+fn canonicalise_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let entries = std::mem::take(map);
+            for (key, mut child) in entries {
+                let canonical = canonical_key(&key);
+                if canonical.as_deref() == Some("Topics") {
+                    if let serde_json::Value::Object(topics) = &mut child {
+                        for topic in topics.values_mut() {
+                            canonicalise_keys(topic);
+                        }
+                    }
+                } else {
+                    canonicalise_keys(&mut child);
+                }
+                map.insert(canonical.unwrap_or(key), child);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(canonicalise_keys),
+        _ => {}
+    }
 }
 
 /// Maps `UseConsumerGroup` onto `Delivery` for every consumer that sets it.
@@ -1821,5 +1932,176 @@ mod tests {
     fn error_message_never_echoes_the_password() {
         let err = to_redis_url("localhost:notaport,password=hunter2").expect_err("bad port");
         assert!(!err.to_string().contains("hunter2"));
+    }
+
+    // ------------------------------------------------------------ case-insensitive binding
+
+    /// Re-keys every object key of a document with `case`, leaving values and topic names alone.
+    fn rekey(value: &serde_json::Value, case: fn(&str) -> String) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => serde_json::Value::Object(
+                map.iter()
+                    .map(|(k, v)| {
+                        let v = if k == "Topics" {
+                            match v {
+                                serde_json::Value::Object(topics) => serde_json::Value::Object(
+                                    topics
+                                        .iter()
+                                        .map(|(n, t)| (n.clone(), rekey(t, case)))
+                                        .collect(),
+                                ),
+                                other => other.clone(),
+                            }
+                        } else {
+                            rekey(v, case)
+                        };
+                        (case(k), v)
+                    })
+                    .collect(),
+            ),
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(|i| rekey(i, case)).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    #[test]
+    fn enum_values_bind_case_insensitively() {
+        for spelling in ["date", "DATE", "Date", "dAtE"] {
+            let options = bind(&format!(
+                r#"{{ "Streams": {{ "Consumers": [ {{ "Topic": "orders", "StartFrom": "{spelling}", "StartFromDate": "2026-01-01T00:00:00Z" }} ] }} }}"#
+            ));
+            assert_eq!(
+                options.consumers[0].start_from,
+                StartFrom::Date,
+                "{spelling}"
+            );
+        }
+
+        for (spelling, expected) in [
+            ("syncbatch", PersistMode::SyncBatch),
+            ("NONE", PersistMode::None),
+        ] {
+            let options = bind(&format!(
+                r#"{{ "Streams": {{ "Consumers": [ {{ "Topic": "orders", "Persist": "{spelling}", "StartFrom": "Now" }} ] }} }}"#
+            ));
+            assert_eq!(options.consumers[0].persist, expected, "{spelling}");
+        }
+
+        for (spelling, expected) in [
+            ("stopPartition", ErrorPolicy::StopPartition),
+            ("FAIL", ErrorPolicy::Fail),
+        ] {
+            let options = bind(&format!(
+                r#"{{ "Streams": {{ "Consumers": [ {{ "Topic": "orders", "OnError": "{spelling}" }} ] }} }}"#
+            ));
+            assert_eq!(options.consumers[0].on_error, expected, "{spelling}");
+        }
+
+        for (spelling, expected) in [("poll", ReadMode::Poll), ("BLOCK", ReadMode::Block)] {
+            let options = bind(&format!(
+                r#"{{ "Streams": {{ "Consumers": [ {{ "Topic": "orders", "ReadMode": "{spelling}" }} ] }} }}"#
+            ));
+            assert_eq!(options.consumers[0].read_mode, expected, "{spelling}");
+        }
+
+        for (spelling, expected) in [
+            ("lease", InstanceMode::Lease),
+            ("LEASE", InstanceMode::Lease),
+            ("sTaTiC", InstanceMode::Static),
+        ] {
+            let options = bind(&format!(
+                r#"{{ "Streams": {{ "Consumers": [ {{ "Topic": "orders", "Instances": {{ "Mode": "{spelling}" }} }} ] }} }}"#
+            ));
+            assert_eq!(
+                options.consumers[0]
+                    .instances
+                    .as_ref()
+                    .map(InstanceOptions::mode),
+                Some(expected),
+                "{spelling}"
+            );
+        }
+
+        for (spelling, expected) in [
+            ("workqueue", DeliveryMode::WorkQueue),
+            ("ORDERED", DeliveryMode::Ordered),
+        ] {
+            let options = bind(&format!(
+                r#"{{ "Streams": {{ "Consumers": [ {{ "Topic": "orders", "Delivery": "{spelling}" }} ] }} }}"#
+            ));
+            assert_eq!(options.consumers[0].delivery(), expected, "{spelling}");
+        }
+
+        for (spelling, expected) in [
+            ("exact", TrimMode::Exact),
+            ("APPROX", TrimMode::Approx),
+            ("none", TrimMode::None),
+        ] {
+            let options = bind(&format!(
+                r#"{{ "Streams": {{ "Topics": {{ "orders": {{ "Trim": "{spelling}" }} }} }} }}"#
+            ));
+            assert_eq!(options.topics["orders"].trim, expected, "{spelling}");
+        }
+    }
+
+    #[test]
+    fn unknown_enum_value_is_still_an_error_in_any_case() {
+        for spelling in ["Sometimes", "sometimes", "SOMETIMES"] {
+            let err = bind_json(&format!(
+                r#"{{ "Streams": {{ "Consumers": [ {{ "Topic": "orders", "StartFrom": "{spelling}" }} ] }} }}"#
+            ));
+            assert!(matches!(err, Err(Error::Config(_))), "{spelling}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn partial_enum_match_is_not_accepted() {
+        // Case-insensitive means whole-value equality, not a prefix or substring.
+        assert!(
+            bind_json(
+                r#"{ "Streams": { "Consumers": [ { "Topic": "orders", "ReadMode": "blo" } ] } }"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn config_keys_bind_case_insensitively() {
+        let canonical = bind(FULL_SECTION);
+        let document: serde_json::Value = serde_json::from_str(FULL_SECTION).unwrap();
+
+        for (label, case) in [
+            ("lower", str::to_ascii_lowercase as fn(&str) -> String),
+            ("upper", str::to_ascii_uppercase as fn(&str) -> String),
+        ] {
+            let text = rekey(&document, case).to_string();
+            assert_eq!(bind_json(&text).unwrap(), canonical, "{label}");
+        }
+    }
+
+    #[test]
+    fn section_name_is_case_insensitive() {
+        for section in ["Streams", "streams", "STREAMS", "sTrEaMs"] {
+            let options = bind(&format!(r#"{{ "{section}": {{ "Consumer": "svc" }} }}"#));
+            assert_eq!(options.consumer.as_deref(), Some("svc"), "{section}");
+        }
+    }
+
+    #[test]
+    fn underscored_and_plain_key_spellings_both_bind() {
+        // Keys are matched with case and underscores ignored; the field names are the ones in the table.
+        let options =
+            bind(r#"{ "Streams": { "Consumers": [ { "Topic": "orders", "BATCH_SIZE": 7 } ] } }"#);
+        assert_eq!(options.consumers[0].batch_size, 7);
+    }
+
+    #[test]
+    fn topic_names_keep_their_case() {
+        let options = bind(r#"{ "Streams": { "Topics": { "Orders": { "partitions": 3 } } } }"#);
+
+        assert_eq!(options.topics["Orders"].partitions, 3);
+        assert!(!options.topics.contains_key("orders"));
     }
 }
