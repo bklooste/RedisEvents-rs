@@ -69,6 +69,26 @@ impl EntryFields<'_> {
     }
 }
 
+impl EntryFields<'_> {
+    /// How many arguments [`EntryFields::write_to`] appends (field names and values).
+    pub(crate) fn arg_count(&self) -> usize {
+        let mut n = 4;
+        if self.partition_key.is_some() {
+            n += 2;
+        }
+        if non_empty(self.correlation_id).is_some() {
+            n += 2;
+        }
+        if non_empty(self.trace_parent).is_some() {
+            n += 2;
+        }
+        if !self.headers.is_empty() {
+            n += 2;
+        }
+        n
+    }
+}
+
 /// Decodes one entry's field/value pairs into a [`StreamMsg`]. Unknown fields are ignored; a missing
 /// `t`, `k` or `c` decodes as empty.
 ///

@@ -249,8 +249,43 @@ pub trait PublisherExt: Publisher {   // blanket for every Publisher, complete
 - **B2** implements `BufferedStreamPublisher` (`new(StreamPublisher, ProducerOptions)`,
   `async shutdown(&self)`), queue full → wait, or drop oldest + `streams.buffer.dropped`.
   `publish`/`publish_batch` flush the queue first so per-key order holds. After shutdown → `Closed`.
-- **B3** owns `outbox.rs`; may add public `Outbox`, `StreamStore`, `StateEvent`, `Idempotency`,
-  `TopicForwarder` (new public API → lead review). Transactions on `Connection::dedicated_with_timeout`.
+- **B3** (`producer/outbox.rs`, re-exported from `producer`). Public API, for E3 and services:
+  ```rust
+  pub struct OutboxPublish<'a> { pub topic: &'a str, pub partition_key: &'a str, pub body: &'a [u8],
+      pub msg_type: &'a str, pub options: &'a PublishOptions, pub topic_options: &'a TopicOptions }
+  impl Outbox {   // MULTI/EXEC on one cached `dedicated_with_timeout` connection (default 5 s)
+      fn new(Connection, Keys) -> Self; fn with_response_timeout(self, Duration) -> Self;
+      fn state_key(&Keys, topic, name) -> Result<String>;                 // <prefix>{topic}:state:<name>
+      fn ensure_same_slot(&Keys, topic, state_keys: &[&str], co_locate: bool, partition: u32) -> Result<()>;
+      async fn write_and_publish(&self, FnOnce(&mut redis::Pipeline), &OutboxPublish, state_keys: &[&str]) -> Result<StreamId>;
+      async fn write_and_publish_many(&self, FnOnce(&mut redis::Pipeline), &[OutboxPublish], state_keys: &[&str]) -> Result<Vec<StreamId>>;
+  }
+  pub struct StateEvent { pub body: Bytes, pub msg_type: String, pub options: PublishOptions } // new(), with_options()
+  impl StreamStore {   // E3's event store
+      fn new(Connection, Keys, topic, TopicOptions) -> Result<Self>;    // Config error unless co-located
+      fn require_co_located_partitions(topic, &TopicOptions) -> Result<()>;
+      fn topic(&self) -> &str; fn options(&self) -> &TopicOptions; fn state_key(&self, name) -> Result<String>;
+      async fn read(&self, name, after: StreamId /* exclusive */, max: usize) -> Result<Vec<StreamMsg>>;
+      async fn append_and_publish(&self, name, expected_len: u64, partition_key, &[StateEvent])
+          -> Result<Option<Vec<StreamId>>>;   // None = XLEN != expected_len, nothing written
+      async fn append_and_publish_unchecked(&self, name, partition_key, &[StateEvent]) -> Result<Vec<StreamId>>;
+  }
+  impl Idempotency { fn key(&Keys, scope, id) -> Result<String>;
+      async fn try_begin(&Connection, &Keys, scope, id, ttl: Duration) -> Result<bool>; } // SET NX PX
+  pub struct ForwardedMessage { pub partition_key: String, pub body: Bytes, pub msg_type: String }
+  impl TopicForwarder { fn new(Connection, Keys, target, TopicOptions) -> Result<Self>;
+      fn with_name(self, &str) -> Result<Self>; fn with_marker_ttl(self, Duration) -> Self;
+      async fn forward(&self, source, dedupe_id, position: StreamId, &[ForwardedMessage], correlation_id: Option<&str>) -> Result<bool>; }
+  ```
+  - Version = `XLEN` of the state stream; returned ids are the **state** entries' ids (E3's
+    versions). State entries are `b t` (+ `c p h` with `state_metadata`), never `k`, never `MAXLEN`.
+  - The conditional writes (store, forwarder) run as **one Lua script** (`EVALSHA`, `EVAL` on
+    `NOSCRIPT`) on `shared()`, not `WATCH`/`MULTI`: same entries on the wire, one round trip, no
+    socket per save, no false conflicts, every key in `KEYS` and in one slot. The plain `Outbox`
+    keeps `MULTI`/`EXEC` on a dedicated connection because its state commands are arbitrary.
+  - Errors: blank names, empty event lists, a missing type, a partition out of range →
+    `InvalidArgument`; slot / co-location / brace / topic-option problems → `Config`; a failed
+    transaction or script → `Transport` (it ran completely or not at all; no rollback inside).
 - **D4** implements in-memory `Publisher` / `BufferedPublisher` doubles against these traits.
 
 ## 4. Consumer
