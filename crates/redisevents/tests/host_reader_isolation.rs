@@ -44,7 +44,7 @@ struct ReaderClient {
     age_seconds: i64,
 }
 
-/// The dedicated reader connections of `consumer` (named `streams-rd:<consumer>:i<n>`).
+/// The dedicated reader connections of `consumer` (named `streams-rd:<service>:<consumer>:i<n>:<pod>`, C# `StreamNames.ReaderClientName`).
 async fn reader_clients(
     redis: &redisevents_test_support::RedisFixture,
     consumer: &str,
@@ -55,7 +55,7 @@ async fn reader_clients(
         .query_async(&mut conn)
         .await
         .expect("CLIENT LIST");
-    let prefix = format!("streams-rd:{consumer}:");
+    let infix = format!(":{consumer}:i");
     list.lines()
         .filter_map(|line| {
             let field = |name: &str| {
@@ -63,7 +63,7 @@ async fn reader_clients(
                     .find_map(|kv| kv.strip_prefix(name).and_then(|v| v.strip_prefix('=')))
             };
             let named = field("name")?;
-            if !named.starts_with(&prefix) {
+            if !named.starts_with("streams-rd:") || !named.contains(&infix) {
                 return None;
             }
             Some(ReaderClient {
@@ -84,11 +84,10 @@ async fn sample_get_latency(
     let end = Instant::now() + window;
     while Instant::now() < end {
         let started = Instant::now();
-        let _: Option<String> = redis::cmd("GET")
-            .arg(key)
-            .query_async(conn)
-            .await
-            .expect("GET");
+        // A GET that times out on a stalled connection is the slowest sample there is, not a test
+        // error: its elapsed time (the response timeout) is what the control measures.
+        let _: redis::RedisResult<Option<String>> =
+            redis::cmd("GET").arg(key).query_async(conn).await;
         samples.push(started.elapsed().as_secs_f64() * 1_000.0);
     }
     samples
@@ -107,7 +106,6 @@ fn p99(samples: &[f64]) -> f64 {
 /// S21. A consumer parked in `XREAD BLOCK 2000` on an idle topic does not move the p99 of a tight
 /// `GET` loop on the shared connection; a blocking read issued on that same connection blows it out.
 #[tokio::test]
-#[ignore = "C4 divergence: reader connections are never named (no CLIENT SETNAME), so CLIENT LIST cannot find them"]
 async fn s21_a_parked_blocking_read_does_not_delay_the_shared_multiplexer() {
     let redis = require_redis!();
     let topic = redis.new_topic("s21");
@@ -174,9 +172,11 @@ async fn s21_a_parked_blocking_read_does_not_delay_the_shared_multiplexer() {
 
     let baseline_p99 = p99(&baseline);
     let isolated_p99 = p99(&isolated);
-    let stalled_p99 = p99(&stalled);
+    // The control's worst GET, not its p99: redis-rs gives up on the stalled connection after its
+    // 500 ms response timeout and reconnects, so only a few of thousands of samples are stalled.
+    let stalled_p99 = stalled.iter().copied().fold(0.0, f64::max);
     eprintln!(
-        "GET p99 ms: baseline {baseline_p99:.2}, isolated {isolated_p99:.2}, control {stalled_p99:.2}"
+        "GET p99 ms: baseline {baseline_p99:.2}, isolated {isolated_p99:.2}, control worst {stalled_p99:.2}"
     );
     assert!(
         baseline.len() > 100,
@@ -215,7 +215,6 @@ async fn s21_a_parked_blocking_read_does_not_delay_the_shared_multiplexer() {
 /// S21. The reader connection survives a 65-second idle block without being torn down and rebuilt,
 /// and the first message published after the idle window is delivered at once.
 #[tokio::test]
-#[ignore = "C4 divergence: reader connections are never named (no CLIENT SETNAME), so CLIENT LIST cannot find them"]
 async fn s21_reader_connection_survives_a_long_idle_and_resumes_immediately() {
     let redis = require_redis!();
     // 65 s, not less: the keep-alive and configuration check both default to 60 s, and the failure

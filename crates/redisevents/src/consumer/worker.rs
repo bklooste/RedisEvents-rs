@@ -695,6 +695,13 @@ impl<H: BatchHandler> Processor<H> {
                      partition is stopping; other partitions keep running."
                 );
                 self.record_partial(part, msgs, done, recorded);
+                self.positions.stopped(
+                    part.partition,
+                    &format!(
+                        "ErrorPolicy.StopPartition after {}: {error}",
+                        error_type(error.as_ref())
+                    ),
+                );
                 Outcome::StopPartition
             }
             ErrorPolicy::Fail => {
@@ -703,6 +710,13 @@ impl<H: BatchHandler> Processor<H> {
                     "Streams: handler failed. ErrorPolicy.Fail: failing the host."
                 );
                 self.record_partial(part, msgs, done, recorded);
+                self.positions.stopped(
+                    part.partition,
+                    &format!(
+                        "ErrorPolicy.Fail after {}: {error}",
+                        error_type(error.as_ref())
+                    ),
+                );
                 Outcome::Fault(error)
             }
             ErrorPolicy::BestEffort => {
@@ -1064,6 +1078,13 @@ impl<H: BatchHandler, F: FetchSource> Worker<H, F> {
                 Ok(b) => b,
                 Err(e) if is_transient(&e) => {
                     if outage == 0 {
+                        // C# `WaitOutTransportFailureAsync`: every partition sharing this read is
+                        // blocked (Degraded now, Unhealthy past `unhealthy_block_seconds`).
+                        for (i, part) in parts.iter().enumerate() {
+                            if !retired[i] {
+                                processor.positions.blocked(part.partition, true);
+                            }
+                        }
                         count_error(&topic, &consumer, "transport", error_type(&e));
                         tracing::error!(
                             topic = &*topic, consumer = &*consumer, error = %e,
@@ -1086,6 +1107,9 @@ impl<H: BatchHandler, F: FetchSource> Worker<H, F> {
             };
             if outage != 0 {
                 outage = 0;
+                for part in &parts {
+                    processor.positions.blocked(part.partition, false);
+                }
                 tracing::info!(
                     topic = &*topic,
                     consumer = &*consumer,

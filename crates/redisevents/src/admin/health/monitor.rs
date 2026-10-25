@@ -297,6 +297,11 @@ impl PartitionMonitor {
         self.lock().state == StreamPartitionRunState::Blocked
     }
 
+    /// Whether the partition is in the stopped state (C# `State == PartitionRunState.Stopped`).
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.lock().state == StreamPartitionRunState::Stopped
+    }
+
     /// The blocking failure cleared (C# `MarkUnblocked`).
     pub(crate) fn mark_unblocked(&self) {
         let mut inner = self.lock();

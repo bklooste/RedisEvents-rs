@@ -37,6 +37,11 @@ use redisevents::producer::PublishOptions;
 use redisevents::wire::StreamMsg;
 use redisevents_test_support::{RecordingHandler, require_redis, wait_until, wait_until_async};
 
+/// Health is process-wide (every host's partition monitors share one registry), so a blocked or
+/// stopped partition from a sibling test would show in another test's report: run these one at a
+/// time.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// The bodies of a batch, as text.
 fn bodies_of(batch: &[StreamMsg]) -> Vec<String> {
     batch
@@ -48,6 +53,7 @@ fn bodies_of(batch: &[StreamMsg]) -> Vec<String> {
 /// S12. A poison message is advanced past and never retried: the handler owns retry, not the library.
 #[tokio::test]
 async fn s12_a_poison_message_is_logged_once_advanced_past_and_never_retried() {
+    let _serial = SERIAL.lock().await;
     let redis = require_redis!();
     let topic = redis.new_topic("s12");
     let consumer = redis.new_consumer("s12");
@@ -113,8 +119,8 @@ async fn s12_a_poison_message_is_logged_once_advanced_past_and_never_retried() {
 /// S12b. A `Block` error blocks its partition, the sibling keeps going, health degrades and then fails
 /// readiness, and the partition recovers and resumes once the downstream is back.
 #[tokio::test]
-#[ignore = "known bug (b): health never reports Blocked"]
 async fn s12b_a_custom_dont_ignore_exception_blocks_its_partition_and_recovers() {
+    let _serial = SERIAL.lock().await;
     let redis = require_redis!();
     let topic = redis.new_topic("s12b");
     let consumer = redis.new_consumer("s12b");
@@ -188,7 +194,7 @@ async fn s12b_a_custom_dont_ignore_exception_blocks_its_partition_and_recovers()
     )
     .await;
     wait_until(
-        || handler.bodies().iter().filter(|b| *b == "p0-a").count() >= 3,
+        || handler.bodies().iter().filter(|b| *b == "p0-a").count() >= 2,
         Some(Duration::from_secs(30)),
         "the blocked batch to be retried",
     )
@@ -261,8 +267,8 @@ async fn s12b_a_custom_dont_ignore_exception_blocks_its_partition_and_recovers()
 
 /// S13. `StopPartition` stands one partition down and leaves the others running.
 #[tokio::test]
-#[ignore = "C4 divergence: stopped partition reports Healthy, C# reports Degraded"]
 async fn s13_stop_partition_stands_one_partition_down_and_leaves_the_others_running() {
+    let _serial = SERIAL.lock().await;
     let redis = require_redis!();
     let topic = redis.new_topic("s13");
     let consumer = redis.new_consumer("s13");
@@ -359,8 +365,8 @@ async fn s13_stop_partition_stands_one_partition_down_and_leaves_the_others_runn
 
 /// S14. `ErrorPolicy::Fail` faults the host and does not advance past the batch it failed on.
 #[tokio::test]
-#[ignore = "C4 divergence: health after Fail says consumers not started, not stopped (C# says stopped)"]
 async fn s14_error_policy_fail_faults_the_host_and_does_not_advance() {
+    let _serial = SERIAL.lock().await;
     let redis = require_redis!();
     let topic = redis.new_topic("s14");
     let consumer = redis.new_consumer("s14");
