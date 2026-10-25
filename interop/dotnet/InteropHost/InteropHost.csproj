@@ -18,7 +18,7 @@
     <PackageReference Include="RedisEvents" Version="$(RedisEventsVersion)" />
   </ItemGroup>
   <ItemGroup Condition="'$(UseLocalRedisEvents)' != ''">
-    <ProjectReference Include="$(UseLocalRedisEvents)/src/RedisEvents/RedisEvents.csproj" />
+    <ProjectReference Include="$(UseLocalRedisEvents)/src/RedisEvents/RedisEvents.csproj" SetTargetFramework="TargetFramework=net10.0" />
   </ItemGroup>
 
   <ItemGroup>
