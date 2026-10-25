@@ -88,22 +88,39 @@ impl Router {
     /// An explicit partition wins outright; otherwise a non-empty key hashes and an empty key
     /// round-robins.
     fn route(&self, partition_key: &str, explicit: Option<u32>) -> Result<u32> {
-        if let Some(chosen) = explicit {
-            if chosen >= self.partitions {
-                return Err(Error::invalid_argument(format!(
-                    "Topic '{}' has {} partition(s), so an explicit partition must be in [0, {}].",
-                    self.topic,
-                    self.partitions,
-                    self.partitions.saturating_sub(1)
-                )));
-            }
-            return Ok(chosen);
-        }
-        if partition_key.is_empty() {
-            return Ok(self.round_robin.next(self.partitions));
-        }
-        Ok(partition_for_key(partition_key.as_bytes(), self.partitions))
+        route(
+            &self.topic,
+            self.partitions,
+            &self.round_robin,
+            partition_key,
+            explicit,
+        )
     }
+}
+
+/// The routing rule, shared with the outbox so an outbox publish and a plain publish of one key
+/// land in one partition: an explicit partition wins outright (and must be in range); otherwise a
+/// non-empty key hashes and an empty key round-robins.
+pub(super) fn route(
+    topic: &str,
+    partitions: u32,
+    round_robin: &RoundRobin,
+    partition_key: &str,
+    explicit: Option<u32>,
+) -> Result<u32> {
+    if let Some(chosen) = explicit {
+        if chosen >= partitions {
+            return Err(Error::invalid_argument(format!(
+                "Topic '{topic}' has {partitions} partition(s), so an explicit partition must be in [0, {}].",
+                partitions.saturating_sub(1)
+            )));
+        }
+        return Ok(chosen);
+    }
+    if partition_key.is_empty() {
+        return Ok(round_robin.next(partitions));
+    }
+    Ok(partition_for_key(partition_key.as_bytes(), partitions))
 }
 
 /// The stream names and the `XADD` shape: everything a command needs apart from the connection.

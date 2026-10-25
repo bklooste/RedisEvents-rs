@@ -22,6 +22,9 @@ use bytes::Bytes;
 use serde::Serialize;
 
 pub use buffered::BufferedStreamPublisher;
+pub use outbox::{
+    ForwardedMessage, Idempotency, Outbox, OutboxPublish, StateEvent, StreamStore, TopicForwarder,
+};
 pub use publisher::StreamPublisher;
 
 use crate::error::Result;
