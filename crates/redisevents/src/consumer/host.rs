@@ -30,15 +30,26 @@
 //! `impl ConsumerBuilder` / `impl StreamsBuilder` blocks in `consumer/builder.rs`, ending in
 //! `self.handler(adapter)`; nothing in this file needs to change for that.
 
-use std::sync::Arc;
+mod erased;
+mod runtime;
+#[cfg(test)]
+mod tests;
 
-use crate::admin::health::StreamHealthReport;
+use std::sync::{Arc, Mutex, PoisonError};
+
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
+
+use crate::admin::health::{StreamHealth, StreamHealthReport};
 use crate::config::{ConsumerOptions, StreamOptions, TopicOptions};
 use crate::connection::Connection;
 use crate::consumer::handler::BatchHandler;
 use crate::error::Result;
 use crate::positions::PositionStore;
 use crate::wire::Keys;
+
+use erased::{HandlerRunner, RunnerFactory, StoreDyn, StoreHolder};
+use runtime::{ConsumerState, Fault};
 
 /// Entry point of the consumer host (C# `AddStreams` + `AddStream`).
 #[derive(Debug, Clone, Copy)]
@@ -68,19 +79,12 @@ pub struct StreamsBuilder {
     registrations: Vec<Registration>,
 }
 
-/// One consumer: its options and the type-erased handler + store (crate-private).
-#[allow(dead_code)] // skeleton
+/// One consumer: its options and the type-erased handler and store.
 pub(crate) struct Registration {
     pub(crate) options: ConsumerOptions,
-    pub(crate) store: Option<StoreFactory>,
+    pub(crate) store: Option<Arc<dyn StoreDyn>>,
     pub(crate) runner: Arc<dyn RunnerFactory>,
 }
-
-/// Type-erased position store override (built per read-side generation).
-pub(crate) type StoreFactory = Arc<dyn Fn() -> Arc<dyn std::any::Any + Send + Sync> + Send + Sync>;
-
-/// Builds the run future of one worker for a handler type the host no longer names.
-pub(crate) trait RunnerFactory: Send + Sync + 'static {}
 
 impl StreamsBuilder {
     /// The key namespace (default [`Keys::from_env`]).
@@ -150,14 +154,18 @@ impl StreamsBuilder {
     /// [`Error::Redis`](crate::Error::Redis) / [`Error::Transport`](crate::Error::Transport) when
     /// Redis fails during startup.
     pub async fn spawn(self) -> Result<StreamsHost> {
-        let _ = (
+        let keys = self.keys.unwrap_or_else(Keys::from_env);
+        let environment = self
+            .environment
+            .unwrap_or_else(runtime::environment_from_env);
+        runtime::spawn(
             self.conn,
-            self.keys,
+            keys,
             self.options,
-            self.environment,
+            &environment,
             self.registrations,
-        );
-        todo!("C4")
+        )
+        .await
     }
 }
 
@@ -165,7 +173,7 @@ impl StreamsBuilder {
 pub struct ConsumerBuilder {
     parent: StreamsBuilder,
     options: ConsumerOptions,
-    store: Option<StoreFactory>,
+    store: Option<Arc<dyn StoreDyn>>,
 }
 
 impl ConsumerBuilder {
@@ -204,10 +212,9 @@ impl ConsumerBuilder {
     /// Uses `store` instead of the Redis position store (C# `IPositionStore` override). Only used
     /// when `Persist` is not `None`.
     #[must_use]
-    #[allow(clippy::needless_pass_by_value)] // skeleton
-    pub fn position_store<S: PositionStore>(self, store: S) -> Self {
-        let _ = store;
-        todo!("C4")
+    pub fn position_store<S: PositionStore>(mut self, store: S) -> Self {
+        self.store = Some(Arc::new(StoreHolder::new(store)));
+        self
     }
 
     /// Completes the registration with a batch handler. Every other handler shape is an adapter
@@ -215,8 +222,17 @@ impl ConsumerBuilder {
     /// C4b's closures).
     #[must_use]
     pub fn handler<H: BatchHandler>(self, handler: H) -> StreamsBuilder {
-        let _ = (handler, self.parent, self.options, self.store);
-        todo!("C4")
+        let Self {
+            mut parent,
+            options,
+            store,
+        } = self;
+        parent.registrations.push(Registration {
+            options,
+            store,
+            runner: Arc::new(HandlerRunner::new(handler)),
+        });
+        parent
     }
 }
 
@@ -224,44 +240,66 @@ impl ConsumerBuilder {
 /// `ShutdownTimeoutSeconds`), positions are flushed, ownership is released. Dropping it without
 /// shutdown cancels everything at once (claims then lapse at their TTL).
 pub struct StreamsHost {
-    _private: (),
+    conn: Connection,
+    consumers: Vec<Arc<ConsumerState>>,
+    /// Cancelled to stop the host (shutdown, drop, or a consumer's fatal fault).
+    stop: CancellationToken,
+    /// The first fatal fault, if any.
+    fault: Arc<Mutex<Option<Fault>>>,
+    /// `true` once the host task finished its orderly shutdown.
+    done: watch::Receiver<bool>,
+}
+
+impl std::fmt::Debug for StreamsHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamsHost")
+            .field("consumers", &self.consumers.len())
+            .field("running", &self.is_running())
+            .finish_non_exhaustive()
+    }
 }
 
 impl StreamsHost {
     /// The connection the host runs on.
     #[must_use]
     pub fn connection(&self) -> &Connection {
-        todo!("C4")
+        &self.conn
     }
 
     /// How many consumers this host runs.
     #[must_use]
     pub fn consumers(&self) -> u32 {
-        todo!("C4")
+        u32::try_from(self.consumers.len()).unwrap_or(u32::MAX)
     }
 
-    /// How many consumers are up (started and not failed); for [`StreamHealth::check`](crate::admin::health::StreamHealth::check).
+    /// How many consumers are up (started and not stopped or failed); for
+    /// [`StreamHealth::check`].
     #[must_use]
     pub fn consumers_started(&self) -> u32 {
-        todo!("C4")
+        let up = self.consumers.iter().filter(|c| c.is_started()).count();
+        u32::try_from(up).unwrap_or(u32::MAX)
     }
 
     /// Whether the host is running: not shut down and not failed.
     #[must_use]
     pub fn is_running(&self) -> bool {
-        todo!("C4")
+        !self.stop.is_cancelled()
     }
 
-    /// The partitions the consumer `(topic, consumer)` is reading right now, ascending.
+    /// The partitions the consumer `(topic, consumer)` is reading right now, ascending (empty for
+    /// an unknown pair).
     #[must_use]
     pub fn owned_partitions(&self, topic: &str, consumer: &str) -> Vec<u32> {
-        let _ = (topic, consumer);
-        todo!("C4")
+        self.consumers
+            .iter()
+            .find(|c| c.topic() == topic && c.consumer() == consumer)
+            .map(|c| c.owned())
+            .unwrap_or_default()
     }
 
-    /// The readiness answer for this process (D2 `StreamHealth::check` with this host's counts).
+    /// The readiness answer for this process (D2 [`StreamHealth::check`] with this host's counts).
     pub async fn health(&self) -> StreamHealthReport {
-        todo!("C4")
+        StreamHealth::check(Some(&self.conn), self.consumers(), self.consumers_started()).await
     }
 
     /// Resolves when the host has stopped: `Ok` after [`StreamsHost::shutdown`], `Err` when a
@@ -270,17 +308,38 @@ impl StreamsHost {
     /// orchestrator restarts it (C# `StopApplication`).
     ///
     /// # Errors
-    /// The failure that stopped the host.
+    /// The failure that stopped the host: [`Error::Config`](crate::Error::Config) for a configuration error, otherwise
+    /// [`Error::Transport`](crate::Error::Transport) carrying the handler's or the reader's message.
     pub async fn closed(&self) -> Result<()> {
-        todo!("C4")
+        let mut done = self.done.clone();
+        // A closed channel means the host task is gone, which is also "stopped".
+        let _ = done.wait_for(|d| *d).await;
+        self.outcome()
     }
 
-    /// Graceful shutdown, in the C3 order: workers drain → final position flush → ownership
-    /// release → trimmer stop.
+    /// Graceful shutdown, in the C3 order: workers drain (within `ShutdownTimeoutSeconds`, then
+    /// their futures are dropped) → final position flush → ownership release → trimmer and lag
+    /// sampler stop.
     ///
     /// # Errors
     /// The failure that stopped the host, if a consumer had already failed it.
     pub async fn shutdown(self) -> Result<()> {
-        todo!("C4")
+        self.stop.cancel();
+        self.closed().await
+    }
+
+    fn outcome(&self) -> Result<()> {
+        match &*self.fault.lock().unwrap_or_else(PoisonError::into_inner) {
+            None => Ok(()),
+            Some(fault) => Err(fault.to_error()),
+        }
+    }
+}
+
+impl Drop for StreamsHost {
+    /// Starts the graceful shutdown in the background (if the runtime is still alive); it is not
+    /// awaited. Call [`StreamsHost::shutdown`] to wait for it.
+    fn drop(&mut self) {
+        self.stop.cancel();
     }
 }
