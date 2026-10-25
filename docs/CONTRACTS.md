@@ -374,6 +374,28 @@ pub struct NullPositionStore;                     // complete
 - **B1**: `admin/meta.rs` (`ensure_topic_meta`), used by `StreamPublisher::new` and C4 startup.
 - **D1** / **D2**: `admin/stream_admin.rs` / `admin/health.rs`, new public API reviewed by the lead;
   D3 consumes it.
+- **D1 (landed)**, `admin::stream_admin`, public API for D3 and the G3 interop host:
+  - `StreamAdmin::new(conn: Connection, keys: Keys)` (cheap to clone). All methods are `async`, take
+    `topic` / `consumer` as `&str`, and return `Result`.
+  - `reset_position(topic, consumer, ResetTarget, &ResetOptions) -> Vec<(u32, StreamId)>` and
+    `preview_reset(..) -> ResetPreview` (same arguments, changes nothing). `ResetTarget` is
+    `Time(OffsetDateTime)` (id just before `<ms>-0`, so an entry on that millisecond is delivered),
+    `Id`, `Start` (`0-0`) or `End` (each tail; `Error::Config` if a stream does not exist).
+    `ResetOptions { partition: Option<u32>, topic: Option<TopicOptions>, max_count_scan, start_from_when_missing }`
+    (`Default`: all partitions, count/layout read from `m:{topic}`, cap `DEFAULT_MAX_COUNT_SCAN` =
+    250_000, `Beginning`). A partition past the known count, or an unknowable count for a
+    whole-topic reset, is `Error::Config`.
+  - A reset writes `<p>` = `<id>|<ADMIN_INSTANCE_ID>` and `__reset:<p>` = `<id>|<issuedUtc>` (one
+    `HSET`, via B4's `RedisPositionStore::reset_targets`, crate-private) plus the `:meta` fields.
+  - `ResetPreview { topic, consumer, requested_from, partitions: Vec<PartitionResetPreview> }` with
+    `total_to_reprocess()`, `total_to_skip()`, `any_trimmed_away()`, `describe()`;
+    `PartitionResetPreview { partition, current, target, entries, entries_exact (false = floor),
+    oldest, newest, length, direction: ResetDirection, trimmed_away, assumed_start }`.
+  - `get_ownership(topic, consumer, partitions /* 0 = from meta */) -> OwnershipMap` (`unowned`
+    filled, `contested` always empty), `read_topic_tail(topic, &TopicOptions) -> Vec<StreamId>`,
+    `read_topic_meta(topic) -> BTreeMap<String, String>`, `read_topic_layout(topic) -> TopicOptions`,
+    `StreamAdmin::reset_marker_field(p)`; consts `RESET_MARKER_PREFIX`, `DEFAULT_MAX_COUNT_SCAN`.
+  - A2's `ResetOnStart` refusal names `StreamAdmin::reset_position`; that is this method.
 - **B6**: everything in `diagnostics/` except the frozen name constants (`METER_NAME = "RedisEvents"`,
   `metrics::*`, `spans::*`), `traceparent` parsing/injection (used by B1 when
   `PublishOptions::trace_parent` is `None`, and by C2 per batch), and an `otel` feature.
