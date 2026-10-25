@@ -32,7 +32,6 @@ use redisevents_test_support::{RecordingHandler, require_redis, wait_until_async
 /// over the admin's, the second-writer check has not run, so the test nudges one message at a time until
 /// the stamp changes; then the partition is still consumed.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn a_reset_issued_from_another_process_rewinds_instead_of_standing_the_partition_down() {
     let redis = require_redis!();
     const TOTAL: u32 = 20;

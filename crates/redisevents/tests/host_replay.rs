@@ -60,7 +60,6 @@ fn replay_consumer(
 /// S9. A reset to a date reprocesses exactly the count the preview predicted, starting on the entry
 /// written at the requested millisecond.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn s9_reset_to_a_date_reprocesses_exactly_the_count_the_preview_predicted() {
     let redis = require_redis!();
     let topic = redis.new_topic("s9-host");
@@ -151,7 +150,6 @@ async fn s9_reset_to_a_date_reprocesses_exactly_the_count_the_preview_predicted(
 /// S10. A running consumer picks up an admin reset marker and rewinds on a flush tick, without a
 /// restart, and the marker is cleared once taken.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn s10_a_running_consumer_picks_up_the_reset_marker_and_rewinds_on_a_flush_tick() {
     let redis = require_redis!();
     let topic = redis.new_topic("s10");

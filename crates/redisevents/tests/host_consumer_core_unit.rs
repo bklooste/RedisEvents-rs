@@ -31,7 +31,6 @@ use redisevents_test_support::{RecordingHandler, require_redis, wait_until_async
 /// The loop over two partitions marks both as running and, once it has read to the tail, caught up:
 /// the host reports both owned, running, and not behind.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn the_loop_marks_its_partitions_running_and_caught_up() {
     let redis = require_redis!();
     let topic = redis.new_topic("loop-running");
@@ -75,7 +74,6 @@ async fn the_loop_marks_its_partitions_running_and_caught_up() {
 /// A `Sync*` persist mode needs a real flush: a host given a position store that discards writes is
 /// refused at startup, not allowed to run and lose positions.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn sync_persist_mode_without_a_real_flush_is_refused_at_startup() {
     let redis = require_redis!();
     let topic = redis.new_topic("sync-refused");

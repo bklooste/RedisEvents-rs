@@ -35,7 +35,6 @@ use redisevents_test_support::{RecordingHandler, require_redis, wait_until};
 /// S4. Ten thousand messages published under one partition key are handed to the handler in publish
 /// order, with nothing lost, duplicated or reordered.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn s4_ten_thousand_messages_on_one_partition_key_arrive_in_publish_order() {
     let redis = require_redis!();
     const TOTAL: u32 = 10_000;
@@ -100,7 +99,6 @@ async fn s4_ten_thousand_messages_on_one_partition_key_arrive_in_publish_order()
 /// instances that split the partitions 0-3 / 4-7: every message is delivered exactly once, no partition
 /// is consumed by both instances, and each key's messages stay in publish order.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn s5_eighty_thousand_messages_across_eight_partitions_are_delivered_exactly_once_in_key_order()
  {
     let redis = require_redis!();
@@ -204,7 +202,6 @@ async fn s5_eighty_thousand_messages_across_eight_partitions_are_delivered_exact
 /// S7. Consume 5 000, stop, publish 5 000 more, restart: the second run sees the new messages and at
 /// most one flush interval's worth of the old ones.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn s7_a_restarted_consumer_resumes_after_its_stored_position_rather_than_replaying() {
     let redis = require_redis!();
     const FIRST: u32 = 5_000;
@@ -301,7 +298,6 @@ async fn s7_a_restarted_consumer_resumes_after_its_stored_position_rather_than_r
 /// S8. `Persist = None` with `StartFrom = Now` skips the backlog and everything published while the
 /// consumer was down, and never writes a position hash.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn s8_persist_none_with_start_from_now_skips_the_backlog_and_survives_a_restart() {
     let redis = require_redis!();
     const BACKLOG: u32 = 1_000;
@@ -401,7 +397,6 @@ async fn s8_persist_none_with_start_from_now_skips_the_backlog_and_survives_a_re
 
 /// S11. A slow handler bounds in-flight messages and leaves the backlog in Redis.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn s11_a_slow_handler_bounds_in_flight_messages_and_leaves_the_backlog_in_redis() {
     let redis = require_redis!();
     const TOTAL: u32 = 200_000;

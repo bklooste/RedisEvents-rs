@@ -156,6 +156,8 @@ pub async fn start_host(
 ) -> StreamsHost {
     Streams::builder(redis.connect().await)
         .keys(redis.keys())
+        // Trim = None is refused in Production; the C# test host runs as Development.
+        .environment("Development")
         .topic_options(topic, topic_options)
         .topic(topic)
         .consumer(consumer)

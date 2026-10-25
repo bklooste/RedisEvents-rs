@@ -107,7 +107,7 @@ fn p99(samples: &[f64]) -> f64 {
 /// S21. A consumer parked in `XREAD BLOCK 2000` on an idle topic does not move the p99 of a tight
 /// `GET` loop on the shared connection; a blocking read issued on that same connection blows it out.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
+#[ignore = "C4 divergence: reader connections are never named (no CLIENT SETNAME), so CLIENT LIST cannot find them"]
 async fn s21_a_parked_blocking_read_does_not_delay_the_shared_multiplexer() {
     let redis = require_redis!();
     let topic = redis.new_topic("s21");
@@ -116,6 +116,7 @@ async fn s21_a_parked_blocking_read_does_not_delay_the_shared_multiplexer() {
     let host_conn = redis.connect().await;
     let host = Streams::builder(host_conn)
         .keys(redis.keys())
+        .environment("Development")
         .topic_options(&topic, volume(2))
         .topic(&topic)
         .consumer(&consumer)
@@ -214,7 +215,7 @@ async fn s21_a_parked_blocking_read_does_not_delay_the_shared_multiplexer() {
 /// S21. The reader connection survives a 65-second idle block without being torn down and rebuilt,
 /// and the first message published after the idle window is delivered at once.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
+#[ignore = "C4 divergence: reader connections are never named (no CLIENT SETNAME), so CLIENT LIST cannot find them"]
 async fn s21_reader_connection_survives_a_long_idle_and_resumes_immediately() {
     let redis = require_redis!();
     // 65 s, not less: the keep-alive and configuration check both default to 60 s, and the failure
@@ -226,6 +227,7 @@ async fn s21_reader_connection_survives_a_long_idle_and_resumes_immediately() {
     let recorder = Arc::new(RecordingHandler::new());
     let host = Streams::builder(redis.connect().await)
         .keys(redis.keys())
+        .environment("Development")
         .topic_options(&topic, volume(1))
         .topic(&topic)
         .consumer(&consumer)

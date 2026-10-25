@@ -47,7 +47,6 @@ fn bodies_of(batch: &[StreamMsg]) -> Vec<String> {
 
 /// S12. A poison message is advanced past and never retried: the handler owns retry, not the library.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn s12_a_poison_message_is_logged_once_advanced_past_and_never_retried() {
     let redis = require_redis!();
     let topic = redis.new_topic("s12");
@@ -114,7 +113,7 @@ async fn s12_a_poison_message_is_logged_once_advanced_past_and_never_retried() {
 /// S12b. A `Block` error blocks its partition, the sibling keeps going, health degrades and then fails
 /// readiness, and the partition recovers and resumes once the downstream is back.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
+#[ignore = "known bug (b): health never reports Blocked"]
 async fn s12b_a_custom_dont_ignore_exception_blocks_its_partition_and_recovers() {
     let redis = require_redis!();
     let topic = redis.new_topic("s12b");
@@ -262,7 +261,7 @@ async fn s12b_a_custom_dont_ignore_exception_blocks_its_partition_and_recovers()
 
 /// S13. `StopPartition` stands one partition down and leaves the others running.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
+#[ignore = "C4 divergence: stopped partition reports Healthy, C# reports Degraded"]
 async fn s13_stop_partition_stands_one_partition_down_and_leaves_the_others_running() {
     let redis = require_redis!();
     let topic = redis.new_topic("s13");
@@ -360,7 +359,7 @@ async fn s13_stop_partition_stands_one_partition_down_and_leaves_the_others_runn
 
 /// S14. `ErrorPolicy::Fail` faults the host and does not advance past the batch it failed on.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
+#[ignore = "C4 divergence: health after Fail says consumers not started, not stopped (C# says stopped)"]
 async fn s14_error_policy_fail_faults_the_host_and_does_not_advance() {
     let redis = require_redis!();
     let topic = redis.new_topic("s14");

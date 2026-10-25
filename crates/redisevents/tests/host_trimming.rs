@@ -68,7 +68,6 @@ async fn s15_inline_approximate_trim_bounds_the_stream_at_maxlen() {
 /// S15. A background trimmer started by the generic host (a publish-only host, no consumers) applies
 /// the topic's retention window to a stream of hour-old entries.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn s15_background_trimmer_runs_when_the_generic_host_starts_it() {
     let redis = require_redis!();
     let topic = redis.new_topic("s15-host");
@@ -103,7 +102,6 @@ async fn s15_background_trimmer_runs_when_the_generic_host_starts_it() {
 /// retrying the same batch, and handles nothing past it. (The clamp release itself is not ported, see
 /// the module docs.)
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn s15b_clamp_release_frees_memory_when_every_entry_is_newer_than_the_cutoff() {
     let redis = require_redis!();
     const BLOCK_AT: u32 = 10;

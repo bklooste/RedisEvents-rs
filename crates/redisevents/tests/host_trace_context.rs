@@ -166,28 +166,24 @@ async fn the_correlation_id_reaches_the_handler(backpressure: bool) {
 
 /// S21e (inline). See [`each_message_carries_its_producer_trace_parent`].
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn s21e_a_single_message_span_parents_off_the_producer_that_published_it_inline() {
     each_message_carries_its_producer_trace_parent(false).await;
 }
 
 /// S21e (backpressure). See [`each_message_carries_its_producer_trace_parent`].
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn s21e_a_single_message_span_parents_off_the_producer_that_published_it_backpressure() {
     each_message_carries_its_producer_trace_parent(true).await;
 }
 
 /// S21e (inline). See [`the_correlation_id_reaches_the_handler`].
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn s21e_the_correlation_id_reaches_the_handler_and_the_log_scope_inline() {
     the_correlation_id_reaches_the_handler(false).await;
 }
 
 /// S21e (backpressure). See [`the_correlation_id_reaches_the_handler`].
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn s21e_the_correlation_id_reaches_the_handler_and_the_log_scope_backpressure() {
     the_correlation_id_reaches_the_handler(true).await;
 }

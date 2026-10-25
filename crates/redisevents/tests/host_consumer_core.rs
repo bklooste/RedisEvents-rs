@@ -54,7 +54,6 @@ fn fail_on(
 /// S14b. `ErrorPolicy::Fail` on a multi-partition consumer stops the host, even when the fault comes
 /// from a partition other than the first.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn s14b_error_policy_fail_on_a_multi_partition_consumer_stops_the_application() {
     let redis = require_redis!();
     let topic = redis.new_topic("s14b");
@@ -100,7 +99,6 @@ async fn s14b_error_policy_fail_on_a_multi_partition_consumer_stops_the_applicat
 /// S14c. The same, with `CoLocatePartitions = false`, where the fault arrives from a per-partition
 /// worker rather than the shared group.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn s14c_error_policy_fail_stops_the_application_on_the_non_colocated_path() {
     let redis = require_redis!();
     let topic = redis.new_topic("s14c");
@@ -147,7 +145,6 @@ async fn s14c_error_policy_fail_stops_the_application_on_the_non_colocated_path(
 /// A policy other than `Fail` never stops the application: `StopPartition` stands one partition down
 /// and the host keeps serving.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn stop_partition_does_not_stop_the_application() {
     let redis = require_redis!();
     let topic = redis.new_topic("stop-partition");
@@ -200,7 +197,6 @@ async fn stop_partition_does_not_stop_the_application() {
 /// On the non-co-located path a stood-down partition ends its readers, so shutdown does not wait out
 /// `ShutdownTimeoutSeconds` for it.
 #[tokio::test]
-#[ignore = "needs C4 implementation"]
 async fn stop_partition_on_the_non_colocated_path_stops_the_reader_and_drains_fast() {
     let redis = require_redis!();
     let topic = redis.new_topic("stop-fast");
