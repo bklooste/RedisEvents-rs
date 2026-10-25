@@ -52,7 +52,7 @@ use crate::wire::{StreamMsg, TypedMsg};
 
 /// Handles one message at a time (C# `IMessageHandler`).
 pub trait MessageHandler: Send + Sync + 'static {
-    /// Handles `msg`. See [`HandleError`](super::HandleError) for what an error does.
+    /// Handles `msg`. See `HandleError` for what an error does.
     fn handle(
         &self,
         msg: &StreamMsg,

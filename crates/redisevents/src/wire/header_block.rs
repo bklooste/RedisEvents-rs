@@ -47,7 +47,7 @@ impl HeaderBlock {
     /// Packs `headers` in order.
     ///
     /// # Errors
-    /// [`Error::InvalidArgument`](crate::Error::InvalidArgument) when there are more than
+    /// `Error::InvalidArgument` when there are more than
     /// [`HeaderBlock::MAX_COUNT`] headers or the packed form would exceed
     /// [`HeaderBlock::MAX_BYTES`]. Never truncates.
     pub fn pack<K: AsRef<str>, V: AsRef<str>>(headers: &[(K, V)]) -> Result<Self> {
@@ -97,7 +97,7 @@ impl HeaderBlock {
     /// The value of the first header whose key equals `key` byte for byte.
     ///
     /// # Errors
-    /// [`Error::Transport`](crate::Error::Transport) when the block is malformed up to the match.
+    /// `Error::Transport` when the block is malformed up to the match.
     pub fn get_bytes(&self, key: &[u8]) -> Result<Option<&[u8]>> {
         let data: &[u8] = &self.packed;
         let mut at = 0;
@@ -133,7 +133,7 @@ impl HeaderBlock {
     /// The number of headers.
     ///
     /// # Errors
-    /// [`Error::Transport`](crate::Error::Transport) when the block is malformed.
+    /// `Error::Transport` when the block is malformed.
     pub fn count(&self) -> Result<usize> {
         self.iter().try_fold(0, |n, h| h.map(|_| n + 1))
     }
@@ -141,7 +141,7 @@ impl HeaderBlock {
     /// The headers as owned `(key, value)` pairs, in order, duplicates kept.
     ///
     /// # Errors
-    /// [`Error::Transport`](crate::Error::Transport) when the block is malformed.
+    /// `Error::Transport` when the block is malformed.
     pub fn to_vec(&self) -> Result<Vec<(String, String)>> {
         self.iter()
             .map(|h| h.map(|h| (h.key().into_owned(), h.value().into_owned())))

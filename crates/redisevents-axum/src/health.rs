@@ -1,6 +1,6 @@
 //! The stream readiness endpoint: a port of C# `RedisEvents.HealthChecks.StreamsHealthCheck`.
 //!
-//! The rules live in [`StreamHealth`](redisevents::admin::health::StreamHealth); this module only
+//! The rules live in `StreamHealth`; this module only
 //! maps the report to an HTTP answer, as the C# check maps its report to a `HealthCheckResult`.
 //! Status mapping, as ASP.NET's `MapHealthChecks` defaults: Healthy 200, Degraded 200, Unhealthy
 //! 503.

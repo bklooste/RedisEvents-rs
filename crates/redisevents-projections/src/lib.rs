@@ -39,6 +39,54 @@
 //! properties read as defaults). Types shared with C# normally need
 //! `#[serde(rename_all = "PascalCase")]`; per-type naming is just serde attributes on the type.
 //!
+//! # Example
+//!
+//! A projection that counts orders, run by a consumer. The `EventTypeRegistry` is the only place
+//! wire strings appear; the Rust type name is never used on the wire.
+//!
+//! ```no_run
+//! use std::sync::Arc;
+//!
+//! use redisevents::consumer::{HandleResult, PartitionContext, Streams};
+//! use redisevents::Connection;
+//! use redisevents_projections::{EventMeta, EventTypeRegistry, Projection, Projector};
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Serialize, Deserialize)]
+//! #[serde(rename_all = "PascalCase")]
+//! struct OrderPlaced {
+//!     order_id: String,
+//! }
+//!
+//! struct PrintOrders;
+//!
+//! impl Projection<OrderPlaced> for PrintOrders {
+//!     async fn handle(
+//!         &self,
+//!         event: &OrderPlaced,
+//!         _meta: &EventMeta,
+//!         _ctx: &PartitionContext,
+//!     ) -> HandleResult {
+//!         println!("placed {}", event.order_id);
+//!         Ok(())
+//!     }
+//! }
+//!
+//! async fn run() -> redisevents::Result<()> {
+//!     let registry = EventTypeRegistry::new().register_json::<OrderPlaced>("Shop.OrderPlaced")?;
+//!     let projector = Projector::builder("orders", registry)
+//!         .projection::<OrderPlaced, _>(Arc::new(PrintOrders))
+//!         .build()?;
+//!     let conn = Connection::connect("redis://redis-db.infra:6379").await?;
+//!     let host = Streams::builder(conn)
+//!         .topic("orders")
+//!         .handler(projector)
+//!         .spawn()
+//!         .await?;
+//!     host.shutdown().await
+//! }
+//! ```
+//!
 //! [`Config`]: redisevents::Error::Config
 //! [`Json`]: redisevents::Json
 

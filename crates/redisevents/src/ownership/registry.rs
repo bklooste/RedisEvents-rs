@@ -4,19 +4,19 @@
 //!
 //! Port of C# `OwnershipRegistry`. The interface C3/C4 consume (see `CONTRACTS.md` §5, B5):
 //!
-//! - [`OwnershipRegistry::new`] validates the options (errors are [`Error::Config`]).
-//! - [`OwnershipRegistry::start`] probes `HEXPIRE` (refusing to run without it), claims once and
+//! - `OwnershipRegistry::new` validates the options (errors are `Error::Config`).
+//! - `OwnershipRegistry::start` probes `HEXPIRE` (refusing to run without it), claims once and
 //!   spawns the renew loop. A failed first claim is logged, not returned, as in C#.
-//! - [`OwnershipRegistry::subscribe`] / [`OwnershipRegistry::held`]: the partitions this instance
+//! - `OwnershipRegistry::subscribe` / `OwnershipRegistry::held`: the partitions this instance
 //!   holds, as a `tokio::sync::watch` of a sorted `Arc<[u32]>`. In Lease mode the value changes the
 //!   moment a lease cycle returns a different set (before anything else in that cycle), so a worker
 //!   that lost its partition mid-batch sees `changed()` fire within one renew interval. In Static
 //!   mode it is the pre-assigned set and never changes.
-//! - [`OwnershipRegistry::stop`] stops the loop (letting an in-flight cycle finish, so the release
+//! - `OwnershipRegistry::stop` stops the loop (letting an in-flight cycle finish, so the release
 //!   below covers everything claimed) and runs the compare-and-delete release. It must be awaited
 //!   **before** the [`Connection`] goes away; dropping the registry only cancels the loop and leaves
 //!   the claims to lapse at the TTL (what a `SIGKILL` leaves).
-//! - [`OwnershipRegistry::dispose`] = `stop` + clearing the metrics and the process-wide snapshot.
+//! - `OwnershipRegistry::dispose` = `stop` + clearing the metrics and the process-wide snapshot.
 
 // C3/C4 are the callers; until they land only the tests use this module.
 #![cfg_attr(not(test), allow(dead_code))]

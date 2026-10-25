@@ -4,7 +4,7 @@
 //! - **Reset** a consumer's positions to a time, an id, the start or the end, for one partition or
 //!   all ([`StreamAdmin::reset_position`]), and **preview** what that would do first
 //!   ([`StreamAdmin::preview_reset`]). A reset writes the position under
-//!   [`ADMIN_INSTANCE_ID`](crate::positions::ADMIN_INSTANCE_ID) together with a
+//!   `ADMIN_INSTANCE_ID` together with a
 //!   `__reset:<p>` = `<targetId>|<issuedUtc>` marker (`WIRE.md` §7), the same bytes as C#, so a running
 //!   consumer of either language rewinds on its next flush and a stopped one applies the marker at
 //!   startup. Handlers must be idempotent: entries after the target are delivered again.
