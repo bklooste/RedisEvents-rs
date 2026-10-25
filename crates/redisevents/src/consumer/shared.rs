@@ -140,6 +140,28 @@ impl ResetSignal {
         Some(marker)
     }
 
+    /// Flusher: [`try_clear_taken`](Self::try_clear_taken), but only while the slot is still taken
+    /// for exactly `marker` (the one whose field was just deleted). A reset re-requested and taken
+    /// again in between keeps its slot, so its own marker is deleted before the slot clears.
+    pub(crate) fn clear_taken_if(&self, partition: u32, marker: ResetMarker) -> bool {
+        let Some(mut slot) = self.slot(partition) else {
+            return false;
+        };
+        if *slot != Slot::Taken(marker) {
+            return false;
+        }
+        *slot = Slot::Empty;
+        true
+    }
+
+    /// The marker `partition`'s reset was taken for, if it waits for its field to be deleted.
+    pub(crate) fn taken(&self, partition: u32) -> Option<ResetMarker> {
+        match *self.slot(partition)? {
+            Slot::Taken(marker) => Some(marker),
+            _ => None,
+        }
+    }
+
     /// Host: `partition` is no longer read here. Drops a pending reset (its marker stays in Redis)
     /// and a taken one (the flusher no longer clears it; the next owner's cold start applies it again,
     /// which only replays).
@@ -186,6 +208,7 @@ pub(crate) trait PositionSink: Send + Sync + 'static {
 
     /// Persists everything recorded so far and resolves when the write has landed.
     fn flush(&self) -> BoxFuture<'_, Result<()>>;
+
 }
 
 /// A sink that keeps nothing: `PersistMode::None`, work-queue mode, and tests.

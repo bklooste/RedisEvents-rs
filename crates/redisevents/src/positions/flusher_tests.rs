@@ -1382,3 +1382,103 @@ async fn a_reset_issued_from_another_process_rewinds_instead_of_standing_the_par
     flusher.stop().await;
     own.dispose().await;
 }
+
+#[tokio::test]
+async fn reset_live_taken_marker_is_cleared_by_the_final_flush_at_stop() {
+    // The host stops after a read loop took a reset but before a tick deleted `__reset:<p>`. The
+    // final flush must delete it (and only then write the post-rewind position): a marker left
+    // next to a newer position would rewind the next start and replay everything a second time.
+    let redis = redisevents_test_support::require_redis!();
+    let rig = Rig::new(redis, "reset-stop").await;
+    let mine = Uuid::new_v4();
+    let target = id(10, 0);
+
+    let signal = Arc::new(ResetSignal::new(1));
+    let contested = contested_log();
+    // No `start`: no tick ever runs, so only the final flush can clear the marker.
+    let flusher = rig.flusher(1, mine, &contested, |o| {
+        o.resets = Some(Arc::clone(&signal));
+    });
+    flusher.record(0, id(500, 0));
+    flusher.flush_now().await.unwrap();
+    rig.store(mine)
+        .reset(&rig.topic, &rig.consumer, target, Some(0))
+        .await
+        .unwrap();
+    flusher.poll_resets().await;
+    assert!(signal.try_take(0).is_some());
+    flusher.rewind(0);
+    flusher.record(0, id(11, 0));
+
+    flusher.stop().await;
+
+    assert_eq!(
+        hget(&rig.conn, &rig.positions_key(), &reset_marker::field(0)).await,
+        None,
+        "the final flush deletes the taken marker"
+    );
+    assert!(!signal.is_taken(0));
+    assert_eq!(flusher.resets_applied(), 1);
+    let stored = rig.stored().await;
+    assert_eq!(
+        stored[&0].id,
+        id(11, 0),
+        "the post-rewind position is written"
+    );
+    assert_eq!(stored[&0].instance_id, mine);
+
+    // The next life polls nothing: the reset is not applied a second time.
+    let next_signal = Arc::new(ResetSignal::new(1));
+    let next = rig.flusher(1, mine, &contested, |o| {
+        o.resets = Some(Arc::clone(&next_signal));
+    });
+    next.poll_resets().await;
+    assert!(!next_signal.has_pending(), "no second rewind on restart");
+}
+
+#[tokio::test]
+async fn reset_live_taken_partition_is_not_written_while_its_marker_is_still_stored() {
+    // Crash ordering: a post-rewind position must never land while `__reset:<p>` is still in
+    // Redis. With the delete failing to find a known marker value, the flush holds it back.
+    let redis = redisevents_test_support::require_redis!();
+    let rig = Rig::new(redis, "reset-order").await;
+    let mine = Uuid::new_v4();
+    let target = id(10, 0);
+
+    let signal = Arc::new(ResetSignal::new(1));
+    let contested = contested_log();
+    let flusher = rig.flusher(1, mine, &contested, |o| {
+        o.resets = Some(Arc::clone(&signal));
+    });
+    rig.store(mine)
+        .reset(&rig.topic, &rig.consumer, target, Some(0))
+        .await
+        .unwrap();
+    // Requested directly, not via a poll: the flusher never read the marker's value, so it cannot
+    // compare-and-delete it.
+    signal.request(ResetMarker {
+        partition: 0,
+        target,
+        issued_utc: time::OffsetDateTime::now_utc(),
+    });
+    assert!(signal.try_take(0).is_some());
+    flusher.rewind(0);
+    flusher.record(0, id(11, 0));
+    flusher.flush_now().await.unwrap();
+
+    assert!(
+        hget(&rig.conn, &rig.positions_key(), &reset_marker::field(0))
+            .await
+            .is_some()
+    );
+    assert_eq!(
+        rig.stored().await[&0].id,
+        target,
+        "no newer position next to a live marker"
+    );
+    assert_eq!(
+        flusher.dirty_count(),
+        1,
+        "kept for the flush after the delete"
+    );
+}
