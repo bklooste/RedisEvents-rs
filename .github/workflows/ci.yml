@@ -132,5 +132,7 @@ jobs:
           dotnet-version: 10.0.x
       - name: Build the Rust views image
         run: docker build -f samples/inventory/inventory-views/Dockerfile -t redisevents-inventory-views:local .
+      - name: Build the Rust command image
+        run: docker build -f samples/inventory/inventory-command/Dockerfile -t redisevents-inventory-command:local .
       - name: Run the matrix
         run: CSHARP_SAMPLE_DIR=$PWD/csharp-sample samples/inventory/matrix.sh
