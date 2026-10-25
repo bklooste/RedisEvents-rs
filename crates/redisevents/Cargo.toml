@@ -28,6 +28,7 @@ xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 [dev-dependencies]
 base64 = "0.23.1"
 proptest = "1.12.0"
+redisevents-test-support = { path = "../redisevents-test-support" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
 
 [features]

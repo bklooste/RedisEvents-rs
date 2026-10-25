@@ -45,15 +45,30 @@ impl PositionRecord {
     /// `<id>|<instance_id>` with the GUID lowercase hyphenated (.NET `"D"`).
     #[must_use]
     pub fn format(&self) -> String {
-        todo!("B4")
+        format!(
+            "{}{}{}",
+            self.id,
+            Self::SEPARATOR,
+            self.instance_id.hyphenated()
+        )
     }
 
     /// Parses a stored value; a value with no `|` is a bare id, and an instance part that is not a
     /// `"D"` GUID reads as nil (as C#). `None` when the id part does not parse.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        let _ = value;
-        todo!("B4")
+        let (id_text, instance_text) = match value.split_once(Self::SEPARATOR) {
+            Some((id, instance)) => (id, Some(instance)),
+            None => (value, None),
+        };
+        let id = StreamId::parse(id_text).ok()?;
+        // Only the canonical 36-character `"D"` form counts; `Uuid::try_parse` also takes the
+        // braced, simple and URN forms, which .NET's `Guid.TryParseExact("D")` rejects.
+        let instance_id = instance_text
+            .filter(|text| text.len() == 36)
+            .and_then(|text| Uuid::try_parse(text).ok())
+            .unwrap_or(Uuid::nil());
+        Some(Self { id, instance_id })
     }
 }
 

@@ -1699,6 +1699,7 @@ dependencies = [
  "opentelemetry",
  "proptest",
  "redis",
+ "redisevents-test-support",
  "serde",
  "serde_json",
  "thiserror",
