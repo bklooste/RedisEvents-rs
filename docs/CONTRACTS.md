@@ -608,6 +608,91 @@ let projector = Projector::builder(TOPIC, registry)
 The full, tested version is `crates/redisevents-projections/tests/inventory.rs`. Tests use D4's
 `StreamTestHarness::deliver_batch`.
 
+### E3 event sourcing (`redisevents-eventsourcing`, public)
+Port of `RedisEvents.EventSourcing`. Wire-compatible with C#: state stream
+`<prefix>{<topic>}:state:es:<Aggregate>:<id>` (entries `b` + `t` only), version = its `XLEN`, every
+event also published to the topic with the aggregate id as partition key. Tested both ways against
+the C# golden bodies (`tests/inventory.rs`).
+
+**Design.** `Aggregate` is implemented on a **marker type** that names a `State`, an `Event`, the
+wire `NAME` and a pure `apply(&mut State, &Event)`. `AggregateRoot<A>` is the instance: id, version,
+state, uncommitted events (C# `AggregateRoot`: `raise` = apply + record, `uncommitted_changes`,
+`mark_changes_as_committed`, `load_from_history`, `version`), and it **derefs to the state**. Why: a
+pure decide/apply domain such as `inventory_domain::InventoryItem` needs no change and no wrapper
+struct; the marker is local to the service crate, so the orphan rule is no obstacle (a trait impl
+on `InventoryItem` from a third crate would be); id and version live outside the domain state, as
+the repository owns them; C#'s `On<T>` handler table is replaced by one total `apply`.
+```rust
+pub trait Aggregate: Send + Sync + 'static {
+    type State: Default + Send + Sync + 'static;  type Event: Send + Sync + 'static;
+    const NAME: &'static str;
+    fn apply(state: &mut Self::State, event: &Self::Event);
+    // default: registry.encode(event). Override for an enum Event over several wire types.
+    fn encode(registry: &EventTypeRegistry, event: &Self::Event) -> Result<(String, Bytes)>;
+}
+AggregateRoot::<A>::new(id)? ; .id() .version() -> u64 .state() .raise(e) .uncommitted_changes() ...
+
+pub trait EventRepository {   // load / save / save_unchecked (C# IEventRepository)
+    async fn load<A>(&self, id) -> Result<Option<AggregateRoot<A>>>;     // pages of 1000, registry decode
+    async fn save<A>(&self, &mut AggregateRoot<A>, expected_version: Option<u64>, &PublishOptions) -> Result<u64>;
+    async fn save_unchecked<A>(&self, &mut AggregateRoot<A>, &PublishOptions) -> Result<u64>;
+}
+RedisEventRepository::new(StreamStore, EventTypeRegistry /* or Arc */)   // generic over `EventStore` for fakes
+```
+- `save` with nothing uncommitted writes nothing and returns the version. A lost check is
+  `Error::Concurrency(ConcurrencyError { aggregate_name, id, expected_version })` (C#
+  `ConcurrencyException`); nothing was written and the root keeps its uncommitted events.
+- `Error` = `Concurrency | Store(redisevents::Error) | History(unknown or undecodable wire type in
+  an aggregate's own history: never skipped) | InvalidOperation | InvalidArgument`.
+- Runners (C# `ExecuteAsync`, `CachedAggregate.RunAsync`, `AggregateDecision`):
+```rust
+execute(&repo, id, &ExecuteOptions, async move |root: &mut AggregateRoot<A>| -> Result<AggregateDecision<T>, E>)
+    -> Result<CommandResult<T> /* {value, version} */, ExecuteError<E> /* Decide(E) | Repository(Error) */>
+CachedAggregate::<A>::new().with_expected_version(fn).run(&repo, id, &ExecuteOptions, async |root, from_cache| ..)
+    -> Result<T, ExecuteError<E>>        // &mut self: share via tokio::sync::Mutex; evict()
+ExecuteOptions::default().max_attempts(n) /*default 1*/ .concurrency_check(bool) /*false = save_unchecked*/
+    .publish_options(PublishOptions) .on_conflict(|attempt, ConcurrencyError| async {..})
+AggregateDecision::{Done(T), Refused(T) /* must raise nothing */, Redo /* reload, uncounted */}
+```
+  Nothing raised: no save. Retry only on `Concurrency`, up to `max_attempts` (0 is `InvalidArgument`);
+  `on_conflict` runs before each retry, not after the final loss. `ExecuteError::is_concurrency()`
+  is the 409 test. `Decide(E)` carries the domain error (400 in E5b) and saves nothing.
+- Spans (`tracing`; C# names in `otel.name`, `otel.kind=client`): `eventsourcing.save <Name>`
+  (`eventsourcing.aggregate`, `.aggregate_id`, `.expected_version`, `.version`, `.event_count`),
+  `eventsourcing.load <Name>` (`.found`, `.version`); a lost check sets `otel.status_code=ERROR` with a
+  "Concurrency conflict" description. Counters `eventsourcing.saves|save.conflicts|loads` on meter
+  `RedisEvents.EventSourcing` under feature `otel`; `diagnostics::{saves,save_conflicts,loads}_total()` always.
+- **Send gotcha.** The futures are `Send` (a handler can be `tokio::spawn`ed), but a closure that
+  *borrows* a local (`async |root| tick(root, n)`) trips rustc's "Send is not general enough";
+  write `async move |root| ..` when the closure captures anything.
+- **Not ported**: DI/builder registration (`AddEventSourcing`), benchmarks; `BindId` and the `On<T>`
+  handler table (see above); the C# `Id` override (the id is the root's).
+
+```rust
+// E5b command service: the pure InventoryItem on the abstraction.
+struct Inventory;                                   // marker, local to the service crate
+impl Aggregate for Inventory {
+    type State = InventoryItem;  type Event = InventoryEvent;  const NAME: &'static str = AGGREGATE_NAME; // "Inventory"
+    fn apply(s: &mut InventoryItem, e: &InventoryEvent) { s.apply(e) }
+    fn encode(_: &EventTypeRegistry, e: &InventoryEvent) -> Result<(String, Bytes)> {
+        Ok((e.wire_type().to_owned(), Bytes::from(e.encode())))
+    }
+}
+let registry = EventTypeRegistry::new()
+    .register_family::<InventoryEvent, _>(&[CREATED, RENAMED, CHECKED_IN, REMOVED, DEACTIVATED], InventoryEvent::decode)?;
+let repo = RedisEventRepository::new(StreamStore::new(conn, keys, TOPIC, topic_options)?, registry);
+
+// POST check-in: domain error -> 400, conflict -> 409 (max_attempts retries first), missing item -> 404.
+let out = execute(&repo, &id.to_string(), &ExecuteOptions::default().max_attempts(3),
+    async move |item: &mut AggregateRoot<Inventory>| {
+        if item.version() == 0 { return Ok(AggregateDecision::Refused(NotFound)); }
+        let e = item.check_in(count, price)?;       // &InventoryItem via Deref; DomainError via `?`
+        item.raise(e);
+        Ok::<_, DomainError>(AggregateDecision::Done(Ok))
+    }).await   // Err(ExecuteError::Decide(DomainError)) | Err(e) if e.is_concurrency()
+// create: item.raise(InventoryItem::create(id, &name)?)
+```
+
 ## 5. Positions, ownership, admin, diagnostics
 
 ```rust
