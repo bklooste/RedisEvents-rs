@@ -322,8 +322,37 @@ Owners:
   read discards its socket so the next read is not queued behind a parked `BLOCK`. Errors:
   `Error::Redis` (the reader reconnects on the next read; C2 owns the outage back-off) and
   `Error::Transport` for a malformed reply. `last` covers entries C2's type filter drops.
-- **C2** owns `worker.rs` and the `PerMessage` / `Typed` bodies. **C2 and C3 agree the reset hand-off
-  and read-cursor interface (both crate-private) through the lead on day one.**
+- **C2** owns `worker.rs`, `shared.rs` and the `PerMessage` / `Typed` bodies. **C2 handoff
+  (crate-private, `consumer::worker`)**, what C4 wires and C2t tests against:
+  ```rust
+  WorkerConfig { topic: Arc<str>, consumer: Arc<str>, filter: Option<Vec<String>>, on_error: ErrorPolicy,
+                 persist: PersistMode, channel_capacity: Option<usize> /* None = inline */ }
+  WorkerConfig::new(topic, consumer)                      // BestEffort, AsyncBatch, pooled(4), no filter
+  WorkerConfig::from_options(&ConsumerOptions, consumer)  // Backpressure.Enabled=false -> inline
+  PartitionSlot::new(partition: u32, stop: PartitionStop)
+  trait FetchSource: Send + 'static { async fn fetch(&mut self) -> Result<Vec<StreamBatch>>; fn seek(&mut self, u32, StreamId) -> bool }
+  impl FetchSource for Fetch                               // C1
+  Worker::new(WorkerConfig, Vec<PartitionSlot>, F: FetchSource, Arc<H: BatchHandler>,
+              Arc<dyn PositionSink>, Option<Arc<ResetSignal>>) -> Result<Worker<H, F>>
+  async fn Worker::run(self) -> Result<(), WorkerError>    // Send; Ok = every partition stopped
+  enum WorkerError { Handler { partition, error: BoxError } /* ErrorPolicy::Fail */, Fetch(Error) /* non-transient read */ }
+  TypeFilter::new(Option<&[String]>), matches(&str); block_delay(attempt) -> Duration; is_transient(&Error) -> bool
+  // #[cfg(test)] worker::testing: ScriptedFetch (Step::Batches / Step::Fail, then parks; FetchLog of seeks/reads),
+  //   RecordingSink (SinkEvent::Record/Rewind/Flush; failing_flushes(n)), msg(), batch(), unique(),
+  //   measurements(topic) -> Vec<Measurement::{Filtered, Consumed, Error, Batch}> (the MeterListener rig)
+  ```
+  Semantics: one `Worker` per read loop (one `Fetch`; a co-located group is one worker over all its
+  partitions). Pooled: a bounded channel (capacity in batches) + one processor task per partition;
+  a stopped partition is retired (the group reads on and discards for it). Inline: the loop calls the
+  handler before the next fetch; `StopPartition` in an inline group stops the whole loop (C#). The
+  type filter runs on decoded messages (C1 decodes); `streams.filtered` counts the drops, `last`
+  still checkpoints them. Fetch errors: `is_transient` (dropped/refused/timeout, LOADING, BUSY, …,
+  or a failed reconnect wrapped in `Transport`) are waited out on `BLOCK_BACKOFF` while the loop
+  keeps its cursor; anything else ends the worker with `WorkerError::Fetch`. A handler `Err` after
+  the partition's stop token fired is a shutdown (no log, metric or advance). `PerMessage` reports
+  progress through a task-local scope, so a block or a stop at message *i* records `..i`. The
+  worker does not clear per-partition gauges on exit (`instruments::clear_partition`): C4 does that
+  when a partition is released.
 - **C2↔C3 interface** (crate-private, `consumer/shared.rs`, owner C2, agreed with C3):
   ```rust
   // Reset hand-off (C# ResetSignal). One per consumer, indexed by partition 0..partition_count.
