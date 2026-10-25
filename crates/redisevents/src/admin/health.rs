@@ -1,2 +1,832 @@
 //! Health, lag and status. **Owner: D2** (port of `StreamHealth.cs`, `StreamLag.cs`,
-//! `StreamStatus.cs`, `StreamPartitionStatus.cs`).
+//! `StreamStatus.cs`, `StreamPartitionStatus.cs`; the host-neutral part of `StreamsHealthCheck.cs`).
+//!
+//! Read-only: every number here comes from in-process monitors, the ownership registry, and a
+//! `PING` (plus `XINFO STREAM` per partition, in the sampler). [`StreamHealth::check`] is the entry
+//! point for a health endpoint; `redisevents-axum` (D3) maps its [`StreamHealthStatus`] to HTTP.
+//!
+//! Monitors are created by the consumer host (C2/C4) through the crate-private registry in
+//! `monitor.rs`; this module only grades their snapshots.
+
+#[allow(
+    dead_code,
+    reason = "consumed by the consumer host (C2/C4) when it lands"
+)]
+pub(crate) mod monitor;
+#[cfg(test)]
+mod tests;
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::time::Duration;
+
+use crate::connection::Connection;
+use crate::ownership::registry::OwnershipRegistry;
+use crate::wire::StreamId;
+
+/// The verdict on stream consumption in this process (C# `StreamHealthStatus`).
+///
+/// Map it with a `match`, never a cast: the numeric order differs from other health vocabularies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum StreamHealthStatus {
+    /// Every partition is being read and nothing is past a threshold.
+    Healthy,
+    /// Something wants attention but a restart would not help, or would make it worse.
+    Degraded,
+    /// A partition is not being read and only a restart brings it back.
+    Unhealthy,
+}
+
+/// Which rule produced a [`StreamHealthReport`] or a [`StreamPartitionHealth`] (C# `StreamHealthRule`).
+///
+/// New members may be added; treat an unknown value as its [`StreamHealthStatus`] alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum StreamHealthRule {
+    /// No rule fired: Healthy.
+    #[default]
+    None,
+    /// Unhealthy: the shared Redis connection is down.
+    ConnectionDown,
+    /// Unhealthy: a partition has been blocked retrying past `unhealthy_block_seconds`.
+    BlockedTooLong,
+    /// Unhealthy: a partition whose stop escalates has been stopped past `unhealthy_stopped_seconds`
+    /// with entries waiting.
+    StoppedTooLong,
+    /// Unhealthy: a partition has sat behind the tail with a position that does not change for
+    /// `unhealthy_behind_seconds`.
+    BehindTail,
+    /// Unhealthy: consumers are registered but none has started.
+    NoConsumerStarted,
+    /// Unhealthy: every partition worker has stopped.
+    AllPartitionsStopped,
+    /// Degraded: no partition has started reading yet.
+    NotReadingYet,
+    /// Degraded: a partition is blocked retrying a `Block` error.
+    Blocked,
+    /// Degraded: a partition has stood down under an error policy.
+    Stopped,
+    /// Degraded: a partition's lag is past `unhealthy_lag_ms`.
+    Lagging,
+    /// Degraded: the ownership registry shows a gap or an overlap.
+    OwnershipDegraded,
+    /// Degraded: a caught-up consumer has received nothing past `degraded_silence_seconds`.
+    Silent,
+}
+
+/// The run state of a partition worker (C# `StreamPartitionRunState`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum StreamPartitionRunState {
+    /// Registered, has not yet fetched.
+    #[default]
+    Starting,
+    /// Reading.
+    Running,
+    /// Retrying a blocking failure.
+    Blocked,
+    /// Stood down.
+    Stopped,
+}
+
+/// The grade of one partition (C# `StreamPartitionHealth`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StreamPartitionHealth {
+    /// The status.
+    pub status: StreamHealthStatus,
+    /// The rule that fired.
+    pub rule: StreamHealthRule,
+}
+
+/// A point-in-time snapshot of one partition (C# `StreamPartitionStatus`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamPartitionStatus {
+    /// Topic.
+    pub topic: String,
+    /// Consumer name.
+    pub consumer: String,
+    /// Partition index.
+    pub partition: u32,
+    /// Run state.
+    pub state: StreamPartitionRunState,
+    /// Why it stopped, when stopped.
+    pub stop_reason: Option<String>,
+    /// The last entry processed by this instance (`0-0` before any).
+    pub last_processed: StreamId,
+    /// Whether the last sample found nothing behind.
+    pub is_caught_up: bool,
+    /// Age of the last processed entry, in milliseconds.
+    pub lag_ms: f64,
+    /// Entries between the position and the tail; `-1` when never sampled.
+    pub lag_entries: i64,
+    /// Time blocked, in milliseconds (`0` when not blocked).
+    pub blocked_ms: f64,
+    /// Time stopped, in milliseconds (`0` when not stopped).
+    pub stopped_ms: f64,
+    /// Threshold: lag above this (ms) is Degraded.
+    pub unhealthy_lag_ms: u32,
+    /// Threshold: blocked longer than this (s) is Unhealthy.
+    pub unhealthy_block_seconds: u32,
+    /// Threshold: stopped (escalating) longer than this (s) is Unhealthy.
+    pub unhealthy_stopped_seconds: u32,
+    /// Threshold: behind the tail, frozen this long (s), is Unhealthy; `0` = off.
+    pub unhealthy_behind_seconds: u32,
+    /// Threshold: caught up and silent this long (s) is Degraded; `0` = off.
+    pub degraded_silence_seconds: u32,
+    /// Whether a stop escalates to Unhealthy.
+    pub escalates: bool,
+    /// The position: the last observed id, or the start position before any.
+    pub position: StreamId,
+    /// Milliseconds since the position last changed.
+    pub position_unchanged_ms: f64,
+    /// The last sampled tail (`0-0` for an empty stream), `None` when never sampled.
+    pub tail_id: Option<StreamId>,
+    /// Milliseconds since the tail was last sampled; `-1` when never.
+    pub tail_sample_age_ms: f64,
+    /// Milliseconds since the tail last gained an entry; `-1` when never sampled.
+    pub tail_unchanged_ms: f64,
+    /// Whether the position is behind a fresh tail sample.
+    pub is_behind_tail: bool,
+    /// Milliseconds the partition has been behind the tail (`0` when not behind).
+    pub behind_ms: f64,
+}
+
+/// Process-level facts a grade depends on, beyond the partitions (C# `StreamHealthContext`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamHealthContext {
+    /// Set when the Redis connection is down: the reason.
+    pub connection_fault: Option<String>,
+    /// Consumers registered in this process.
+    pub consumers: u32,
+    /// Consumers that have started.
+    pub consumers_started: u32,
+    /// Whether the ownership registry shows a gap or an overlap.
+    pub ownership_degraded: bool,
+}
+
+/// A value in a report's [`StreamHealthReport::data`] (C# `object` values in the dictionary).
+#[derive(Debug, Clone, PartialEq)]
+pub enum HealthValue {
+    /// A count or an integral measurement.
+    Int(i64),
+    /// A fractional measurement.
+    Float(f64),
+    /// A flag.
+    Bool(bool),
+    /// A label.
+    Text(String),
+}
+
+/// A consumer that is caught up and receiving nothing (C# `StreamSilentConsumer`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamSilentConsumer {
+    /// Topic.
+    pub topic: String,
+    /// Consumer name.
+    pub consumer: String,
+    /// Partitions this process reads for it.
+    pub partitions: u32,
+    /// How long the shortest of them has not moved, in milliseconds.
+    pub silent_ms: f64,
+    /// The threshold it is graded against.
+    pub degraded_silence_seconds: u32,
+}
+
+/// The verdict on stream consumption in this process (C# `StreamHealthReport`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamHealthReport {
+    /// The status.
+    pub status: StreamHealthStatus,
+    /// The rule that fired.
+    pub rule: StreamHealthRule,
+    /// A human-readable explanation, naming the partition where there is one.
+    pub description: String,
+    /// Structured facts behind the verdict, keyed as the C# report keys them
+    /// (`consumers`, `partitions`, `partitionsBehind`, `worstLagMs`, ...).
+    pub data: BTreeMap<String, HealthValue>,
+    /// The partition the rule is about, when one is.
+    pub partition: Option<StreamPartitionStatus>,
+}
+
+/// Lag arithmetic and the stale-sample bound (C# `StreamLag`).
+pub struct StreamLag;
+
+impl StreamLag {
+    /// How often the sampler reads each stream (C# `DefaultSampleInterval`).
+    pub const DEFAULT_SAMPLE_INTERVAL: Duration = Duration::from_secs(15);
+    /// How often lag is republished (C# `DefaultPushInterval`).
+    pub const DEFAULT_PUSH_INTERVAL: Duration = Duration::from_secs(1);
+    /// A tail sample older than this no longer counts (four sample intervals, C# `TailStaleAfter`).
+    pub const TAIL_STALE_AFTER: Duration = Duration::from_secs(60);
+
+    /// Estimated entries between `processed` and the tail (C# `EstimateEntriesBehind`).
+    ///
+    /// `length` is `XLEN`, `first` and `last` are the first and last entries present (`0-0` when
+    /// empty), `last` for the interpolation is the last generated id. Interpolates by id time, so
+    /// it is an estimate: exact only when entries are evenly spread.
+    #[must_use]
+    pub fn estimate_entries_behind(
+        length: i64,
+        first: StreamId,
+        last: StreamId,
+        processed: StreamId,
+    ) -> i64 {
+        if length <= 0 || processed >= last {
+            return 0;
+        }
+        if processed < first {
+            // Our position predates the oldest entry still present: everything present is unread.
+            return length;
+        }
+        let span = i128::from(last.ms) - i128::from(first.ms);
+        if span <= 0 {
+            // Every entry landed in one millisecond: nothing to interpolate, and we know we are behind.
+            return length;
+        }
+        let behind_ms = i128::from(last.ms) - i128::from(processed.ms);
+        let behind = i64::try_from(i128::from(length) * behind_ms / span).unwrap_or(length);
+        // processed < last, so at least one entry, however the arithmetic rounds.
+        behind.clamp(1, length)
+    }
+}
+
+/// Snapshots of every partition in this process (C# `StreamStatus`).
+pub struct StreamStatus;
+
+impl StreamStatus {
+    /// `true` when any partition is being monitored.
+    #[must_use]
+    pub fn any() -> bool {
+        !monitor::all().is_empty()
+    }
+
+    /// One snapshot per monitored partition, in key order.
+    #[must_use]
+    pub fn partitions() -> Vec<StreamPartitionStatus> {
+        monitor::all().iter().map(|m| m.status()).collect()
+    }
+}
+
+impl StreamHealth {
+    /// Grades this process: reads the partitions, a `PING` on `connection` (when given), and the
+    /// ownership registry, then applies [`StreamHealth::evaluate`]. `consumers` and
+    /// `consumers_started` are the consumer host's counts; pass `0, 0` when there is none.
+    pub async fn check(
+        connection: Option<&Connection>,
+        consumers: u32,
+        consumers_started: u32,
+    ) -> StreamHealthReport {
+        let connection_fault = match connection {
+            Some(conn) => connection_fault(conn).await,
+            None => None,
+        };
+        let context = StreamHealthContext {
+            connection_fault,
+            consumers,
+            consumers_started,
+            ownership_degraded: OwnershipRegistry::any_degraded(),
+        };
+        Self::evaluate(&StreamStatus::partitions(), &context)
+    }
+}
+
+async fn connection_fault(connection: &Connection) -> Option<String> {
+    let mut conn = connection.shared();
+    let ping = redis::cmd("PING");
+    match tokio::time::timeout(
+        Duration::from_secs(1),
+        ping.query_async::<String>(&mut conn),
+    )
+    .await
+    {
+        Ok(Ok(_)) => None,
+        Ok(Err(error)) => Some(error.to_string()),
+        Err(_) => Some("PING timed out after 1s".to_owned()),
+    }
+}
+
+/// Grading rules (C# `StreamHealth`).
+pub struct StreamHealth;
+
+impl StreamHealth {
+    /// Grades a process from its partition snapshots and context (C# `StreamHealth.Evaluate`).
+    #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm per C# rule, in the C# order"
+    )]
+    pub fn evaluate(
+        partitions: &[StreamPartitionStatus],
+        context: &StreamHealthContext,
+    ) -> StreamHealthReport {
+        if context.consumers == 0 && partitions.is_empty() {
+            // A producer-only service, or one whose consumers are not registered here: nothing to
+            // report is not the same as something being wrong.
+            return StreamHealthReport {
+                status: StreamHealthStatus::Healthy,
+                rule: StreamHealthRule::None,
+                description: "Streams: no stream consumers are registered in this process."
+                    .to_owned(),
+                data: BTreeMap::new(),
+                partition: None,
+            };
+        }
+
+        let mut data = BTreeMap::new();
+        data.insert(
+            "consumers".to_owned(),
+            HealthValue::Int(i64::from(context.consumers)),
+        );
+        data.insert(
+            "partitions".to_owned(),
+            HealthValue::Int(to_i64(partitions.len())),
+        );
+        data.insert(
+            "consumersStarted".to_owned(),
+            HealthValue::Int(i64::from(context.consumers_started)),
+        );
+
+        let tally = Tally::of(partitions, &mut data);
+
+        if let Some(fault) = &context.connection_fault {
+            data.insert("connection".to_owned(), HealthValue::Text(fault.clone()));
+            return unhealthy(
+                StreamHealthRule::ConnectionDown,
+                format!(
+                    "Streams: the Redis connection is down ({fault}); nothing is being consumed."
+                ),
+                data,
+                None,
+            );
+        }
+
+        if let Some(wedged) = tally.blocked_too_long {
+            return unhealthy(
+                StreamHealthRule::BlockedTooLong,
+                format!(
+                    "Streams: partition {} has been blocked for {}s retrying a DontIgnoreException, past its UnhealthyBlockSeconds of {}. Its position has not advanced and its backlog is at risk of being trimmed.",
+                    describe(wedged),
+                    seconds(wedged.blocked_ms),
+                    wedged.unhealthy_block_seconds
+                ),
+                data,
+                Some(wedged),
+            );
+        }
+
+        if let Some(abandoned) = tally.stopped_too_long {
+            return unhealthy(
+                StreamHealthRule::StoppedTooLong,
+                format!(
+                    "Streams: partition {} stood down {}s ago ({}) and is {} entries behind a stream that is still being written, past its UnhealthyStoppedSeconds of {}. Nothing reads it again without a restart.",
+                    describe(abandoned),
+                    seconds(abandoned.stopped_ms),
+                    abandoned.stop_reason.as_deref().unwrap_or(""),
+                    abandoned.lag_entries,
+                    abandoned.unhealthy_stopped_seconds
+                ),
+                data,
+                Some(abandoned),
+            );
+        }
+
+        if let Some(frozen) = tally.behind_too_long {
+            data.insert(
+                "behindPartition".to_owned(),
+                HealthValue::Text(describe(frozen)),
+            );
+            data.insert(
+                "behindMs".to_owned(),
+                HealthValue::Int(ms_int(frozen.behind_ms)),
+            );
+            let not_started = if frozen.state == StreamPartitionRunState::Starting {
+                "; it has not started reading"
+            } else {
+                ""
+            };
+            let tail = frozen.tail_id.unwrap_or(StreamId::MIN);
+            return unhealthy(
+                StreamHealthRule::BehindTail,
+                format!(
+                    "Streams: partition {} is behind the tail of its stream (position {}, tail {}) and its position has not changed for {}s, past its UnhealthyBehindSeconds of {}{}. There is an entry it has not read and it is not reading it; a restart hands the partition on.",
+                    describe(frozen),
+                    frozen.position,
+                    tail,
+                    seconds(frozen.behind_ms),
+                    frozen.unhealthy_behind_seconds,
+                    not_started
+                ),
+                data,
+                Some(frozen),
+            );
+        }
+
+        if context.consumers > 0 && context.consumers_started == 0 {
+            return unhealthy(
+                StreamHealthRule::NoConsumerStarted,
+                format!(
+                    "Streams: none of the {} registered stream consumers has started.",
+                    context.consumers
+                ),
+                data,
+                None,
+            );
+        }
+
+        if !partitions.is_empty() && tally.live == 0 {
+            let reason = match tally.stop_reason {
+                Some(reason) => format!("Last reason: {reason}"),
+                None => String::new(),
+            };
+            return unhealthy(
+                StreamHealthRule::AllPartitionsStopped,
+                format!(
+                    "Streams: all {} partition workers have stopped; nothing is being consumed. {reason}",
+                    partitions.len()
+                ),
+                data,
+                None,
+            );
+        }
+
+        data.insert(
+            "ownershipDegraded".to_owned(),
+            HealthValue::Bool(context.ownership_degraded),
+        );
+
+        // Starting is not Running: "nothing has read yet" is true for a second or two of every
+        // normal startup and stays true for as long as the fault lasts. Degraded, not Unhealthy:
+        // restarting a pod that is still starting is a loop.
+        if tally.running == 0 && tally.starting > 0 {
+            return StreamHealthReport {
+                status: StreamHealthStatus::Degraded,
+                rule: StreamHealthRule::NotReadingYet,
+                description: format!(
+                    "Streams: none of the {} partition worker(s) has started reading yet ({} still starting).",
+                    partitions.len(),
+                    tally.starting
+                ),
+                data,
+                partition: None,
+            };
+        }
+
+        if tally.blocked > 0
+            || tally.stopped > 0
+            || tally.lagging.is_some()
+            || context.ownership_degraded
+        {
+            let rule = if tally.blocked > 0 {
+                StreamHealthRule::Blocked
+            } else if tally.stopped > 0 {
+                StreamHealthRule::Stopped
+            } else if tally.lagging.is_some() {
+                StreamHealthRule::Lagging
+            } else {
+                StreamHealthRule::OwnershipDegraded
+            };
+            let partition = if rule == StreamHealthRule::Lagging {
+                tally.lagging.cloned()
+            } else {
+                None
+            };
+            return StreamHealthReport {
+                status: StreamHealthStatus::Degraded,
+                rule,
+                description: explain(&tally, context.ownership_degraded),
+                data,
+                partition,
+            };
+        }
+
+        // Last, so it never hides a rule that names a fault: this one is about a consumer that is
+        // reading, and has nothing to read.
+        if let Some(silent) = Self::find_silent(partitions) {
+            data.insert(
+                "silentConsumer".to_owned(),
+                HealthValue::Text(format!("{}/{}", silent.topic, silent.consumer)),
+            );
+            data.insert(
+                "silentMs".to_owned(),
+                HealthValue::Int(ms_int(silent.silent_ms)),
+            );
+            return StreamHealthReport {
+                status: StreamHealthStatus::Degraded,
+                rule: StreamHealthRule::Silent,
+                description: format!(
+                    "Streams: consumer {} on {} is caught up and receiving nothing: none of the {} partition(s) it reads here has moved for {}s, past its DegradedSilenceSeconds of {}. A quiet topic and a broken upstream look the same from here; a restart fixes neither.",
+                    silent.consumer,
+                    silent.topic,
+                    silent.partitions,
+                    seconds(silent.silent_ms),
+                    silent.degraded_silence_seconds
+                ),
+                data,
+                partition: None,
+            };
+        }
+
+        StreamHealthReport {
+            status: StreamHealthStatus::Healthy,
+            rule: StreamHealthRule::None,
+            description: format!(
+                "Streams: {} consumer(s), {} of {} partition(s) reading, worst lag {}s.",
+                context.consumers_started,
+                tally.running,
+                partitions.len(),
+                seconds(tally.worst_lag_ms)
+            ),
+            data,
+            partition: None,
+        }
+    }
+
+    /// Grades one partition (C# `StreamHealth.Grade`).
+    #[must_use]
+    pub fn grade(partition: &StreamPartitionStatus) -> StreamPartitionHealth {
+        match partition.state {
+            StreamPartitionRunState::Blocked => {
+                return if partition.blocked_ms
+                    > f64::from(partition.unhealthy_block_seconds) * 1000.0
+                {
+                    StreamPartitionHealth {
+                        status: StreamHealthStatus::Unhealthy,
+                        rule: StreamHealthRule::BlockedTooLong,
+                    }
+                } else {
+                    StreamPartitionHealth {
+                        status: StreamHealthStatus::Degraded,
+                        rule: StreamHealthRule::Blocked,
+                    }
+                };
+            }
+            StreamPartitionRunState::Stopped => {
+                // A stood-down partition nobody chose to stop, with entries piling up behind it.
+                // -1 (never sampled) and 0 (at the tail) both mean there is nothing to escalate yet.
+                return if partition.escalates
+                    && partition.lag_entries > 0
+                    && partition.stopped_ms
+                        > f64::from(partition.unhealthy_stopped_seconds) * 1000.0
+                {
+                    StreamPartitionHealth {
+                        status: StreamHealthStatus::Unhealthy,
+                        rule: StreamHealthRule::StoppedTooLong,
+                    }
+                } else {
+                    StreamPartitionHealth {
+                        status: StreamHealthStatus::Degraded,
+                        rule: StreamHealthRule::Stopped,
+                    }
+                };
+            }
+            StreamPartitionRunState::Starting | StreamPartitionRunState::Running => {}
+        }
+
+        // IsBehindTail is checked as well, so a hand-built snapshot cannot be Unhealthy on a
+        // duration alone.
+        if partition.unhealthy_behind_seconds > 0
+            && partition.is_behind_tail
+            && partition.behind_ms >= f64::from(partition.unhealthy_behind_seconds) * 1000.0
+        {
+            return StreamPartitionHealth {
+                status: StreamHealthStatus::Unhealthy,
+                rule: StreamHealthRule::BehindTail,
+            };
+        }
+
+        // Zero entries behind is the tail of the stream, where a large lag only means a quiet topic.
+        if partition.lag_ms > f64::from(partition.unhealthy_lag_ms) && partition.lag_entries != 0 {
+            StreamPartitionHealth {
+                status: StreamHealthStatus::Degraded,
+                rule: StreamHealthRule::Lagging,
+            }
+        } else {
+            StreamPartitionHealth {
+                status: StreamHealthStatus::Healthy,
+                rule: StreamHealthRule::None,
+            }
+        }
+    }
+
+    /// The caught-up, silent consumer with the longest silence, if any (C# `FindSilent`).
+    #[must_use]
+    pub fn find_silent(partitions: &[StreamPartitionStatus]) -> Option<StreamSilentConsumer> {
+        let mut worst: Option<StreamSilentConsumer> = None;
+        let stale_after_ms = StreamLag::TAIL_STALE_AFTER.as_secs_f64() * 1000.0;
+        for (i, first) in partitions.iter().enumerate() {
+            if first.degraded_silence_seconds == 0
+                || first.state != StreamPartitionRunState::Running
+            {
+                continue;
+            }
+            // Grade a consumer once, at its first running partition in the snapshot.
+            let seen = partitions[..i]
+                .iter()
+                .any(|p| p.state == StreamPartitionRunState::Running && same_consumer(p, first));
+            if seen {
+                continue;
+            }
+            let window_ms = f64::from(first.degraded_silence_seconds) * 1000.0;
+            let mut owned = 0_u32;
+            let mut shortest = f64::MAX;
+            let mut all_silent = true;
+            for p in &partitions[i..] {
+                if !all_silent {
+                    break;
+                }
+                if p.state != StreamPartitionRunState::Running || !same_consumer(p, first) {
+                    continue;
+                }
+                owned += 1;
+                all_silent = !p.is_behind_tail
+                    && p.tail_id.is_some()
+                    && p.tail_sample_age_ms >= 0.0
+                    && p.tail_sample_age_ms <= stale_after_ms
+                    && p.position_unchanged_ms >= window_ms;
+                shortest = shortest.min(p.position_unchanged_ms);
+            }
+            if all_silent && worst.as_ref().is_none_or(|w| shortest > w.silent_ms) {
+                worst = Some(StreamSilentConsumer {
+                    topic: first.topic.clone(),
+                    consumer: first.consumer.clone(),
+                    partitions: owned,
+                    silent_ms: shortest,
+                    degraded_silence_seconds: first.degraded_silence_seconds,
+                });
+            }
+        }
+        worst
+    }
+}
+
+fn same_consumer(a: &StreamPartitionStatus, b: &StreamPartitionStatus) -> bool {
+    a.topic == b.topic && a.consumer == b.consumer
+}
+
+/// Counts and the partitions that name each rule (C# `Counts`).
+#[derive(Default)]
+struct Tally<'a> {
+    live: u32,
+    running: u32,
+    starting: u32,
+    blocked: u32,
+    stopped: u32,
+    behind: u32,
+    worst_lag_ms: f64,
+    worst: Option<&'a StreamPartitionStatus>,
+    lagging: Option<&'a StreamPartitionStatus>,
+    stopped_too_long: Option<&'a StreamPartitionStatus>,
+    blocked_too_long: Option<&'a StreamPartitionStatus>,
+    behind_too_long: Option<&'a StreamPartitionStatus>,
+    stop_reason: Option<&'a str>,
+}
+
+impl<'a> Tally<'a> {
+    fn of(
+        partitions: &'a [StreamPartitionStatus],
+        data: &mut BTreeMap<String, HealthValue>,
+    ) -> Self {
+        let mut counts = Self::default();
+        for partition in partitions {
+            match partition.state {
+                StreamPartitionRunState::Blocked => counts.blocked += 1,
+                StreamPartitionRunState::Stopped => {
+                    counts.stopped += 1;
+                    counts.stop_reason = counts.stop_reason.or(partition.stop_reason.as_deref());
+                }
+                StreamPartitionRunState::Starting => counts.starting += 1,
+                StreamPartitionRunState::Running => counts.running += 1,
+            }
+            if partition.lag_ms > counts.worst_lag_ms {
+                counts.worst_lag_ms = partition.lag_ms;
+                counts.worst = Some(partition);
+            }
+            if partition.is_behind_tail {
+                counts.behind += 1;
+            }
+            match StreamHealth::grade(partition).rule {
+                StreamHealthRule::BlockedTooLong => {
+                    counts.blocked_too_long = counts.blocked_too_long.or(Some(partition));
+                }
+                StreamHealthRule::StoppedTooLong => {
+                    counts.stopped_too_long = counts.stopped_too_long.or(Some(partition));
+                }
+                StreamHealthRule::BehindTail => {
+                    counts.behind_too_long = counts.behind_too_long.or(Some(partition));
+                }
+                _ => {}
+            }
+            // Asked of every partition, not taken from grade: a blocked or stopped partition's lag
+            // still belongs in the Degraded explanation.
+            if partition.lag_ms > f64::from(partition.unhealthy_lag_ms)
+                && partition.lag_entries != 0
+            {
+                counts.lagging = counts.lagging.or(Some(partition));
+            }
+        }
+        // Blocked partitions are live: they are retrying, not gone. Starting ones have not stood
+        // down, but they are not reading either, and have their own counter.
+        counts.live = counts.running + counts.blocked + counts.starting;
+        data.insert(
+            "partitionsBlocked".to_owned(),
+            HealthValue::Int(i64::from(counts.blocked)),
+        );
+        data.insert(
+            "partitionsStopped".to_owned(),
+            HealthValue::Int(i64::from(counts.stopped)),
+        );
+        data.insert(
+            "partitionsStarting".to_owned(),
+            HealthValue::Int(i64::from(counts.starting)),
+        );
+        data.insert(
+            "partitionsBehind".to_owned(),
+            HealthValue::Int(i64::from(counts.behind)),
+        );
+        data.insert(
+            "worstLagMs".to_owned(),
+            HealthValue::Int(ms_int(counts.worst_lag_ms)),
+        );
+        if let Some(worst) = counts.worst {
+            data.insert(
+                "worstLagPartition".to_owned(),
+                HealthValue::Text(describe(worst)),
+            );
+            data.insert(
+                "worstLagEntries".to_owned(),
+                HealthValue::Int(worst.lag_entries),
+            );
+        }
+        counts
+    }
+}
+
+fn explain(counts: &Tally<'_>, ownership_degraded: bool) -> String {
+    let mut reasons: Vec<String> = Vec::with_capacity(4);
+    if counts.blocked > 0 {
+        reasons.push(format!(
+            "{} partition(s) blocked retrying a DontIgnoreException; positions are not advancing",
+            counts.blocked
+        ));
+    }
+    if counts.stopped > 0 {
+        reasons.push(match counts.stop_reason {
+            None => format!("{} partition(s) stopped", counts.stopped),
+            Some(reason) => format!("{} partition(s) stopped ({reason})", counts.stopped),
+        });
+    }
+    if let Some(lagging) = counts.lagging {
+        reasons.push(format!(
+            "partition {} is {}s behind, past its UnhealthyLagMs of {}ms",
+            describe(lagging),
+            seconds(lagging.lag_ms),
+            lagging.unhealthy_lag_ms
+        ));
+    }
+    if ownership_degraded {
+        reasons.push(
+            "the ownership registry shows a gap or an overlap — check STREAMS_INSTANCE_COUNT against spec.replicas, and that a partitioned consumer runs as a StatefulSet".to_owned(),
+        );
+    }
+    format!("Streams: {}.", reasons.join("; "))
+}
+
+fn unhealthy(
+    rule: StreamHealthRule,
+    description: String,
+    data: BTreeMap<String, HealthValue>,
+    partition: Option<&StreamPartitionStatus>,
+) -> StreamHealthReport {
+    StreamHealthReport {
+        status: StreamHealthStatus::Unhealthy,
+        rule,
+        description,
+        data,
+        partition: partition.cloned(),
+    }
+}
+
+fn describe(partition: &StreamPartitionStatus) -> String {
+    format!(
+        "{}[{}]/{}",
+        partition.topic, partition.partition, partition.consumer
+    )
+}
+
+/// Seconds with one decimal, as C# `F1` (`(ms / 1000).ToString("F1")`).
+fn seconds(milliseconds: f64) -> String {
+    let mut out = String::new();
+    let _ = write!(out, "{:.1}", milliseconds / 1000.0);
+    out
+}
+
+/// Milliseconds as a report integer (C# `(long)`), truncated toward zero.
+#[allow(clippy::cast_possible_truncation)]
+fn ms_int(milliseconds: f64) -> i64 {
+    milliseconds as i64
+}
+
+fn to_i64(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
