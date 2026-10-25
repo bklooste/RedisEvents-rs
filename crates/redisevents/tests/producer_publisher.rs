@@ -736,16 +736,14 @@ impl Visit for FieldMap {
 struct SpanCapture(Arc<Mutex<Vec<SpanRecord>>>);
 
 impl SpanCapture {
-    fn named(&self, name: &str) -> Vec<SpanRecord> {
+    /// The `streams.publish {topic}` spans for one topic.
+    fn for_topic(&self, topic: &str) -> Vec<SpanRecord> {
+        let name = format!("streams.publish {topic}");
         self.0
             .lock()
             .unwrap()
             .iter()
-            .filter(|s| {
-                s.fields
-                    .get("otel.name")
-                    .is_some_and(|n| n.starts_with(name))
-            })
+            .filter(|s| s.fields.get("otel.name") == Some(&name))
             .cloned()
             .collect()
     }
@@ -782,22 +780,24 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SpanCapture {
     }
 }
 
-/// The span tests install a `tracing` dispatcher. Each install and drop rebuilds tracing's global
-/// callsite-interest cache, so two such tests running at once can leave a callsite disabled for
-/// the other; they take this lock so only one captures at a time.
-static SPAN_CAPTURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-fn capturing() -> (SpanCapture, tracing::subscriber::DefaultGuard) {
-    let capture = SpanCapture::default();
-    let guard =
-        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
-    (capture, guard)
+/// The span capture, installed once for this test binary as the global subscriber. Installing a
+/// dispatcher per test instead races tracing's global callsite-interest cache under parallel tests
+/// (a span is intermittently missing); one global subscriber never changes, so the cache is stable.
+/// Each span test selects its own spans by topic, which is unique per test.
+fn capture() -> &'static SpanCapture {
+    static CAPTURE: std::sync::OnceLock<SpanCapture> = std::sync::OnceLock::new();
+    CAPTURE.get_or_init(|| {
+        let capture = SpanCapture::default();
+        let _ = tracing::subscriber::set_global_default(
+            tracing_subscriber::registry().with(capture.clone()),
+        );
+        capture
+    })
 }
 
 /// C# `Publish_emits_a_streams_publish_span_in_the_callers_trace`.
 #[tokio::test]
 async fn publish_emits_a_streams_publish_span_in_the_callers_trace() {
-    let _serial = SPAN_CAPTURE.lock().await;
     let redis = redisevents_test_support::require_redis!();
     let topic = redis.new_topic("span");
     let publisher = publisher(
@@ -809,7 +809,7 @@ async fn publish_emits_a_streams_publish_span_in_the_callers_trace() {
         },
     )
     .await;
-    let (capture, _guard) = capturing();
+    let capture = capture();
 
     let root = tracing::info_span!("caller");
     let root_id = root.id().expect("root span").into_u64();
@@ -824,7 +824,7 @@ async fn publish_emits_a_streams_publish_span_in_the_callers_trace() {
         .await
         .unwrap();
 
-    let spans = capture.named("streams.publish");
+    let spans = capture.for_topic(&topic);
     let span = match spans.as_slice() {
         [one] => one,
         other => panic!("one publish is one span, got {}", other.len()),
@@ -857,11 +857,10 @@ async fn publish_emits_a_streams_publish_span_in_the_callers_trace() {
 /// C# `A_batch_publish_emits_one_span_carrying_its_message_count`.
 #[tokio::test]
 async fn a_batch_publish_emits_one_span_carrying_its_message_count() {
-    let _serial = SPAN_CAPTURE.lock().await;
     let redis = redisevents_test_support::require_redis!();
     let topic = redis.new_topic("span-batch");
     let publisher = publisher(redis, &topic, TopicOptions::default()).await;
-    let (capture, _guard) = capturing();
+    let capture = capture();
 
     let bodies = [body("a"), body("b"), body("c")];
     publisher
@@ -870,7 +869,7 @@ async fn a_batch_publish_emits_one_span_carrying_its_message_count() {
         .await
         .unwrap();
 
-    let spans = capture.named("streams.publish");
+    let spans = capture.for_topic(&topic);
     let span = match spans.as_slice() {
         [one] => one,
         other => panic!("a pipelined batch is one span, got {}", other.len()),
@@ -882,7 +881,6 @@ async fn a_batch_publish_emits_one_span_carrying_its_message_count() {
 /// C# `A_failed_publish_marks_its_span_as_an_error`, with a real failure (`WRONGTYPE`).
 #[tokio::test]
 async fn a_failed_publish_marks_its_span_as_an_error() {
-    let _serial = SPAN_CAPTURE.lock().await;
     let redis = redisevents_test_support::require_redis!();
     let topic = redis.new_topic("span-fail");
     let mut conn = raw(redis).await;
@@ -893,7 +891,7 @@ async fn a_failed_publish_marks_its_span_as_an_error() {
         .query_async(&mut conn)
         .await
         .unwrap();
-    let (capture, _guard) = capturing();
+    let capture = capture();
 
     let result = publisher
         .publish("k", body("x"), "T", &PublishOptions::new())
@@ -901,7 +899,7 @@ async fn a_failed_publish_marks_its_span_as_an_error() {
         .await;
     assert!(matches!(result, Err(Error::Transport { .. })));
 
-    let spans = capture.named("streams.publish");
+    let spans = capture.for_topic(&topic);
     let span = match spans.as_slice() {
         [one] => one,
         other => panic!("one span, got {}", other.len()),
@@ -912,11 +910,10 @@ async fn a_failed_publish_marks_its_span_as_an_error() {
 /// C# `Publishing_does_not_leave_its_span_current`.
 #[tokio::test]
 async fn publishing_does_not_leave_its_span_current() {
-    let _serial = SPAN_CAPTURE.lock().await;
     let redis = redisevents_test_support::require_redis!();
     let topic = redis.new_topic("span-current");
     let publisher = publisher(redis, &topic, TopicOptions::default()).await;
-    let (_capture, _guard) = capturing();
+    let _ = capture();
 
     let before = tracing::Span::current().id();
     let _ = publisher
@@ -931,8 +928,10 @@ async fn publishing_does_not_leave_its_span_current() {
     );
 }
 
-/// C# `With_no_listener_no_span_is_created`: with nothing listening, publishing leaves no current
-/// span and stamps no traceparent.
+/// C# `With_no_listener_no_span_is_created`, in spirit. The span capture is a global subscriber
+/// that other tests in this binary install, so whether anything is listening depends on test order:
+/// this asserts only what holds either way, that no span is left current and no traceparent is
+/// stamped without an ambient context.
 #[tokio::test]
 async fn with_no_listener_no_span_is_created() {
     let redis = redisevents_test_support::require_redis!();
