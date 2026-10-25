@@ -208,8 +208,12 @@ ownership.
 ## 11. Payload codecs (above the wire)
 These do not affect entry decoding, but both sides must agree on them for typed messages.
 
-- **JSON:** choose property casing explicitly per message. `camelCase` on both sides is
-  recommended (System.Text.Json defaults to PascalCase, serde to field names as written).
+- **JSON:** property casing MUST match on both sides. System.Text.Json defaults to PascalCase and
+  serde to field names as written, so a Rust type for a C# message is normally
+  `#[serde(rename_all = "PascalCase")]`. A mismatch is **silent in C#**: System.Text.Json fills
+  unmatched members with defaults (`Guid.Empty`, `0`) and raises no error. Pin every
+  cross-language message with golden bodies produced by the real C# types, as
+  `samples/inventory/inventory-domain/tests/csharp_wire.rs` does.
 - **MessagePack:** MessagePack-CSharp `[Key(int)]` types are arrays, and `[Key("name")]` types
   are maps.
 - **MessagePack LZ4:** bodies whose uncompressed encoding exceeds **1024** bytes (configurable) are

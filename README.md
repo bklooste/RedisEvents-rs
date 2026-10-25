@@ -10,7 +10,29 @@ It is **wire-compatible** with the C# library. A Rust producer can feed a C# con
 reverse, on the same Redis, the same topics and the same consumer positions. The contract is
 written down in [`wire-spec/WIRE.md`](wire-spec/WIRE.md) and enforced in CI.
 
-> **Status: scaffolding.** Nothing is usable yet. The roadmap is in [`docs/PLAN.md`](docs/PLAN.md).
+> **Status: scaffolding.** The library is not usable yet. The roadmap is in [`docs/PLAN.md`](docs/PLAN.md).
+
+## Quick start
+
+Start with the **[Inventory CQRS-ES sample](samples/inventory)**, a port of the Redis variant of
+[cqrs-simple-micro-service](https://github.com/bklooste/cqrs-simple-micro-service/tree/main/redis).
+It has two services:
+
+- a **write side** that saves event-sourced inventory items with optimistic concurrency and
+  publishes their events;
+- a **read side** that projects those events into list and detail views.
+
+Both sides speak the C# sample's wire format and HTTP API, so either can be swapped for its C#
+counterpart.
+
+The sample's domain crate (events, aggregate rules, projections, C# wire compatibility) is done:
+
+```bash
+cargo test -p inventory-domain
+```
+
+The two services follow as the library crates they use land (plan WPs E5b and E5c). The
+[sample README](samples/inventory/README.md) shows the routes and how to run the full stack.
 
 ## Crates
 
@@ -22,6 +44,8 @@ written down in [`wire-spec/WIRE.md`](wire-spec/WIRE.md) and enforced in CI.
 | `redisevents-eventsourcing` | `RedisEvents.EventSourcing` | event-sourced aggregates with optimistic concurrency |
 | `redisevents-restate` | `RedisEvents.Restate` | batched Restate workflow starts |
 | `redisevents-axum` | `RedisEvents.Web`, `RedisEvents.HealthChecks` | admin endpoints and health checks |
+
+Samples live under [`samples/`](samples). They are not published.
 
 ## Interop rules worth knowing up front
 
@@ -36,7 +60,7 @@ written down in [`wire-spec/WIRE.md`](wire-spec/WIRE.md) and enforced in CI.
 
 ```bash
 cargo build --workspace
-cargo test --workspace                      # needs a C linker (build-essential) and, later, Docker or REDIS_URL
+cargo test --workspace                      # needs a C linker (build-essential, or `zig cc` as CARGO_TARGET_<triple>_LINKER) and, later, Docker or REDIS_URL
 python3 scripts/check_wire_drift.py ../RedisEvents   # checks wire-spec/ against a C# checkout
 ```
 

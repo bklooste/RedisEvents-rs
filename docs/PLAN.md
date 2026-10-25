@@ -106,9 +106,12 @@ Taken from the code. Phase 0 turns this list into `WIRE.md` plus golden vectors.
   `MyCo.Orders.OrderPlaced`. Rust cannot derive that. Rule: **every cross-language message has an
   explicit, stable type string.** Rust's `trait Message { const TYPE: &'static str; }` makes it
   mandatory, and the README tells C# users to pass `type:` or use `EventTypeRegistry` names.
-- **JSON casing.** By default System.Text.Json writes PascalCase and serde writes snake_case. Pick
-  one contract per message, recommended `camelCase` on both sides (`JsonSerializerOptions` /
-  `#[serde(rename_all = "camelCase")]`), and test it with vectors.
+- **JSON casing.** By default System.Text.Json writes PascalCase and serde writes field names as
+  written (snake_case). Match the C# side, which is PascalCase unless it sets a naming policy:
+  `#[serde(rename_all = "PascalCase")]`, as in `samples/inventory`. Test it with vectors.
+  **A mismatch is silent in C#:** System.Text.Json reads `{"id":…,"count":7}` into a
+  PascalCase type as an empty GUID and `0`, with no error. serde rejects the reverse mismatch with
+  a missing-field error.
 - **MessagePack.** MessagePack-CSharp writes `[Key(int)]` types as arrays and `[Key("x")]` types as
   maps. `rmp-serde` defaults to arrays (matching `Key(int)`) and needs `with_struct_map()` for the
   map form. LZ4 uses MessagePack-CSharp's **`Lz4BlockArray`** framing: an array whose first element
@@ -138,7 +141,7 @@ RedisEvents-rs/
     dotnet/InteropHost/        small C# console app on the *published* RedisEvents NuGet: produce / consume / admin verbs
     rust-host/                 the same verbs in Rust
     scenarios/                 scripted scenarios run by the CI interop job
-  examples/                    Inventory sample (command + view) in Rust, talking to the C# sample
+  samples/inventory/           CQRS-ES sample, a port of cqrs-simple-micro-service/redis: domain, command (write), views (read)
   benches/                     criterion benches mirroring StreamsMicroBenchmarks
 ```
 
@@ -232,8 +235,10 @@ Exit: an admin reset issued from **C#** rewinds a running **Rust** consumer, and
    aggregate with the concurrency-check switch from #47.
 4. `redisevents-restate`: filter + map, bounded-parallel starts, block rather than skip.
 
-Exit: the C# Inventory command API feeds the Rust view API (and the reverse), and an aggregate saved
-from C# loads in Rust with the same version.
+Exit: the Inventory CQRS-ES sample (`samples/inventory`, a port of
+[cqrs-simple-micro-service/redis](https://github.com/bklooste/cqrs-simple-micro-service/tree/main/redis))
+passes the C# sample's own HTTP suites in all four write/read pairings, and an aggregate saved from
+C# loads in Rust with the same version.
 
 ### Phase 6: Performance and release
 Criterion benches that mirror `StreamsMicroBenchmarks`, an end-to-end throughput suite that mirrors
@@ -259,6 +264,7 @@ in both directions:
 | Codec version guard | `v=2` in `m:{topic}` makes both sides refuse |
 | Outbox / ES | state + event atomic; version check honoured across languages |
 | JSON + MessagePack (+LZ4) payloads | typed decode both ways using explicit type strings |
+| CQRS-ES sample, 4 pairings | C#/Rust write side × C#/Rust read side; the C# Scenarify suites (`SimpleCQRS.API.IntegrationTests`, `SimpleCQRS.Views.IntegrationTests`) run unchanged against each pairing via `SvcHttpUrl` |
 | Work queue (deferred) | competing C#/Rust consumers in one `XREADGROUP` group; no message lost |
 
 ## 6. Interop hazards to design out
@@ -266,7 +272,7 @@ in both directions:
 | Hazard | Mitigation |
 | --- | --- |
 | `t` defaults to C# `FullName` | Rust requires `Message::TYPE`; the C# docs recommend explicit types for cross-language topics |
-| JSON property casing | per-message explicit casing + vectors |
+| JSON property casing (silent in C#: wrong casing reads as defaults) | match C# (PascalCase by default); golden bodies from the real C# types; Rust rejects mismatches |
 | MessagePack array vs map | document the mapping; vectors for both forms |
 | Different key prefix per runtime | identical env var resolution; startup log prints the resolved prefix |
 | GUID / timestamp text formats | `uuid` hyphenated lowercase; timestamps with 7 fractional digits + `Z`/offset, and the parser accepts both |
@@ -348,7 +354,10 @@ behavioural spec.
 | E2 | `redisevents-projections` | `RedisEvents.Projections` (531) | `Projections.UnitTests` 753/49, `Projections.Tests` 301/13 | C2, D4, B1 | M | 3 | C# dispatches on event type at runtime; Rust needs a trait/registry design without reflection. | Sonnet |
 | E3 | `redisevents-eventsourcing` | `RedisEvents.EventSourcing` (448) | `EventSourcing.UnitTests` 869/55, `EventSourcing.Tests` 540/19 | E2, B3 | M | 3 | Aggregate trait design; optimistic concurrency built on B3. | Sonnet |
 | E4 | `redisevents-restate` | `RedisEvents.Restate` (410) | `Restate.UnitTests` 488/23 | C2, D4 | M | 3 | Bounded-parallel starts with per-item retry; the batch blocks rather than skips. | Sonnet |
-| E5 | Inventory sample, cross-language | `samples/*` in Rust; C# command API ↔ Rust view API | `Sample.Tests` 292/7 | E2, E3, D3, C4 | M | 2 | Application code over finished crates. | Haiku |
+| E5a | Inventory sample: domain ✅ **done** | `samples/inventory/inventory-domain`: events (PascalCase, C# wire types), aggregate rules, projections as pure functions; from `cqrs-simple-micro-service/redis` | `InventoryItemTests`, `EventProjectorTests` + golden C# event bodies (16 tests) | — | S | 1 | No library dependency; the C# tests and golden bodies decide everything. | Haiku |
+| E5b | Inventory command service (write) | `SimpleCQRS.API/Program.cs` (~130): axum routes, load/decide/save, 204/400/404/409 mapping, fixed external price | `SimpleCQRS.API.IntegrationTests` run unchanged (Scenarify, via `SvcHttpUrl`) | E5a, E3, C4, D3 | S | 2 | Wiring over the domain and E3. | Haiku |
+| E5c | Inventory views service (read) | `SimpleCQRS.Views/Program.cs` + `InventoryProjection` (~180): projector, two Redis view stores, routes | `SimpleCQRS.Views.IntegrationTests` run unchanged | E5a, E2, C4, D3 | S | 2 | Wiring over the domain and E2. | Haiku |
+| E5d | Sample interop matrix | `samples/inventory/compose.yml` with the C# images (from the C# repo's Dockerfiles) and the Rust ones; CI job running both C# suites against all 4 pairings. Starts with C#/C# only. | — | A4 (the Rust pairings join as E5b/E5c land) | M | 3 | Two repos' images and test suites in one CI job. | Sonnet |
 | F1 | Benchmarks & perf | criterion mirrors of `StreamsMicroBenchmarks` / `PerfBenchmarkTests` | perf suites | C4, B2 | L | 4 | Finding and fixing bottlenecks needs profiling judgment, not porting. | Opus/med |
 | F2 | Docs & compiled samples | README samples as doctests (mirrors `ReadmeSamples` 298/5), core crate docs. Each package WP (E1–E4) writes its own crate docs. | — | C4 | M | 1 | Writing over a finished API. | Haiku |
 | F3 | Release | `cargo-semver-checks`, crates.io metadata, `publish = true` | — | D3, E1, E3, E4, F1, F2 (not E5: the sample is not published) | S | 1 | Checklist. | Haiku |
@@ -358,7 +367,7 @@ behavioural spec.
 apps with no Rust audience. `RedisEvents.Tracing`'s StackExchange.Redis profiling hook has no
 redis-rs equivalent, so B6 replaces it with `tracing` spans around the `Connection` wrapper.
 
-**Agent mix** (excluding the deferred C6): **Haiku 16**, Sonnet 7, Opus/med 5, Opus/high 4. Only
+**Agent mix** (excluding the deferred C6): **Haiku 18** (E5a already done), Sonnet 8, Opus/med 5, Opus/high 4. Only
 about a quarter of the WPs need Opus, but they are the ones on the critical path.
 
 **Interop gates** are owned by A4. Each scenario lands in the PR of the WP that makes it possible.
@@ -369,6 +378,7 @@ about a quarter of the WPs need Opus, but they are the ones on the critical path
 | G2 C# → Rust | the same in reverse, positions resume, codec guard, partition grow | C4, A4 |
 | G3 Admin across languages | admin reset, mixed Lease group (nice-to-have) | D1, C4 |
 | G4 Packages | JSON/MessagePack/LZ4 payloads, outbox/ES | E1, E3 |
+| G5 Sample, 4 pairings | CQRS-ES sample row | E5b, E5c, E5d |
 
 ### 8.3 Dependency graph
 
@@ -389,14 +399,18 @@ graph LR
   C2[C2 worker] --> C4 & D4 & E1 & E2 & E4
   C3[C3 flusher] --> C4
   C4[C4 host] -.-> C4b & C4t
-  C4 --> E5 & F1 & F2
+  C4 --> E5b & E5c & F1 & F2
   B2[B2 buffered] --> F1
   B3[B3 outbox] --> E3
   D1[D1 admin] --> D3
   D2[D2 health] --> D3
-  D3[D3 axum] --> E5
+  D3[D3 axum] --> E5b & E5c
   D4[D4 testing] --> E2 & E4
-  E2[E2 projections] --> E3 --> E5
+  E2[E2 projections] --> E3 --> E5b[E5b command]
+  E2 --> E5c[E5c views]
+  E5a[E5a domain ✅] --> E5b & E5c
+  A4 --> E5d[E5d sample matrix]
+  E5b & E5c -.-> E5d
   F1[F1 perf] --> F3[F3 release]
   F2[F2 docs] --> F3
   D3 & E1 & E3 & E4 --> F3
@@ -405,29 +419,31 @@ graph LR
   classDef opusmed fill:#fdf0d5,stroke:#b7791f;
   classDef opushigh fill:#fbe0e0,stroke:#b03a2e;
   classDef crit stroke-width:4px;
-  class W01,A1,A2,B1,B4,B6,C2t,C4b,C4t,D2,D3,D4,E1,E5,F2,F3 haiku;
-  class A3,A4,C5,D1,E2,E3,E4 sonnet;
+  class W01,A1,A2,B1,B4,B6,C2t,C4b,C4t,D2,D3,D4,E1,E5a,E5b,E5c,F2,F3 haiku;
+  class A3,A4,C5,D1,E2,E3,E4,E5d sonnet;
   class B2,B3,B5,C1,F1 opusmed;
   class W02,C2,C3,C4 opushigh;
-  class W02,A1,B5,C1,C2,C3,C4,F1,F3,D4,E2,E3,E5 crit;
+  class W02,A1,B5,C1,C2,C3,C4,F1,F3 crit;
 ```
 
 ### 8.4 Critical path
 
-With the mechanical bulk split out, three chains tie at 16 size points:
+With the mechanical bulk split out, two chains tie at 16 size points, and a third is one point
+behind:
 
 - **Consumer:** W0.2 (2) → A1 (1) → C1 (3) → C2 (3) → C4 (3) → F1 (3) → F3 (1)
 - **Ownership:** W0.2 (2) → A1 (1) → B5 (3) → C3 (3) → C4 (3) → F1 (3) → F3 (1)
-- **Packages:** W0.2 (2) → A1 (1) → C1 (3) → C2 (3) → D4 (1) → E2 (2) → E3 (2) → E5 (2)
+- **Packages (15):** W0.2 (2) → A1 (1) → C1 (3) → C2 (3) → D4 (1) → E2 (2) → E3 (2) → E5b (1)
 
-The packages chain is why the release (F3) does not wait for the sample app (E5), and why each
-package writes its own docs instead of waiting for F2. With either dependency, the path grows to
-17 points.
+The packages chain is why the release (F3) does not wait for the sample services (E5b, E5c), and
+why each package writes its own docs instead of waiting for F2. With either dependency, the path
+grows to 17 points. The sample stays off the critical path because its domain (E5a) is already
+done and its interop matrix (E5d) is built early against the C# services.
 
 Without the split (C2 and C4 as one XL WP each, test porting included), the path is 20 points.
 Splitting saves about a fifth of the elapsed time.
 
-The total is ~70 points, so the critical path is ~23% of the work, and on average ~4.4 agents can
+The total is ~73 points, so the critical path is ~22% of the work, and on average ~4.6 agents can
 be busy at once. Adding agents beyond the peak width in 8.5 does not help.
 
 Implications:
@@ -439,24 +455,24 @@ Implications:
   owner.
 - **B5 depends on A1 only, not on A2.** It needs the config *types*, which are frozen in W0.2,
   not the binder, so it can start in wave 2. Keep it that way, because B5 is on a critical chain.
-- **The packages chain is mostly Sonnet and Haiku**, but it has no slack. Land D4 (testing helpers)
-  as soon as C2 merges, because E2 and E4 wait on it.
+- **The packages chain is mostly Sonnet and Haiku**, but it has only one point of slack. Land D4
+  (testing helpers) as soon as C2 merges, because E2 and E4 wait on it.
 
 ### 8.5 Waves (where to send the agents)
 
 A WP starts once everything it depends on has merged. The waves below are the earliest-start
-schedule. Bold marks WPs on a critical chain. C2t, C4b and C4t start against the API skeleton of C2 or C4, so they run in the same wave as it, not after it.
+schedule. Bold marks WPs on a critical chain. E5a is already done. C2t, C4b and C4t start against the API skeleton of C2 or C4, so they run in the same wave as it, not after it.
 
 | Wave | Runs in parallel | Agents (H / S / O-med / O-high) | Gate at end of wave |
 | --- | --- | --- | --- |
 | 0 | W0.1 ∥ **W0.2** | 1 / 0 / 0 / 1 | contracts frozen; vectors published |
 | 1 | **A1**, A2, A3, A4, B6 | 3 / 2 / 0 / 0 | wire layer passes vectors |
-| 2 | **C1**, B1, B4, **B5** | 2 / 0 / 2 / 0 | — |
+| 2 | **C1**, B1, B4, **B5**, E5d (C#/C# pairing first) | 2 / 1 / 2 / 0 | — |
 | 3 | **C2**, C2t, **C3**, B2, B3, C5, D1, D2 | 2 / 2 / 2 / 2 | **G1 Rust → C#** |
 | 4 | **C4**, C4b, C4t, D3, D4, E1 | 5 / 0 / 0 / 1 | **G2 C# → Rust**, G3 |
-| 5 | **E2**, E4, **F1**, F2 | 1 / 2 / 1 / 0 | — |
-| 6 | **E3** | 0 / 1 / 0 / 0 | G4 |
-| 7 | **E5**, **F3** | 2 / 0 / 0 / 0 | cross-language sample green; release |
+| 5 | E2, E4, **F1**, F2 | 1 / 2 / 1 / 0 | — |
+| 6 | E3, E5c | 1 / 1 / 0 / 0 | G4 |
+| 7 | E5b, **F3** | 2 / 0 / 0 / 0 | **G5** sample green in all 4 pairings; release |
 
 The peak is wave 3, with 8 agents, 4 of them on Opus. If Opus capacity is limited, run C2 and C3
 first, and B2 and B3 (G1, not critical) after them. Agents that finish early in waves 1–2 can add
