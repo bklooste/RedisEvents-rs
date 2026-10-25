@@ -57,3 +57,50 @@ jobs:
           repository: bklooste/RedisEvents
           path: csharp
       - run: python3 scripts/check_wire_drift.py csharp
+
+  interop:
+    name: interop (C# from ${{ matrix.csharp }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # nuget = latest published RedisEvents package; main = bklooste/RedisEvents@main built from source.
+        csharp: [nuget, main]
+    services:
+      redis:
+        image: redis:8-alpine
+        ports: ["6379:6379"]
+    env:
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        if: matrix.csharp == 'main'
+        with:
+          repository: bklooste/RedisEvents
+          path: csharp
+          fetch-depth: 0 # Nerdbank.GitVersioning needs history
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Resolve the latest published RedisEvents version
+        if: matrix.csharp == 'nuget'
+        run: |
+          v=$(curl -fsS https://api.nuget.org/v3-flatcontainer/redisevents/index.json \
+            | python3 -c 'import json,sys; print([x for x in json.load(sys.stdin)["versions"] if "-" not in x][-1])')
+          echo "RedisEvents NuGet $v"
+          echo "DOTNET_ARGS=-p:RedisEventsVersion=$v" >> "$GITHUB_ENV"
+      - name: Point the host at RedisEvents@main
+        if: matrix.csharp == 'main'
+        run: echo "DOTNET_ARGS=-p:UseLocalRedisEvents=$GITHUB_WORKSPACE/csharp" >> "$GITHUB_ENV"
+      - name: Build the C# host
+        run: dotnet build interop/dotnet/InteropHost -c Release -o interop/dotnet/out $DOTNET_ARGS
+      - name: Build the Rust host
+        run: cargo build -p interop-rust-host
+      - name: Run the scenarios
+        run: >
+          python3 interop/scenarios/run.py
+          --csharp "dotnet $PWD/interop/dotnet/out/InteropHost.dll"
+          --rust "$PWD/target/debug/interop-rust-host"

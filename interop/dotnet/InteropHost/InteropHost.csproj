@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="../Versions.props" />
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- Lets a machine with only a newer runtime run the net10.0 build. -->
+    <RollForward>Major</RollForward>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnableConfigurationBindingGenerator>false</EnableConfigurationBindingGenerator>
+  </PropertyGroup>
+
+  <!-- UseLocalRedisEvents=/path/to/RedisEvents-checkout builds against source instead of the NuGet. -->
+  <ItemGroup Condition="'$(UseLocalRedisEvents)' == ''">
+    <PackageReference Include="RedisEvents" Version="$(RedisEventsVersion)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseLocalRedisEvents)' != ''">
+    <ProjectReference Include="$(UseLocalRedisEvents)/src/RedisEvents/RedisEvents.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.2" />
+  </ItemGroup>
+</Project>

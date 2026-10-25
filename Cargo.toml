@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "samples/*/*"]
+members = ["crates/*", "samples/*/*", "interop/rust-host"]
 
 [workspace.package]
 version = "0.1.0"
