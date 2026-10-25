@@ -5,7 +5,9 @@ use std::sync::atomic::AtomicU32;
 /// The partition for a non-empty key: `xxh3_64(key, seed 0)` folded with `& (n-1)` when `n` is a
 /// power of two, else `% n`. `partitions <= 1` gives `0` without hashing.
 ///
-/// Callers route an **empty** key with [`RoundRobin`] instead.
+/// Only ever called with a **non-empty** key: callers (B1) check for an empty key first and use
+/// [`RoundRobin`], as C# `StreamPublisher` checks `IsNullOrEmpty` before `PartitionRouter.ForKey`.
+/// Pinned by `wire-spec/vectors/routing.json`.
 #[must_use]
 pub fn partition_for_key(key: &[u8], partitions: u32) -> u32 {
     let _ = (key, partitions);

@@ -24,11 +24,14 @@ impl StreamId {
     /// `0-0`, before every entry. Reading after it reads the whole stream.
     pub const MIN: Self = Self { ms: 0, seq: 0 };
 
-    /// The largest id. Note the C# `StreamId.Max` is `i64::MAX-i64::MAX`; the two never reach the
-    /// wire as positions, only as range ends, where both mean "the end".
+    /// The largest valid part. C# stores both parts as `long`, so a part above `i64::MAX` is not a
+    /// valid id on this wire (`WIRE.md` §4) and [`StreamId::parse`] rejects it.
+    pub const MAX_PART: u64 = i64::MAX as u64;
+
+    /// The largest id, `i64::MAX-i64::MAX` (C# `StreamId.Max`).
     pub const MAX: Self = Self {
-        ms: u64::MAX,
-        seq: u64::MAX,
+        ms: Self::MAX_PART,
+        seq: Self::MAX_PART,
     };
 
     /// The id `ms-seq`.
@@ -55,10 +58,12 @@ impl StreamId {
     }
 
     /// Parses `<ms>-<seq>`: two runs of ASCII decimal digits separated by one `-`, nothing else
-    /// (no sign, no whitespace, no `*`, no bare `<ms>`). Same rules as C# `StreamId.TryParse`.
+    /// (no sign, no whitespace, no `*`, no bare `<ms>`), each part in `0..=i64::MAX`
+    /// ([`StreamId::MAX_PART`]). Same rules as C# `StreamId.TryParse`; pinned by
+    /// `wire-spec/vectors/formats.json` `stream_id_parse`.
     ///
     /// # Errors
-    /// [`ParseStreamIdError`] when `s` is not of that form or a part overflows `u64`.
+    /// [`ParseStreamIdError`] when `s` is not of that form or a part exceeds `i64::MAX`.
     pub fn parse(s: &str) -> Result<Self, ParseStreamIdError> {
         Self::parse_bytes(s.as_bytes())
     }
@@ -74,7 +79,7 @@ impl StreamId {
     }
 
     /// Formats as `<ms>-<seq>` into `buf` without allocating and returns the written slice.
-    /// 41 bytes always suffice.
+    /// 41 bytes always suffice (39 for valid ids).
     pub fn format_into(self, buf: &mut [u8; 41]) -> &str {
         let _ = buf;
         todo!("A1")
@@ -106,7 +111,7 @@ mod tests {
         assert!(StreamId::new(1, 9) < StreamId::new(2, 0));
         assert!(StreamId::new(2, 0) < StreamId::new(2, 1));
         assert!(StreamId::MIN < StreamId::new(0, 1));
-        assert!(StreamId::new(u64::MAX, 0) < StreamId::MAX);
+        assert!(StreamId::new(StreamId::MAX_PART, 0) < StreamId::MAX);
     }
 
     #[test]
