@@ -526,6 +526,18 @@ impl PositionSink for MonitoredSink {
     fn flush(&self) -> BoxFuture<'_, Result<()>> {
         self.inner.flush()
     }
+
+    fn blocked(&self, partition: u32, blocked: bool) {
+        let Some(monitor) = self.monitors.get(&partition) else {
+            return;
+        };
+        if blocked {
+            monitor.mark_blocked();
+        } else if monitor.is_blocked() {
+            // Only while still blocked (C#): a partition already marked stopped stays stopped.
+            monitor.mark_unblocked();
+        }
+    }
 }
 
 impl Ctx {

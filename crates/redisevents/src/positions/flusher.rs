@@ -49,7 +49,12 @@
 //! the replay range. The read loop takes the reset and calls [`rewind`](PositionSink::rewind)
 //! (dropping the pre-reset pending position and releasing the hold) before it seeks; a later tick
 //! sees the slot taken and deletes the field with a compare-and-delete (only if it still holds the
-//! value we read, so a newer marker written in between survives), then clears the slot.
+//! value we read, so a newer marker written in between survives), then clears the slot. Every
+//! flush (the tick's, a `Sync*` worker's and the final one at [`stop`](PositionFlusher::stop))
+//! first deletes taken markers the same way, and a taken partition's post-rewind position is
+//! written only after its marker is gone: a crash leaves either the marker next to the reset
+//! target (the reset applies once more) or no marker, never a marker next to a newer position
+//! (which would replay twice). C#'s `StopAsync` only flushes and leaves a taken marker behind.
 //!
 //! # Trim interlock (C5)
 //!
@@ -645,8 +650,14 @@ impl<S: PositionStore> Inner<S> {
                 // A held reset stays dirty: written once the read loop rewinds.
                 continue;
             }
-            self.clear_dirty(&mut slot);
             let partition = u32::try_from(index).expect("slots are indexed by u32 partitions");
+            if self.resets.as_ref().is_some_and(|r| r.is_taken(partition)) {
+                // Rewound, but its `__reset:<p>` field is not deleted yet: a post-rewind position
+                // stored next to a live marker would replay twice after a crash. Stays dirty;
+                // written once `clear_taken` deleted the field.
+                continue;
+            }
+            self.clear_dirty(&mut slot);
             if slot.stopped {
                 continue;
             }
@@ -666,6 +677,11 @@ impl<S: PositionStore> Inner<S> {
         // The gate first, then the dirty check: a flush that finds nothing dirty because a
         // concurrent one drained it must still wait for that write to land.
         let _gate = self.gate.lock().await;
+        // Taken resets first: their markers are deleted before any post-rewind position is
+        // written (see `clear_taken`), including on the final flush at stop.
+        if let Err(e) = self.clear_taken().await {
+            self.warn_reset_failure(&e);
+        }
         if self.dirty_count.load(Ordering::Acquire) == 0 {
             return Ok(());
         }
@@ -1065,16 +1081,20 @@ impl<S: PositionStore> Inner<S> {
 
     async fn poll_resets_logged(&self) {
         if let Err(e) = self.poll_resets().await {
-            tracing::warn!(
-                topic = %self.topic,
-                consumer = %self.consumer,
-                error = %e,
-                "Streams: reset-marker poll failed for topic {} consumer {}; retrying in {}ms. A pending reset is delayed, not lost: the marker stays in Redis until a worker acts on it.",
-                self.topic,
-                self.consumer,
-                self.interval.as_millis() * u128::from(self.reset_poll_ticks)
-            );
+            self.warn_reset_failure(&e);
         }
+    }
+
+    fn warn_reset_failure(&self, e: &Error) {
+        tracing::warn!(
+            topic = %self.topic,
+            consumer = %self.consumer,
+            error = %e,
+            "Streams: reset-marker poll failed for topic {} consumer {}; retrying in {}ms. A pending reset is delayed, not lost: the marker stays in Redis until a worker acts on it.",
+            self.topic,
+            self.consumer,
+            self.interval.as_millis() * u128::from(self.reset_poll_ticks)
+        );
     }
 
     /// The reset tick: notice markers of owned partitions, hand them to the read loops, delete the
@@ -1083,16 +1103,10 @@ impl<S: PositionStore> Inner<S> {
         let (Some(redis), Some(signal)) = (&self.redis, &self.resets) else {
             return Ok(());
         };
-        let partitions = u32::try_from(self.slots.len()).unwrap_or(u32::MAX);
-        let owned: Vec<u32> = match &self.owned {
-            Some(rx) => rx
-                .borrow()
-                .iter()
-                .copied()
-                .filter(|&p| p < partitions)
-                .collect(),
-            None => (0..partitions).collect(),
-        };
+        // Serialised with `flush`, which also clears taken markers: a reset requested here while
+        // a flush is between its delete and its slot clear must not have its slot cleared there.
+        let _gate = self.gate.lock().await;
+        let owned = self.owned_partitions();
         // A hold on a partition no longer owned would never be released by a rewind.
         for (index, slot) in self.slots.iter().enumerate() {
             let partition = u32::try_from(index).unwrap_or(u32::MAX);
@@ -1140,34 +1154,62 @@ impl<S: PositionStore> Inner<S> {
             lock(&self.marker_values).insert(partition, raw);
         }
 
-        let clear: Vec<(u32, String)> = {
-            let values = lock(&self.marker_values);
-            owned
+        self.clear_taken().await
+    }
+
+    fn owned_partitions(&self) -> Vec<u32> {
+        let partitions = u32::try_from(self.slots.len()).unwrap_or(u32::MAX);
+        match &self.owned {
+            Some(rx) => rx
+                .borrow()
                 .iter()
-                .filter(|&&p| signal.is_taken(p))
-                .filter_map(|&p| Some((p, values.get(&p)?.clone())))
+                .copied()
+                .filter(|&p| p < partitions)
+                .collect(),
+            None => (0..partitions).collect(),
+        }
+    }
+
+    /// Deletes the `__reset:<p>` field of every owned partition whose reset a read loop has taken
+    /// (compare-and-delete: a newer marker survives), then clears those slots. Called under the
+    /// gate, by the reset tick and at the start of every flush (so the final flush at stop does
+    /// it too), always **before** the partition's post-rewind position is written: `drain` skips a
+    /// taken partition. A crash at any point therefore leaves either the marker next to the reset
+    /// target (the reset applies once more, replaying nothing persisted past it) or no marker,
+    /// never a marker next to a newer position.
+    async fn clear_taken(&self) -> Result<()> {
+        let (Some(redis), Some(signal)) = (&self.redis, &self.resets) else {
+            return Ok(());
+        };
+        let clear: Vec<(u32, ResetMarker, String)> = {
+            let values = lock(&self.marker_values);
+            self.owned_partitions()
+                .into_iter()
+                .filter_map(|p| Some((p, signal.taken(p)?, values.get(&p)?.clone())))
                 .collect()
         };
         if clear.is_empty() {
             return Ok(());
         }
-        clear_markers(&mut conn, &redis.positions_key, &clear).await?;
+        let fields: Vec<(u32, String)> = clear.iter().map(|(p, _, v)| (*p, v.clone())).collect();
+        let mut conn = redis.conn.clone();
+        clear_markers(&mut conn, &redis.positions_key, &fields).await?;
 
         // Only now that the field is gone: clearing the slot first would let the next tick see the
         // same marker again and rewind the reader a second time.
-        for (partition, _) in clear {
-            if let Some(applied) = signal.try_clear_taken(partition) {
+        for (partition, marker, _) in clear {
+            if signal.clear_taken_if(partition, marker) {
                 lock(&self.marker_values).remove(&partition);
                 self.resets_applied.fetch_add(1, Ordering::AcqRel);
                 tracing::info!(
                     topic = %self.topic,
                     consumer = %self.consumer,
                     partition,
-                    target = %applied.target,
+                    target = %marker.target,
                     "Streams: reset marker cleared for topic {} consumer {} partition {partition}; reads restarted after {}.",
                     self.topic,
                     self.consumer,
-                    applied.target
+                    marker.target
                 );
             }
         }

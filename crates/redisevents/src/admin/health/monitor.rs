@@ -292,6 +292,11 @@ impl PartitionMonitor {
         instruments::set_block_duration_ms(&self.metric_key, blocked);
     }
 
+    /// Whether the partition is in the blocked state (C# `State == PartitionRunState.Blocked`).
+    pub(crate) fn is_blocked(&self) -> bool {
+        self.lock().state == StreamPartitionRunState::Blocked
+    }
+
     /// The blocking failure cleared (C# `MarkUnblocked`).
     pub(crate) fn mark_unblocked(&self) {
         let mut inner = self.lock();

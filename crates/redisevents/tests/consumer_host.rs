@@ -276,6 +276,67 @@ async fn admin_reset_rewinds_a_running_consumer() {
     host.shutdown().await.expect("shutdown");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reset_taken_just_before_shutdown_is_not_applied_again_on_restart() {
+    // The read loop takes the reset and replays; the host stops before the flusher's next tick
+    // deletes `__reset:<p>`. The final flush must delete it, or the next start rewinds again and
+    // replays everything a second time.
+    let redis = require_redis!();
+    let topic = redis.new_topic("host-reset-stop");
+    let consumer = redis.new_consumer("c");
+    publish(redis, &topic, 1, &["k"], 5).await;
+    // A long tick: the reset is noticed on one tick and the host is gone before the next.
+    let mut opts = consumer_options(&topic, &consumer);
+    opts.persist_interval_ms = 3_000;
+    let handler = Arc::new(RecordingHandler::new());
+    let host = spawn(redis, &topic, 1, opts.clone(), handler.clone())
+        .await
+        .expect("spawn");
+    handler.wait_for(5, WAIT).await;
+    wait_until_positions(redis, &topic, &consumer, 1).await;
+    StreamAdmin::new(redis.connect().await, redis.keys())
+        .reset_position(
+            &topic,
+            &consumer,
+            ResetTarget::Start,
+            &ResetOptions::default(),
+        )
+        .await
+        .expect("reset");
+    handler.wait_for(10, WAIT).await;
+    let key = redis.keys().positions(&topic, &consumer);
+    assert!(
+        hgetall(redis, &key)
+            .await
+            .keys()
+            .any(|k| k.starts_with("__reset")),
+        "the test must stop the host before a tick cleared the marker"
+    );
+    host.shutdown().await.expect("shutdown");
+
+    let stored = hgetall(redis, &key).await;
+    assert!(
+        !stored.keys().any(|k| k.starts_with("__reset")),
+        "the final flush deletes the taken marker: {stored:?}"
+    );
+    let replayed_last = handler.messages()[9].id();
+    assert_eq!(
+        positions(redis, &topic, &consumer).await[&0],
+        replayed_last,
+        "the position after the rewind is written"
+    );
+
+    publish(redis, &topic, 1, &["a"], 1).await;
+    let second = Arc::new(RecordingHandler::new());
+    let host = spawn(redis, &topic, 1, opts, second.clone())
+        .await
+        .expect("respawn");
+    second.wait_for(1, WAIT).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(second.bodies(), vec!["a|0".to_owned()], "no second rewind");
+    host.shutdown().await.expect("shutdown");
+}
+
 async fn wait_until_positions(redis: &RedisFixture, topic: &str, consumer: &str, n: usize) {
     let deadline = Instant::now() + Duration::from_secs(20);
     while positions(redis, topic, consumer).await.len() < n {
