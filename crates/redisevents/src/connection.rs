@@ -44,15 +44,20 @@ impl Connection {
     /// # Errors
     /// [`Error::Transport`] when the connect fails.
     pub async fn from_client(client: Client) -> Result<Self> {
-        let shared = client.get_connection_manager().await.map_err(|e| {
-            Error::transport_with(
-                format!(
-                    "Streams: failed to connect to Redis at '{}'.",
-                    client.get_connection_info().addr()
-                ),
-                e,
-            )
-        })?;
+        use tracing::Instrument as _;
+
+        let addr = client.get_connection_info().addr().to_string();
+        let span = tracing::debug_span!("redis.connect", "server.address" = %addr);
+        let shared = client
+            .get_connection_manager()
+            .instrument(span)
+            .await
+            .map_err(|e| {
+                Error::transport_with(
+                    format!("Streams: failed to connect to Redis at '{addr}'."),
+                    e,
+                )
+            })?;
         Ok(Self { client, shared })
     }
 

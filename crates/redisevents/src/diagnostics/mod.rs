@@ -1,6 +1,11 @@
 //! Metrics and tracing. **Names: W0.2** (final, identical to C# so dashboards serve both).
 //! **Everything else: B6** (port of `StreamActivity.cs`, `StreamSpans.cs`, `StreamsDiagnostics.cs`,
 //! `StreamNames.cs`, the `traceparent` parsing, and an `otel` feature for OpenTelemetry export).
+//!
+//! Without the `otel` feature, spans are `tracing` spans and metrics are no-ops (the gauge store is
+//! still maintained). With `otel`, spans and metrics go to the global OpenTelemetry tracer and meter.
+//! The StackExchange.Redis profiling hook of C# `RedisEvents.Tracing` is not ported: redis-rs has no
+//! equivalent seam, so only `Connection::connect` is spanned.
 
 /// The meter / tracer name.
 pub const METER_NAME: &str = "RedisEvents";
@@ -46,3 +51,14 @@ pub mod spans {
     /// Consumer span, one per batch.
     pub const PROCESS: &str = "streams.process";
 }
+
+// The internal modules are wired in by the publisher, consumer and connection work packages; until
+// then parts of them have no caller, so dead-code lints are allowed here (remove once wired).
+#[allow(dead_code)]
+pub(crate) mod activity;
+#[allow(dead_code)]
+pub(crate) mod instruments;
+#[allow(dead_code)]
+pub(crate) mod names;
+#[allow(dead_code)]
+pub(crate) mod traceparent;
