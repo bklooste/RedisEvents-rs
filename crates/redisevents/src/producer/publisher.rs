@@ -241,6 +241,99 @@ impl StreamPublisher {
     }
 }
 
+/// One entry of a mixed-partition pipeline (crate-private, for the buffered publisher's flush).
+pub(crate) struct PipelinedEntry<'a> {
+    pub(crate) partition_key: &'a str,
+    pub(crate) body: &'a [u8],
+    pub(crate) msg_type: &'a str,
+    /// Must carry the resolved partition (`options.partition = Some(p)`), so routing is not redone.
+    pub(crate) options: &'a PublishOptions,
+}
+
+impl StreamPublisher {
+    /// The partition `partition_key` / `explicit` routes to (the same rule `publish` uses).
+    pub(crate) fn route(&self, partition_key: &str, explicit: Option<u32>) -> Result<u32> {
+        self.router.route(partition_key, explicit)
+    }
+
+    /// Writes `entries` as one pipeline, in the given order, across any partitions, and returns
+    /// each entry's own outcome (index for index). Redis runs a pipeline's commands in order on
+    /// one connection, so entries sharing a partition land in the order given.
+    pub(crate) async fn publish_pipelined(
+        &self,
+        entries: &[PipelinedEntry<'_>],
+    ) -> Vec<Result<()>> {
+        let mut outcomes: Vec<Option<Result<()>>> = Vec::with_capacity(entries.len());
+        let mut issued: Vec<(usize, u32)> = Vec::with_capacity(entries.len());
+        let mut pipe = redis::pipe();
+        pipe.ignore_errors();
+        for (i, entry) in entries.iter().enumerate() {
+            let cmd = self
+                .prepare(entry.partition_key, entry.options)
+                .and_then(|prepared| {
+                    let fields = entry_fields(
+                        &prepared,
+                        entry.partition_key,
+                        entry.body,
+                        entry.msg_type,
+                        entry.options,
+                    );
+                    self.layout
+                        .xadd(prepared.partition, &fields)
+                        .map(|cmd| (cmd, prepared.partition))
+                });
+            match cmd {
+                Ok((cmd, partition)) => {
+                    pipe.add_command(cmd);
+                    issued.push((i, partition));
+                    outcomes.push(None);
+                }
+                Err(e) => outcomes.push(Some(Err(e))),
+            }
+        }
+        if !issued.is_empty() {
+            let mut conn = self.conn.shared();
+            let replies: redis::RedisResult<Vec<redis::Value>> = pipe.query_async(&mut conn).await;
+            let mut landed: Vec<(u32, u64)> = Vec::new();
+            match replies {
+                Ok(values) => {
+                    for (&(i, partition), value) in issued.iter().zip(values) {
+                        outcomes[i] = Some(if let redis::Value::ServerError(e) = value {
+                            Err(self
+                                .layout
+                                .failure(partition, 1, redis::RedisError::from(e)))
+                        } else {
+                            match landed.iter_mut().find(|(p, _)| *p == partition) {
+                                Some((_, n)) => *n += 1,
+                                None => landed.push((partition, 1)),
+                            }
+                            Ok(())
+                        });
+                    }
+                }
+                Err(e) => {
+                    for &(i, partition) in &issued {
+                        outcomes[i] = Some(Err(self.layout.failure(
+                            partition,
+                            1,
+                            redis::RedisError::from((e.kind(), "pipeline failed", e.to_string())),
+                        )));
+                    }
+                }
+            }
+            for (partition, n) in landed {
+                record_published(&self.layout.topic, partition, n);
+            }
+        }
+        outcomes
+            .into_iter()
+            .map(|o| {
+                o.unwrap_or_else(|| Err(Error::transport("XADD reply missing from the pipeline")))
+            })
+            .collect()
+    }
+}
+
 impl Publisher for StreamPublisher {
     async fn publish(
         &self,
