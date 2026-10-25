@@ -1,7 +1,7 @@
 //! Start-position resolution. **Owner: B4** (port of `StartPosition.cs`).
 //!
 //! A position is "the last id already dealt with", and a read resumes strictly after it. `$` (`Now`)
-//! is resolved by the server on the first read only; [`StartPosition::read_from`] encodes that.
+//! is resolved by the server on the first read only; `StartPosition::read_from` encodes that.
 // C2 consumes `read_from`; until then only tests do.
 #![allow(dead_code)]
 

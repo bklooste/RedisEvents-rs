@@ -570,7 +570,7 @@ pub fn resolve_sync_timeout_ms(connection_string: Option<&str>) -> Result<u32> {
 /// redis-rs URL for [`Connection::connect`](crate::Connection::connect).
 ///
 /// Supported keys (case-insensitive): `password`, `user`, `ssl`, `defaultDatabase`, `syncTimeout`
-/// (read by [`resolve_sync_timeout_ms`]), and the accepted-but-ignored keys in [`IGNORED_KEYS`].
+/// (read by `resolve_sync_timeout_ms`), and the accepted-but-ignored keys in `IGNORED_KEYS`.
 /// Other keys are refused. A single endpoint is supported: cluster and sentinel are not wired.
 ///
 /// # Errors

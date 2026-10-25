@@ -10,7 +10,8 @@ It is **wire-compatible** with the C# library. A Rust producer can feed a C# con
 reverse, on the same Redis, the same topics and the same consumer positions. The contract is
 written down in [`wire-spec/WIRE.md`](wire-spec/WIRE.md) and enforced in CI.
 
-> **Status: scaffolding.** The library is not usable yet. The roadmap is in [`docs/PLAN.md`](docs/PLAN.md).
+> **Status: core library functional.** The event-sourcing crate and the sample services are still in progress.
+> The roadmap is in [`docs/PLAN.md`](docs/PLAN.md).
 
 ## Quick start
 
@@ -94,7 +95,8 @@ Samples live under [`samples/`](samples). They are not published.
   Cross-language topics must use explicit type strings, which the Rust API always requires.
 - **Same environment variables.** Keys are prefixed from `STREAMS_KEY_PREFIX`, or else from
   `ASPNETCORE_ENVIRONMENT` / `DOTNET_ENVIRONMENT`. The Rust side reads the same variables, so set
-  them the same way for both services.
+  them the same way for both services. The Rust side also reads `STREAMS_ENVIRONMENT` after those
+  two (C# does not), so do not set it on a service that must interoperate.
 - **Redis 7.4+** (for `HEXPIRE`), the same requirement as C#.
 
 ## Building

@@ -1,36 +1,36 @@
 //! The fetch layer: blocking `XREAD` on dedicated reader connections
 //! ([`Connection::dedicated`](crate::Connection::dedicated)), polling reads, parsing the raw reply
-//! into [`StreamMsg`](crate::StreamMsg)s through [`wire::codec::decode`](crate::wire::codec::decode)
+//! into `StreamMsg`s through `wire::codec::decode`
 //! without copying bodies, and cancelling a parked read. **Owner: C1** (port of `BlockFetch.cs`,
 //! `PollFetch.cs`, `StreamReaderConnection.cs`, `StreamBatch.cs`). Items here are `pub(crate)`
 //! unless the lead agrees otherwise.
 //!
 //! # Shape
 //!
-//! - [`ReaderConnection`]: the dedicated, read-only socket a `ReadMode::Block` consumer reads on
+//! - `ReaderConnection`: the dedicated, read-only socket a `ReadMode::Block` consumer reads on
 //!   (C# `StreamReaderConnection`). Cheap to clone; clones share one socket, which is how the
 //!   per-partition read loops of a consumer with `CoLocatePartitions = false` share one reader
 //!   connection, as in C#. It can only issue `XREAD`, and it reconnects on its own.
-//! - [`Fetch`]: one read loop's fetch, over one or more partitions (the co-located group is one
+//! - `Fetch`: one read loop's fetch, over one or more partitions (the co-located group is one
 //!   multi-stream `XREAD`, the single-partition form is a group of one). It owns the read cursor of
 //!   every partition it covers, advances each to the last id it returned, and moves one on
-//!   [`Fetch::seek`] (C# `SeekTo` / `ResetSeek`, for the reset-marker protocol). Built with
-//!   [`Fetch::block`] (C# `BlockFetch`) or [`Fetch::poll`] (C# `PollFetch`, on the shared
+//!   `Fetch::seek` (C# `SeekTo` / `ResetSeek`, for the reset-marker protocol). Built with
+//!   `Fetch::block` (C# `BlockFetch`) or `Fetch::poll` (C# `PollFetch`, on the shared
 //!   connection, with the idle back-off folded in).
-//! - [`StreamBatch`]: what one fetch hands back per partition: decoded messages plus the last id
+//! - `StreamBatch`: what one fetch hands back per partition: decoded messages plus the last id
 //!   read. No pooling: the batch owns a `Vec`, and every body is a `Bytes` that took over the
 //!   reply's bulk-string buffer (no copy), so a handler may keep messages as long as it likes and the
 //!   C# `StreamBatch.Rent`/`Return`/`Copy` lifetime contract has no Rust counterpart.
 //!
 //! # Cancellation
 //!
-//! Cancelling = dropping the [`Fetch::fetch`] future. That is safe at every await point:
+//! Cancelling = dropping the `Fetch::fetch` future. That is safe at every await point:
 //!
 //! - **Cursors** move only after a reply has been fully parsed, so a dropped read loses nothing;
 //!   the entries it would have returned are read again by the next fetch.
 //! - **No stale reply**: redis-rs matches replies to requests in order inside the multiplexed
 //!   connection's driver, and the reply to a dropped request is discarded there, never handed to
-//!   the next caller. On top of that, a [`ReaderConnection`] whose read is dropped mid-flight
+//!   the next caller. On top of that, a `ReaderConnection` whose read is dropped mid-flight
 //!   **discards its socket**: the next read opens a fresh one instead of queueing behind a `BLOCK`
 //!   still parked server-side, and the old socket closes once the last clone using it is gone (Redis
 //!   then drops the parked read). Reads already in flight on the old socket from other clones finish
@@ -41,9 +41,9 @@
 //!
 //! # Handoff to C2
 //!
-//! C2 builds one [`Fetch`] per read loop and calls [`Fetch::fetch`] in a loop (it never sleeps on
-//! its own: both modes own their idling), [`Fetch::seek`] to apply a reset before the next fetch, and
-//! [`Fetch::position`] to read a cursor. See `docs/CONTRACTS.md` §4, "C1 handoff".
+//! C2 builds one `Fetch` per read loop and calls `Fetch::fetch` in a loop (it never sleeps on
+//! its own: both modes own their idling), `Fetch::seek` to apply a reset before the next fetch, and
+//! `Fetch::position` to read a cursor. See `docs/CONTRACTS.md` §4, "C1 handoff".
 
 // Consumed by C2 (worker.rs); until it lands, only the tests here use these items.
 #![cfg_attr(not(test), allow(dead_code))]

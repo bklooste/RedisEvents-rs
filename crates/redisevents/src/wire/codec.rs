@@ -95,7 +95,7 @@ impl EntryFields<'_> {
 /// `codec_version` is the topic's `v`; anything but [`CODEC_VERSION`] is refused.
 ///
 /// # Errors
-/// [`Error::Transport`](crate::Error::Transport) for an unsupported codec version.
+/// `Error::Transport` for an unsupported codec version.
 pub fn decode<N, I>(
     id: StreamId,
     partition: u32,
@@ -135,7 +135,7 @@ where
 /// `Ok` when `codec_version` is one this build understands.
 ///
 /// # Errors
-/// [`Error::Transport`](crate::Error::Transport) naming the version and the `m:{topic}` field.
+/// `Error::Transport` naming the version and the `m:{topic}` field.
 pub fn ensure_supported_version(codec_version: u32) -> Result<()> {
     if codec_version == CODEC_VERSION {
         Ok(())

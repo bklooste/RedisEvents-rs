@@ -1,6 +1,6 @@
 //! Batched Restate workflow starts from a redisevents stream (port of `RedisEvents.Restate`).
 //!
-//! [`RestateStartHandler`] is a [`TypedBatchHandler`]: wrap it in
+//! [`RestateStartHandler`] is a [`TypedBatchHandler`](redisevents::consumer::TypedBatchHandler): wrap it in
 //! [`Typed`](redisevents::consumer::Typed) to use it as a batch handler. It starts one Restate
 //! workflow per kept message, keyed by a business id, and acks the batch only once every start has
 //! been accepted.

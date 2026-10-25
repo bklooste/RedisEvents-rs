@@ -5,24 +5,24 @@
 //!
 //! # Shape
 //!
-//! One [`PositionFlusher`] per consumer (topic, consumer pair), shared as `Arc`. It implements
-//! [`PositionSink`], so the host hands it to every partition worker as `Arc<dyn PositionSink>`:
+//! One `PositionFlusher` per consumer (topic, consumer pair), shared as `Arc`. It implements
+//! `PositionSink`, so the host hands it to every partition worker as `Arc<dyn PositionSink>`:
 //!
-//! - [`record`](PositionSink::record) stores the last processed id in the partition's slot and
+//! - `record` stores the last processed id in the partition's slot and
 //!   marks it dirty. A short uncontended lock; no await, no Redis.
-//! - the timer ([`start`](PositionFlusher::start)) writes every dirty partition in one
+//! - the timer (`start`) writes every dirty partition in one
 //!   [`PositionStore::save`] per `interval`, and writes nothing at all when nothing is dirty.
-//! - [`flush`](PositionSink::flush) is the same write on demand (`SyncBatch` / `SyncMessage`); it
+//! - `flush` is the same write on demand (`SyncBatch` / `SyncMessage`); it
 //!   resolves once everything recorded before the call has landed, or with the write's error.
-//! - [`stop`](PositionFlusher::stop) stops the timer and does a final flush.
+//! - `stop` stops the timer and does a final flush.
 //!
-//! `PersistMode::None` uses [`NoPositions`](crate::consumer::shared::NoPositions) instead of a
+//! `PersistMode::None` uses `NoPositions` instead of a
 //! flusher; `AsyncBatch` uses the timer only; the two `Sync*` modes use the timer plus the worker's
 //! awaited `flush`. The flusher itself does not need to know the mode.
 //!
 //! # Second-writer check (R-01 option B)
 //!
-//! With [`FlusherOptions::redis`] set, each write is pipelined with an `HMGET` of the same fields
+//! With `FlusherOptions::redis` set, each write is pipelined with an `HMGET` of the same fields
 //! (sent first on the same multiplexed connection, so it reads the values **before** our write).
 //! A value stamped with another instance id is a question, not a verdict:
 //!
@@ -34,19 +34,19 @@
 //!   an admin tool, a dead pod): keep writing. Lease mode and the claim names us → a late flush
 //!   from the previous owner: keep writing. Static mode inside `contested_grace` → wait. Otherwise
 //!   the lower id keeps the partition (gauge + error log) and the higher one **stands down**: it
-//!   stops writing that partition, revokes the attached [`PartitionStop`] and calls
-//!   [`FlusherOptions::on_contested`]. A failed probe stands nothing down.
+//!   stops writing that partition, revokes the attached `PartitionStop` and calls
+//!   `FlusherOptions::on_contested`. A failed probe stands nothing down.
 //! - every `recheck_interval`, a stood-down partition re-probes its contender's presence and
-//!   resumes ([`FlusherOptions::on_recovered`]) once it is gone.
+//!   resumes (`FlusherOptions::on_recovered`) once it is gone.
 //!
 //! # Reset hand-off (`WIRE.md` §7)
 //!
-//! With [`FlusherOptions::resets`] and `redis` set, every `reset_poll_interval` the timer reads the
-//! `__reset:<p>` markers of the partitions this instance owns ([`FlusherOptions::owned`]) and
-//! [`ResetSignal::request`]s them. While a reset is pending for a partition, the flusher **does not
+//! With `FlusherOptions::resets` and `redis` set, every `reset_poll_interval` the timer reads the
+//! `__reset:<p>` markers of the partitions this instance owns (`FlusherOptions::owned`) and
+//! `ResetSignal::request`s them. While a reset is pending for a partition, the flusher **does not
 //! write that partition**: the admin call stored the target as the position, and writing a
 //! pre-reset position over it would both lose the reset on a crash and let the trimmer clamp past
-//! the replay range. The read loop takes the reset and calls [`rewind`](PositionSink::rewind)
+//! the replay range. The read loop takes the reset and calls `rewind`
 //! (dropping the pre-reset pending position and releasing the hold) before it seeks; a later tick
 //! sees the slot taken and deletes the field with a compare-and-delete (only if it still holds the
 //! value we read, so a newer marker written in between survives), then clears the slot. Every

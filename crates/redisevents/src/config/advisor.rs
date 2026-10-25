@@ -4,7 +4,7 @@
 //! The C# advisor re-runs validation with a real logger once the host exists, so the advisory lines
 //! reach the log. Here the caller builds the advisor once at startup and calls
 //! [`StreamsConfigurationAdvisor::log`]; the advisory lines themselves come from
-//! [`binder::advise`](super::binder::advise).
+//! `binder::advise`.
 
 use tracing::Level;
 

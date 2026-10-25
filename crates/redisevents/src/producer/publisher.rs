@@ -32,8 +32,8 @@ impl StreamPublisher {
     /// A publisher for `topic`, ensuring its meta hash first.
     ///
     /// # Errors
-    /// [`Error::Config`](crate::Error::Config) when the configured partition count is below the
-    /// recorded one or the recorded codec version is unsupported; [`Error::Redis`](crate::Error::Redis)
+    /// `Error::Config` when the configured partition count is below the
+    /// recorded one or the recorded codec version is unsupported; `Error::Redis`
     /// when Redis fails.
     pub async fn new(
         conn: Connection,
