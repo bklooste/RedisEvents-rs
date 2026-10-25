@@ -27,6 +27,7 @@ uuid = { version = "1.29.0", features = ["v4", "serde"] }
 xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 
 [dev-dependencies]
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 base64 = "0.23.1"
 proptest = "1.12.0"
 redisevents-test-support = { path = "../redisevents-test-support" }
@@ -41,3 +42,7 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 otel = ["dep:opentelemetry"]
 ## In-memory test doubles (`redisevents::testing`).
 testing = []
+
+[[bench]]
+name = "micro"
+harness = false

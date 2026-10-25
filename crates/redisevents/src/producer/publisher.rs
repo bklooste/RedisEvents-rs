@@ -149,8 +149,14 @@ impl Layout {
                 self.topic
             ))
         })?;
-        let mut cmd = redis::cmd("XADD");
-        cmd.arg(stream);
+        // Presized: without it the command's buffers grow (and copy) several times per entry,
+        // which was most of the per-message encode cost (F1).
+        let trim_len: usize = self.trim.iter().map(String::len).sum();
+        let mut cmd = redis::Cmd::with_capacity(
+            3 + self.trim.len() + fields.arg_count(),
+            4 + stream.len() + trim_len + 1 + fields.data_len(),
+        );
+        cmd.arg("XADD").arg(stream);
         for arg in &self.trim {
             cmd.arg(arg);
         }
@@ -220,7 +226,7 @@ impl StreamPublisher {
         // One pipeline: every XADD is issued before any reply is read, so the batch costs one round
         // trip. `ignore_errors` returns each command's own result, so the landed entries can be
         // counted before a failure is reported.
-        let mut pipe = redis::pipe();
+        let mut pipe = redis::Pipeline::with_capacity(bodies.len());
         pipe.ignore_errors();
         for body in bodies {
             let fields = entry_fields(prepared, partition_key, body, msg_type, options);
@@ -282,7 +288,7 @@ impl StreamPublisher {
     ) -> Vec<Result<()>> {
         let mut outcomes: Vec<Option<Result<()>>> = Vec::with_capacity(entries.len());
         let mut issued: Vec<(usize, u32)> = Vec::with_capacity(entries.len());
-        let mut pipe = redis::pipe();
+        let mut pipe = redis::Pipeline::with_capacity(entries.len());
         pipe.ignore_errors();
         for (i, entry) in entries.iter().enumerate() {
             let cmd = self

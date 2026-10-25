@@ -70,8 +70,10 @@ impl EntryFields<'_> {
 }
 
 impl EntryFields<'_> {
-    /// How many arguments [`EntryFields::write_to`] appends (field names and values).
-    pub(crate) fn arg_count(&self) -> usize {
+    /// How many arguments [`EntryFields::write_to`] appends (field names and values). With
+    /// [`EntryFields::data_len`], a sizing hint for `redis::Cmd::with_capacity`.
+    #[must_use]
+    pub fn arg_count(&self) -> usize {
         let mut n = 4;
         if self.partition_key.is_some() {
             n += 2;
@@ -86,6 +88,24 @@ impl EntryFields<'_> {
             n += 2;
         }
         n
+    }
+
+    /// How many bytes of argument data [`EntryFields::write_to`] appends (one byte per field name
+    /// plus the values). Presizing the command with it means building an `XADD` costs one
+    /// allocation per buffer instead of a reallocation each time the body or a field outgrows it.
+    #[must_use]
+    pub fn data_len(&self) -> usize {
+        let opt = |v: Option<&str>| non_empty(v).map_or(0, |v| 1 + v.len());
+        2 + self.body.len()
+            + self.msg_type.len()
+            + self.partition_key.map_or(0, |k| 1 + k.len())
+            + opt(self.correlation_id)
+            + opt(self.trace_parent)
+            + if self.headers.is_empty() {
+                0
+            } else {
+                1 + self.headers.packed().len()
+            }
     }
 }
 
