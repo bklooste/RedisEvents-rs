@@ -169,7 +169,8 @@ def check(cond: bool, msg: str) -> None:
 # Gate vocabulary: "pair" scenarios take their gate from the direction of the (producer, consumer)
 # pair (rust->cs is G1, cs->rust is G2; same-language pairs are the baseline). Others name one.
 SCENARIOS: list[tuple[str, str, object]] = []
-XFAIL: dict[str, str] = {}  # scenario name -> reason; a known C# library bug, reported but not failing
+XFAIL: dict[str, str] = {}  # scenario name -> reason; a known C# library bug, reported but not failing.
+# It applies only when C# is the producer: a Rust producer passing says nothing about the C# bug.
 SHARED: dict[str, object] = {}  # facts the first pair establishes (C# is the reference), others must match
 
 
@@ -404,13 +405,14 @@ def main() -> int:
                 tag = f"{run_id}-{name[:14]}-{prod[0]}{cons[0]}".replace("_", "")
                 ctx = Ctx(hosts, redis, prefix, prod, cons, tag)
                 t0 = time.time()
+                xfail = name in XFAIL and prod == "cs"
                 try:
                     fn(ctx)
-                    status = "XPASS  (known bug no longer reproduces; drop the xfail)" if name in XFAIL else "PASS"
+                    status = "XPASS  (known bug no longer reproduces; drop the xfail)" if xfail else "PASS"
                 except Skip as s:
                     status = f"SKIP  (not implemented: {s})"
                 except Exception as e:  # noqa: BLE001 - report every failure
-                    if name in XFAIL:
+                    if xfail:
                         status = "XFAIL  (known C# bug: " + XFAIL[name].split(";")[0] + ")"
                         print(f"{label} {status}\n    {str(e).splitlines()[0]}")
                         results["XFAIL"] += 1
