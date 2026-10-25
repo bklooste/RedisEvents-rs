@@ -25,6 +25,11 @@ The public surface of the `redisevents` core crate, frozen by W0.2, and which wo
 8. **Partitions are `u32`, everywhere.** Partition counts are `u32`. Stream ids are `StreamId`, never
    strings, inside the library.
 
+> **F3 (0.1.0 release) API hygiene.** Report/status/health/preview/metadata structs and the enums and
+> error types likely to grow are `#[non_exhaustive]` (external code matches with `_` and builds them
+> through constructors, e.g. `StreamHealthReport::new(..).with_data(..)`). Option structs stay
+> literal-constructible (`..Default::default()`). The `tls-rustls` cargo feature enables `rediss://`.
+
 ## 1. Crate and module map
 
 ```
@@ -203,6 +208,8 @@ Use after shutdown → `Closed("<component>")`.
 async fn connect(url: &str) -> Result<Self>            // redis-rs URL; bad URL → Config, connect fail → Transport
 async fn from_client(redis::Client) -> Result<Self>
 fn shared(&self) -> redis::aio::ConnectionManager        // cheap clone, auto-reconnect, has a response timeout
+async fn from_options(&StreamOptions) -> Result<Connection>    // F3: Streams:ConnectionString -> URL -> connect
+fn url_from_options(&StreamOptions) -> Result<String>          // F3: the URL, no connect
 async fn dedicated(&self) -> Result<MultiplexedConnection>       // new socket, NO response timeout
 async fn dedicated_with_timeout(&self, Duration) -> Result<MultiplexedConnection>
 async fn dedicated_with(&self, &AsyncConnectionConfig) -> Result<MultiplexedConnection>

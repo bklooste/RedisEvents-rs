@@ -15,6 +15,7 @@ use crate::error::Result;
 /// One advisory line: informational, or a warning about a configuration that will work but is
 /// almost certainly not what the operator wanted.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Advisory {
     /// [`Level::WARN`] or [`Level::INFO`].
     pub level: Level,

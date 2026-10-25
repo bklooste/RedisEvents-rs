@@ -9,6 +9,7 @@ use redisevents::{StreamId, StreamMsg};
 
 /// What the projector knows about an event besides its decoded value (C# `EventMeta`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EventMeta {
     /// The entry's partition key (the aggregate id for event-sourced topics).
     pub partition_key: String,

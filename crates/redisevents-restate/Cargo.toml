@@ -6,14 +6,19 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = true
+readme = "README.md"
+documentation = "https://docs.rs/redisevents-restate"
+homepage = "https://github.com/bklooste/RedisEvents-rs"
+keywords = ["redis", "streams", "restate", "workflow", "batching"]
+categories = ["asynchronous", "network-programming"]
 
 [lints]
 workspace = true
 
 [dependencies]
 futures-util = "0.3.34"
-redisevents = { path = "../redisevents" }
+redisevents = { path = "../redisevents", version = "0.1.0" }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 serde = "1.0.229"
 serde_json = "1.0.154"
@@ -22,6 +27,6 @@ tracing = "0.1.44"
 
 [dev-dependencies]
 bytes = "1.12.1"
-redisevents = { path = "../redisevents", features = ["testing"] }
+redisevents = { path = "../redisevents", version = "0.1.0", features = ["testing"] }
 serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "sync"] }

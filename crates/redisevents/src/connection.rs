@@ -39,6 +39,31 @@ impl Connection {
         Self::from_client(client).await
     }
 
+    /// Connects to the endpoint a bound `Streams` config names: its `ConnectionString` (a
+    /// StackExchange.Redis string such as `host:6379,password=...,ssl=true`, translated by
+    /// [`to_redis_url`](crate::config::binder::to_redis_url)), or the C# default when unset. One
+    /// config file can then serve both the C# and the Rust runtime.
+    ///
+    /// `ssl=true` yields a `rediss://` URL, which needs the `tls-rustls` cargo feature.
+    ///
+    /// # Errors
+    /// [`Error::Config`] naming `Streams:ConnectionString` when it does not parse;
+    /// [`Error::Transport`] when the first connect fails.
+    pub async fn from_options(options: &crate::config::StreamOptions) -> Result<Self> {
+        let url = Self::url_from_options(options)?;
+        Self::connect(&url).await
+    }
+
+    /// The redis-rs URL [`Connection::from_options`] connects to, without connecting.
+    ///
+    /// # Errors
+    /// [`Error::Config`] naming `Streams:ConnectionString` when it does not parse.
+    pub fn url_from_options(options: &crate::config::StreamOptions) -> Result<String> {
+        crate::config::binder::to_redis_url(&crate::config::binder::resolve_connection_string(
+            options,
+        ))
+    }
+
     /// Wraps an existing client, opening its shared connection.
     ///
     /// # Errors
@@ -121,5 +146,39 @@ impl fmt::Debug for Connection {
                 &self.client.get_connection_info().addr().to_string(),
             )
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod from_options_tests {
+    use super::Connection;
+    use crate::config::StreamOptions;
+
+    fn with(connection_string: &str) -> StreamOptions {
+        StreamOptions {
+            connection_string: Some(connection_string.to_owned()),
+            ..StreamOptions::default()
+        }
+    }
+
+    #[test]
+    fn translates_the_csharp_connection_string() {
+        let url = Connection::url_from_options(&with(
+            "cache:6380,password=p@ss,ssl=true,defaultDatabase=2",
+        ))
+        .unwrap();
+        assert_eq!(url, "rediss://:p%40ss@cache:6380/2");
+    }
+
+    #[test]
+    fn unset_uses_the_csharp_default() {
+        let url = Connection::url_from_options(&StreamOptions::default()).unwrap();
+        assert_eq!(url, "redis://redis-db.infra:6379/0");
+    }
+
+    #[test]
+    fn a_bad_string_is_a_config_error() {
+        let err = Connection::url_from_options(&with("host,bogusKey=1")).unwrap_err();
+        assert!(matches!(err, crate::Error::Config(_)), "{err}");
     }
 }

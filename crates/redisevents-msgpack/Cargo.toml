@@ -6,7 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = true
+readme = "README.md"
+documentation = "https://docs.rs/redisevents-msgpack"
+homepage = "https://github.com/bklooste/RedisEvents-rs"
+keywords = ["redis", "streams", "messagepack", "lz4", "serialization"]
+categories = ["encoding", "asynchronous"]
 
 [lints]
 workspace = true
@@ -14,7 +19,7 @@ workspace = true
 [dependencies]
 bytes = "1.12.1"
 lz4_flex = "0.14.0"
-redisevents = { path = "../redisevents" }
+redisevents = { path = "../redisevents", version = "0.1.0" }
 rmp = "0.8.15"
 rmp-serde = "1.3.1"
 serde = "1.0.229"

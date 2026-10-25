@@ -5,7 +5,7 @@
 //! Hash `o:{topic}:<consumer>`: field `"<p>"` = `<instanceId>|<POD_NAME>` (the owner), field
 //! `i:<instanceId>` = the same value (presence). Both carry a per-field TTL (`HEXPIRE`, Redis 7.4+).
 
-pub mod registry;
+pub(crate) mod registry;
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -17,6 +17,7 @@ use crate::config::instance::InstanceResolver;
 
 /// The owner of one partition, as stored in the ownership hash (C# `PartitionOwner`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct PartitionOwner {
     /// The partition.
     pub partition: u32,

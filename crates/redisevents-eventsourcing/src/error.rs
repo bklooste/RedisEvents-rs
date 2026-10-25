@@ -76,6 +76,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// What `execute` and `CachedAggregate::run` fail with: the caller's own decide error, or a
 /// repository failure.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ExecuteError<E> {
     /// The decide closure returned an error (a domain rule refused the command). Nothing was
     /// saved.

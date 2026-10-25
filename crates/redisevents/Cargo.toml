@@ -6,7 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = true
+readme = "README.md"
+documentation = "https://docs.rs/redisevents"
+homepage = "https://github.com/bklooste/RedisEvents-rs"
+keywords = ["redis", "streams", "messaging", "event-driven", "partitioning"]
+categories = ["asynchronous", "network-programming"]
 
 [lints]
 workspace = true
@@ -37,6 +42,8 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "test-uti
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 
 [features]
+## TLS for `rediss://` URLs (C# `ssl=true`), through rustls with the platform-independent webpki roots.
+tls-rustls = ["redis/tokio-rustls-comp", "redis/tls-rustls-webpki-roots"]
 ## OpenTelemetry export: spans and metrics through the `opentelemetry` API (global tracer and meter
 ## named `RedisEvents`). Without it spans are `tracing` spans and metrics are no-ops.
 otel = ["dep:opentelemetry"]

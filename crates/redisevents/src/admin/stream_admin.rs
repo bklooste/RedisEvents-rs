@@ -40,6 +40,7 @@ const COUNT_PAGE_SIZE: usize = 1000;
 
 /// Which way a reset moves a partition's position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ResetDirection {
     /// The target equals the current position: nothing is reprocessed and nothing skipped.
     None,
@@ -61,6 +62,7 @@ impl ResetDirection {
 
 /// Where a reset moves positions to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ResetTarget {
     /// Replay from this instant: the entry written exactly on its millisecond is delivered.
     Time(OffsetDateTime),
@@ -102,6 +104,7 @@ impl Default for ResetOptions {
 
 /// What a reset would do to one partition, computed without changing anything.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PartitionResetPreview {
     /// The partition.
     pub partition: u32,
@@ -131,6 +134,7 @@ pub struct PartitionResetPreview {
 
 /// What a reset would do to a consumer, per partition.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResetPreview {
     /// The topic.
     pub topic: String,

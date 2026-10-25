@@ -92,6 +92,7 @@ pub enum StreamPartitionRunState {
 
 /// The grade of one partition (C# `StreamPartitionHealth`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct StreamPartitionHealth {
     /// The status.
     pub status: StreamHealthStatus,
@@ -101,6 +102,7 @@ pub struct StreamPartitionHealth {
 
 /// A point-in-time snapshot of one partition (C# `StreamPartitionStatus`).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct StreamPartitionStatus {
     /// Topic.
     pub topic: String,
@@ -154,6 +156,7 @@ pub struct StreamPartitionStatus {
 
 /// Process-level facts a grade depends on, beyond the partitions (C# `StreamHealthContext`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StreamHealthContext {
     /// Set when the Redis connection is down: the reason.
     pub connection_fault: Option<String>,
@@ -167,6 +170,7 @@ pub struct StreamHealthContext {
 
 /// A value in a report's [`StreamHealthReport::data`] (C# `object` values in the dictionary).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum HealthValue {
     /// A count or an integral measurement.
     Int(i64),
@@ -180,6 +184,7 @@ pub enum HealthValue {
 
 /// A consumer that is caught up and receiving nothing (C# `StreamSilentConsumer`).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct StreamSilentConsumer {
     /// Topic.
     pub topic: String,
@@ -195,6 +200,7 @@ pub struct StreamSilentConsumer {
 
 /// The verdict on stream consumption in this process (C# `StreamHealthReport`).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct StreamHealthReport {
     /// The status.
     pub status: StreamHealthStatus,
@@ -207,6 +213,39 @@ pub struct StreamHealthReport {
     pub data: BTreeMap<String, HealthValue>,
     /// The partition the rule is about, when one is.
     pub partition: Option<StreamPartitionStatus>,
+}
+
+impl StreamHealthReport {
+    /// A report with no data and no partition; add them with [`with_data`](Self::with_data) and
+    /// [`with_partition`](Self::with_partition).
+    #[must_use]
+    pub fn new(
+        status: StreamHealthStatus,
+        rule: StreamHealthRule,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            status,
+            rule,
+            description: description.into(),
+            data: BTreeMap::new(),
+            partition: None,
+        }
+    }
+
+    /// Sets the structured facts.
+    #[must_use]
+    pub fn with_data(mut self, data: BTreeMap<String, HealthValue>) -> Self {
+        self.data = data;
+        self
+    }
+
+    /// Sets the partition the rule is about.
+    #[must_use]
+    pub fn with_partition(mut self, partition: StreamPartitionStatus) -> Self {
+        self.partition = Some(partition);
+        self
+    }
 }
 
 /// Lag arithmetic and the stale-sample bound (C# `StreamLag`).

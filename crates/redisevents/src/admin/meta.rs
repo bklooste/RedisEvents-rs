@@ -41,6 +41,7 @@ const CREATED_UTC_FORMAT: &[time::format_description::BorrowedFormatItem<'static
 
 /// The topic meta as it stands after [`ensure_topic_meta`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TopicMeta {
     partitions: u32,
 }

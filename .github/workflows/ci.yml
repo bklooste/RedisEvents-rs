@@ -59,6 +59,19 @@ jobs:
         if: matrix.toolchain == 'stable'
         run: cargo test --workspace --all-features
 
+  semver-checks:
+    # Non-blocking until a baseline is published to crates.io: with no published version the check
+    # has nothing to compare against and fails, so it is advisory for now. Make it required after 0.1.0.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          exclude: interop-rust-host,inventory-domain,inventory-command,inventory-views,redisevents-test-support
+
   wire-drift:
     runs-on: ubuntu-latest
     steps:

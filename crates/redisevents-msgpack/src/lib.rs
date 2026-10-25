@@ -55,6 +55,7 @@ const MAX_DECOMPRESSED: usize = 256 * 1024 * 1024;
 
 /// How structs are laid out on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Layout {
     /// Positional arrays, as C# `[Key(int)]` types.
     #[default]
