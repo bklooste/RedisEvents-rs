@@ -173,7 +173,7 @@ hook into, so a separate crate adds nothing.
 
 ## 4. Phases
 
-Each phase ends with green CI. From Phase 2 on, each phase also passes its rows of the interop
+Each phase ends with green CI. §8 splits the phases into work packages for parallel agents. From Phase 2 on, each phase also passes its rows of the interop
 matrix in §5.
 
 ### Phase 0: Contract first (both repos)
@@ -283,17 +283,203 @@ in both directions:
 - The Rust repo's CI runs interop against C# `main` nightly, so a C# change that breaks Rust is
   caught before a release.
 
-## 8. Rough sizing (relative)
+## 8. Work breakdown: dependencies, complexity and agent allocation
 
-| Phase | Size |
-| --- | --- |
-| 0 contract + scaffold | S |
-| 1 wire | S |
-| 2 producer | M |
-| 3 consumer + ownership + positions | **L** (largest: `StreamConsumerHost`, `PositionFlusher`, `OwnershipRegistry`, `PartitionWorker.*` ≈ 8k C# lines) |
-| 4 operability | M |
-| 5 packages | M |
-| 6 perf + release | S–M |
+This section splits the phases in §4 into **work packages** (WPs). Each WP is sized so that one
+agent can take it in its own worktree and finish with one PR. The goal is to show where agents can
+run in parallel and where the work is serial.
+
+### 8.1 Two axes: complexity picks the agent, size picks the schedule
+
+- **Complexity (Cx 1–5)** is how much judgment the work needs. It decides the model. A Haiku agent
+  can port a large WP when the work is mechanical and tests or golden vectors pin down the answer.
+  A small WP with a race in it needs Opus.
+- **Size (S/M/L/XL)** is volume: how many C# lines and tests have to be read and ported. It
+  decides wall-clock time and token cost, and so the critical path and the waves. It does **not**
+  decide the model.
+
+| Cx | Meaning | Typical drivers | Agent |
+| --- | --- | --- | --- |
+| **1** | Mechanical | transliteration; tests or vectors decide every answer; no shared state | **Haiku** |
+| **2** | Routine | small local design choices; one Redis pattern; little state | **Haiku** |
+| **3** | Moderate | restructuring into Rust idioms (trait design, async, buffer ownership); Redis transactions; a format specified outside this repo | **Sonnet** |
+| **4** | Hard | concurrency, timing, shutdown or failure semantics; several interacting state machines | **Opus / medium** |
+| **5** | Hardest | Cx 4 **plus** a public API that other WPs build on, or state shared with other WPs | **Opus / high** |
+
+**Splitting rule.** When a WP is high-complexity *and* large, carve the mechanical bulk out into
+its own Cx 1–2 WP that runs alongside on Haiku. This applies to C2 and C4: their test porting, and
+C4's builder plumbing, become C2t, C4t and C4b. The Opus agent keeps only the parts that need
+judgment, and the critical path gets shorter.
+
+**Size points** (used only for scheduling): S = 1, M = 2, L = 3, XL = 5. Sizes come from
+non-comment, non-brace lines in `src/` at `f34c43a` (~11.9k of the 32k raw lines; the C# is
+heavily documented), plus the C# tests the WP ports, given as lines/cases. Those tests are the
+behavioural spec.
+
+### 8.2 Work packages
+
+| WP | Title | Ports (C# source, code lines) | Tests to port (lines/cases) | Depends on | Size | Cx | Why this complexity | Agent |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **W0.1** | Golden vector generator (**C# repo PR**) | new test over `EntryCodec`, `HeaderBlock`, `PartitionRouter`, `StreamKeys`, reset/position/owner formats, MessagePack/LZ4 | — (produces `vectors/*.json`) | — | M | 2 | Output comes from the real C# code, so it is correct by construction. The brief lists the cases to cover. | Haiku |
+| **W0.2** | Core contracts & skeleton | module layout; `StreamId`, `StreamMsg`, `HeaderBlock` API, handler traits, `HandleError`, `Publisher`/`PositionStore` traits, config structs (types only), `Connection` wrapper over redis-rs, testcontainers fixture (`TestSupport` 242) | — | — | M | **5** | Every other WP builds on it. Async trait shape, zero-copy body lifetimes and the error contract are hard to change later. | **Opus/high** |
+| A1 | Wire codec | `Wire/*`, `KeyNamespace` (458) | `WireTests` 476/44 | W0.2 (vectors from W0.1 to finish) | S | 2 | Pure functions; vectors decide every answer. | Haiku |
+| A2 | Config & instance resolution | `Config/*`: binder, `InstanceResolver`, options, advisor (520) | `ConfigBindingTests`, `ConfigTests`, `InstanceResolverTests` 982/94 | W0.2 | M | 1 | Large but mechanical: 94 tests pin every rule. | Haiku |
+| A3 | MessagePack + LZ4 framing (pure) | `Lz4BlockArray` / `Lz4Block` encode/decode; MessagePack-CSharp array/map conventions | `MessagePack.UnitTests` 154/12 | W0.2, W0.1 | M | 3 | Binary format specified in MessagePack-CSharp, not here; must be reverse-checked against vectors. | Sonnet |
+| A4 | Interop harness | `interop/dotnet/InteropHost` (C# console on the NuGet), `interop/rust-host`, scenario runner, CI `interop` job | — | W0.2 (Rust side) | M | 3 | Two toolchains plus CI orchestration; failures are slow to diagnose. | Sonnet |
+| B1 | Direct publisher + topic meta | `StreamPublisher` 259, `TypedPublishExtensions` 99, `StreamAdmin.cs` meta 167, `IStreamPublisher`, `PublishOptions` (545) | `ProducerTests` (direct part) | A1 | M | 2 | Pipelined `XADD` plus `HSETNX` meta; the grow/refuse-shrink rule is tested. | Haiku |
+| B2 | Buffered publisher | `BufferedStreamPublisher` 405 (414) | `ProducerTests` (buffered part) 553/21 shared with B1 | B1 | L | 4 | Bounded channel, flush timer, backpressure, and drain on shutdown without loss or deadlock. | Opus/med |
+| B3 | Outbox, state store, idempotency, forwarder | `Outbox` 306, `StreamStore` 181, `Idempotency` 26, `TopicForwarder` 58, `IStreamStore`, `StateEvent` (597) | `OutboxTransactionTests` 314/13 | B1 | L | 4 | `WATCH`/`MULTI` needs a dedicated connection in redis-rs (a multiplexed one breaks it); all-or-nothing under failure. | Opus/med |
+| B4 | Position store & reset markers | `RedisPositionStore` 125, `ResetMarker` 159, `StartPosition` 51, `IPositionStore`, `NullPositionStore` (389) | `PositionTests` (store/marker part) | A1 | M | 2 | Text formats plus `HSET`/`HGETALL`; vectors pin the formats. | Haiku |
+| B5 | Ownership registry | `OwnershipRegistry` 491: renew loop, `HEXPIRE` probe, contested detection, release, Static + Lease | `OwnershipTests` 322/6 | A1 (config types from W0.2) | L | 4 | The shared Lua does the claiming, but renew timing, losing a lease mid-batch and release on shutdown are subtle. | Opus/med |
+| B6 | Diagnostics, metrics, tracing | `StreamActivity` 96, `StreamSpans` 39, `StreamsDiagnostics` 141, `StreamNames` 37, OTel ext, `RedisEvents.Tracing` 59 (386) | `TraceContextTests` 297/3 | W0.2 | M | 2 | Fixed metric names and `traceparent` parsing; tests pin both. | Haiku |
+| C1 | Fetch layer | `BlockFetch` 209, `PollFetch` 61, `StreamReaderConnection` 172, `StreamBatch` 93 (535) | `BlockFetchParseTests` 222/19, `ReaderThreadTests` 312/4, `ReadModeComparisonTests` 277/3 | A1 | L | 4 | Blocking `XREAD` on dedicated connections, raw reply parsing without copying, and cancelling a parked read. | Opus/med |
+| C2 | Partition worker + error contract | `PartitionWorker.*` 970, `TypedHandlerAdapter` 122, adapters, `Backoff`, `PartitionContext` (1146) | — (C2t) | C1, B4 | L | **5** | Per-partition state machine: skip/block semantics, backoff while other partitions run, reset hand-off; the handler API everyone uses. | **Opus/high** |
+| C2t | C2 test port | — | `ErrorHandlingTests` 433/15, `ConsumerPipelineTests` 534/29, `ConsumerCoreUnitTests` 243/6 | C1, B4 (written against C2's API, fail until C2 lands) | M | 1 | 1:1 transliteration against a frozen API. | Haiku |
+| C3 | Position flusher | `PositionFlusher` 510: foreign-writer cross-check, reset hand-off, trim interlock | `PositionTests` (flusher part) 893/48 shared with B4, `WriterIdentityTests` 435/7 | B4, B5 | L | **5** | Races between the flusher, read loop, admin reset and a rival instance; shares state with C2 and C5. | **Opus/high** |
+| C4 | Consumer host | `StreamConsumerHost` 1012, `StreamsConnection` 151 (1163) | — (C4t) | C2, C3, B5, A2 | L | **5** | Wires workers, ownership changes, flusher and trimmer together; startup checks; graceful shutdown order. | **Opus/high** |
+| C4b | Builder surface | `StreamsBuilderExtensions` 400: registration overloads, typed/untyped/delegate handlers | — | C4 (API skeleton, first commit) | M | 2 | Plumbing over C4's constructor once it is fixed. | Haiku |
+| C4t | C4 test port | — | `ConsumerCoreTests` 260/6, `DeliveryTests` 412/5, `ReaderIsolationTests` 426/4, `ErrorServiceTests` 468/7, `ReplayTests` 235/3 | C4 (API skeleton) | M | 2 | Transliteration, but the integration tests need care with timing and fixtures. | Haiku |
+| C5 | Background trimmer | `BackgroundTrimmer` 371 (position interlock) | `TrimmingTests` 541/8 | B1, B4 | L | 3 | Reads the minimum position across consumers before trimming; logic is clear but losing data is the failure mode. | Sonnet |
+| D1 | Stream admin | `StreamAdmin.Reset` 445, `.Ownership` 47, `.Tail` 26 (518) | admin cases in `PositionTests` / `Tests` | B4, B5 | M | 3 | Time-to-id conversion, bounded preview counting, writing a position and its marker together. | Sonnet |
+| D2 | Health, lag, status | `StreamHealth` 320, `StreamLag` 322, `StreamStatus` 40, `StreamPartitionStatus` 32 (714) | `BehindTailHealthTests` 382/26 | B4, B5, A1 | L | 2 | Large but read-only arithmetic over Redis reads; 26 tests pin it. | Haiku |
+| D3 | `redisevents-axum` | `RedisEvents.Web` 383, `RedisEvents.HealthChecks` 48 (431) | Web endpoint cases | D1, D2 | M | 2 | Routes over D1/D2. | Haiku |
+| D4 | Testing helpers | `Testing/*`: in-memory publishers, harness, memory position store (291) | `TestDoubleTests` 305/26 | B1, C2 | S | 2 | In-memory doubles of existing traits. | Haiku |
+| E1 | `redisevents-msgpack` crate | `RedisEvents.MessagePack` typed publish/consume (124) | (A3's, plus typed round-trips) | A3, B1, C2 | S | 1 | Glue between A3 and the typed APIs. | Haiku |
+| E2 | `redisevents-projections` | `RedisEvents.Projections` (531) | `Projections.UnitTests` 753/49, `Projections.Tests` 301/13 | C2, D4, B1 | M | 3 | C# dispatches on event type at runtime; Rust needs a trait/registry design without reflection. | Sonnet |
+| E3 | `redisevents-eventsourcing` | `RedisEvents.EventSourcing` (448) | `EventSourcing.UnitTests` 869/55, `EventSourcing.Tests` 540/19 | E2, B3 | M | 3 | Aggregate trait design; optimistic concurrency built on B3. | Sonnet |
+| E4 | `redisevents-restate` | `RedisEvents.Restate` (410) | `Restate.UnitTests` 488/23 | C2, D4 | M | 3 | Bounded-parallel starts with per-item retry; the batch blocks rather than skips. | Sonnet |
+| E5 | Inventory sample, cross-language | `samples/*` in Rust; C# command API ↔ Rust view API | `Sample.Tests` 292/7 | E2, E3, D3, C4 | M | 2 | Application code over finished crates. | Haiku |
+| F1 | Benchmarks & perf | criterion mirrors of `StreamsMicroBenchmarks` / `PerfBenchmarkTests` | perf suites | C4, B2 | L | 4 | Finding and fixing bottlenecks needs profiling judgment, not porting. | Opus/med |
+| F2 | Docs & compiled samples | README samples as doctests (mirrors `ReadmeSamples` 298/5), core crate docs. Each package WP (E1–E4) writes its own crate docs. | — | C4 | M | 1 | Writing over a finished API. | Haiku |
+| F3 | Release | `cargo-semver-checks`, crates.io metadata, `publish = true` | — | D3, E1, E3, E4, F1, F2 (not E5: the sample is not published) | S | 1 | Checklist. | Haiku |
+| C6 | Work-queue fetch (**deferred**) | `WorkQueueFetch` 310 | work-queue cases | C2 | M | 4 | `XREADGROUP` claim and redelivery rules. | Opus/med |
+
+**Not ported (proposed):** `RedisEvents/Compat/*` (155 lines), an EventHubs migration shim for .NET
+apps with no Rust audience. `RedisEvents.Tracing`'s StackExchange.Redis profiling hook has no
+redis-rs equivalent, so B6 replaces it with `tracing` spans around the `Connection` wrapper.
+
+**Agent mix** (excluding the deferred C6): **Haiku 16**, Sonnet 7, Opus/med 5, Opus/high 4. Only
+about a quarter of the WPs need Opus, but they are the ones on the critical path.
+
+**Interop gates** are owned by A4. Each scenario lands in the PR of the WP that makes it possible.
+
+| Gate | Matrix rows (§5) | Unblocked by |
+| --- | --- | --- |
+| G1 Rust → C# | keyed, headers/trace, unicode keys, batch/buffered, outbox | B1, B2, B3, A4 |
+| G2 C# → Rust | the same in reverse, positions resume, codec guard, partition grow | C4, A4 |
+| G3 Admin across languages | admin reset, mixed Lease group (nice-to-have) | D1, C4 |
+| G4 Packages | JSON/MessagePack/LZ4 payloads, outbox/ES | E1, E3 |
+
+### 8.3 Dependency graph
+
+Node colour shows the agent; a thick border marks a critical chain; dotted edges are soft dependencies on another WP's API skeleton.
+
+```mermaid
+graph LR
+  W01[W0.1 vectors C#] -.-> A1 & A3
+  W02[W0.2 contracts] --> A1 & A2 & A3 & A4 & B6
+  A1[A1 wire] --> B1 & B4 & B5 & C1 & D2
+  A2[A2 config] --> C4
+  A3[A3 msgpack/lz4] --> E1
+  B1[B1 publisher] --> B2 & B3 & C5 & D4 & E1 & E2
+  B4[B4 positions] --> C2 & C2t & C3 & C5 & D1 & D2
+  B5[B5 ownership] --> C3 & C4 & D1 & D2
+  C1[C1 fetch] --> C2 & C2t
+  C2 -.-> C2t
+  C2[C2 worker] --> C4 & D4 & E1 & E2 & E4
+  C3[C3 flusher] --> C4
+  C4[C4 host] -.-> C4b & C4t
+  C4 --> E5 & F1 & F2
+  B2[B2 buffered] --> F1
+  B3[B3 outbox] --> E3
+  D1[D1 admin] --> D3
+  D2[D2 health] --> D3
+  D3[D3 axum] --> E5
+  D4[D4 testing] --> E2 & E4
+  E2[E2 projections] --> E3 --> E5
+  F1[F1 perf] --> F3[F3 release]
+  F2[F2 docs] --> F3
+  D3 & E1 & E3 & E4 --> F3
+  classDef haiku fill:#e3f2e1,stroke:#5b8c51;
+  classDef sonnet fill:#e1ecf7,stroke:#4a76a8;
+  classDef opusmed fill:#fdf0d5,stroke:#b7791f;
+  classDef opushigh fill:#fbe0e0,stroke:#b03a2e;
+  classDef crit stroke-width:4px;
+  class W01,A1,A2,B1,B4,B6,C2t,C4b,C4t,D2,D3,D4,E1,E5,F2,F3 haiku;
+  class A3,A4,C5,D1,E2,E3,E4 sonnet;
+  class B2,B3,B5,C1,F1 opusmed;
+  class W02,C2,C3,C4 opushigh;
+  class W02,A1,B5,C1,C2,C3,C4,F1,F3,D4,E2,E3,E5 crit;
+```
+
+### 8.4 Critical path
+
+With the mechanical bulk split out, three chains tie at 16 size points:
+
+- **Consumer:** W0.2 (2) → A1 (1) → C1 (3) → C2 (3) → C4 (3) → F1 (3) → F3 (1)
+- **Ownership:** W0.2 (2) → A1 (1) → B5 (3) → C3 (3) → C4 (3) → F1 (3) → F3 (1)
+- **Packages:** W0.2 (2) → A1 (1) → C1 (3) → C2 (3) → D4 (1) → E2 (2) → E3 (2) → E5 (2)
+
+The packages chain is why the release (F3) does not wait for the sample app (E5), and why each
+package writes its own docs instead of waiting for F2. With either dependency, the path grows to
+17 points.
+
+Without the split (C2 and C4 as one XL WP each, test porting included), the path is 20 points.
+Splitting saves about a fifth of the elapsed time.
+
+The total is ~70 points, so the critical path is ~23% of the work, and on average ~4.4 agents can
+be busy at once. Adding agents beyond the peak width in 8.5 does not help.
+
+Implications:
+- **The consumer and ownership chains are almost all Cx 4–5.** Elapsed time depends on the Opus
+  agents on W0.2, C1, B5, C2, C3, C4 and F1. Start each of them the moment its inputs merge, and keep the
+  Haiku agents busy on everything else around them.
+- **C2 and C3 share state** (the reset hand-off and the read cursor) and land together into C4. Run
+  them at the same time, and have them agree the hand-off interface on day one, through the W0.2
+  owner.
+- **B5 depends on A1 only, not on A2.** It needs the config *types*, which are frozen in W0.2,
+  not the binder, so it can start in wave 2. Keep it that way, because B5 is on a critical chain.
+- **The packages chain is mostly Sonnet and Haiku**, but it has no slack. Land D4 (testing helpers)
+  as soon as C2 merges, because E2 and E4 wait on it.
+
+### 8.5 Waves (where to send the agents)
+
+A WP starts once everything it depends on has merged. The waves below are the earliest-start
+schedule. Bold marks WPs on a critical chain. C2t, C4b and C4t start against the API skeleton of C2 or C4, so they run in the same wave as it, not after it.
+
+| Wave | Runs in parallel | Agents (H / S / O-med / O-high) | Gate at end of wave |
+| --- | --- | --- | --- |
+| 0 | W0.1 ∥ **W0.2** | 1 / 0 / 0 / 1 | contracts frozen; vectors published |
+| 1 | **A1**, A2, A3, A4, B6 | 3 / 2 / 0 / 0 | wire layer passes vectors |
+| 2 | **C1**, B1, B4, **B5** | 2 / 0 / 2 / 0 | — |
+| 3 | **C2**, C2t, **C3**, B2, B3, C5, D1, D2 | 2 / 2 / 2 / 2 | **G1 Rust → C#** |
+| 4 | **C4**, C4b, C4t, D3, D4, E1 | 5 / 0 / 0 / 1 | **G2 C# → Rust**, G3 |
+| 5 | **E2**, E4, **F1**, F2 | 1 / 2 / 1 / 0 | — |
+| 6 | **E3** | 0 / 1 / 0 / 0 | G4 |
+| 7 | **E5**, **F3** | 2 / 0 / 0 / 0 | cross-language sample green; release |
+
+The peak is wave 3, with 8 agents, 4 of them on Opus. If Opus capacity is limited, run C2 and C3
+first, and B2 and B3 (G1, not critical) after them. Agents that finish early in waves 1–2 can add
+vectors (W0.1 follow-ups) or write interop scenarios for upcoming gates.
+
+### 8.6 Rules for parallel agents
+
+1. **Contracts are frozen after W0.2.** Every `pub` type and trait in W0.2 changes only through a PR
+   reviewed by the W0.2 owner (the lead). This keeps 8 concurrent agents from breaking each other's
+   code.
+2. **One WP = one worktree = one PR.** CI (fmt, clippy, tests, wire-drift) must be green before
+   merge, along with every interop scenario the WP unblocks.
+3. **Tests port 1:1.** A Rust test is named after the C# test it ports (`position_tests::…`), so
+   coverage gaps can be found mechanically. A C# test the WP skips is listed in its PR with a
+   reason.
+4. **The agent brief is this table row**, plus the WIRE.md sections it touches and the C# files
+   listed. An agent never needs the whole C# repo. Haiku briefs say exactly what to do and point at
+   the tests or vectors that decide each answer. If a Haiku agent hits a decision the brief does
+   not answer, it stops and asks rather than guessing.
+5. **Escalate rather than retry.** A Haiku or Sonnet WP that fails review twice for the same reason
+   is under-rated on complexity. Re-rate it, and move only the hard part up a tier.
+6. **Wire-touching WPs** (Cx driver mentions formats, vectors or `traceparent`) must add or extend
+   golden vectors in the same PR, and W0.1's generator must be able to produce them.
 
 ## 9. Decisions (agreed 2026-10-25)
 1. **Repo**: separate `bklooste/RedisEvents-rs`.
