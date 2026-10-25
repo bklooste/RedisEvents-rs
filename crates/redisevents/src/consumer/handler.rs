@@ -1,5 +1,5 @@
 //! The handler traits and the adapters between them. **Traits: W0.2** (final). **Adapter bodies:
-//! C2** (`todo!("C2")`).
+//! C2**.
 //!
 //! # Shape
 //!
@@ -45,7 +45,8 @@ use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 
-use super::{HandleResult, PartitionContext};
+use super::{HandleError, HandleResult, PartitionContext, worker};
+use crate::config::ErrorPolicy;
 use crate::message::{Json, PayloadCodec};
 use crate::wire::{StreamMsg, TypedMsg};
 
@@ -116,10 +117,29 @@ impl<H: BatchHandler> BatchHandler for Arc<H> {
 #[derive(Debug, Clone, Default)]
 pub struct PerMessage<H>(pub H);
 
+///
+/// Under `ErrorPolicy::BestEffort` a `Skip` (or a panic) on one message is logged, counted in
+/// `streams.errors` and skipped, and the batch carries on. Under `StopPartition` / `Fail`, and for a
+/// `Block`, it returns that error at once, after telling the worker how many leading messages were
+/// done: those are recorded, and a block retry resumes at the failing message. Called outside a
+/// worker (a test calling it directly) it behaves as under `BestEffort`.
 impl<H: MessageHandler> BatchHandler for PerMessage<H> {
-    async fn handle_batch(&self, _batch: &[StreamMsg], _ctx: &PartitionContext) -> HandleResult {
-        let _ = &self.0;
-        todo!("C2")
+    async fn handle_batch(&self, batch: &[StreamMsg], ctx: &PartitionContext) -> HandleResult {
+        let policy = worker::scope_policy().unwrap_or_default();
+        for (i, msg) in batch.iter().enumerate() {
+            let outcome = worker::catch_unwind(self.0.handle(msg, ctx))
+                .await
+                .unwrap_or_else(|panic| Err(worker::panic_to_skip(panic.as_ref())));
+            let Err(error) = outcome else {
+                continue;
+            };
+            if error.is_block() || policy != ErrorPolicy::BestEffort || ctx.is_cancelled() {
+                worker::scope_report_done(i);
+                return Err(error);
+            }
+            worker::skip_message(ctx, msg, &error);
+        }
+        Ok(())
     }
 }
 
@@ -160,9 +180,13 @@ where
     T: DeserializeOwned + Send + Sync + 'static,
     C: PayloadCodec,
 {
-    async fn handle(&self, _msg: &StreamMsg, _ctx: &PartitionContext) -> HandleResult {
-        let _ = &self.inner;
-        todo!("C2")
+    async fn handle(&self, msg: &StreamMsg, ctx: &PartitionContext) -> HandleResult {
+        let value = C::decode::<T>(msg.body()).map_err(HandleError::skip)?;
+        let typed = TypedMsg {
+            value,
+            envelope: msg.clone(),
+        };
+        self.inner.handle(&typed, ctx).await
     }
 }
 
@@ -172,9 +196,31 @@ where
     T: DeserializeOwned + Send + Sync + 'static,
     C: PayloadCodec,
 {
-    async fn handle_batch(&self, _batch: &[StreamMsg], _ctx: &PartitionContext) -> HandleResult {
-        let _ = &self.inner;
-        todo!("C2")
+    async fn handle_batch(&self, batch: &[StreamMsg], ctx: &PartitionContext) -> HandleResult {
+        let mut typed = Vec::with_capacity(batch.len());
+        for msg in batch {
+            match C::decode::<T>(msg.body()) {
+                Ok(value) => typed.push(TypedMsg {
+                    value,
+                    envelope: msg.clone(),
+                }),
+                Err(e) => tracing::error!(
+                    topic = ctx.topic(),
+                    partition = ctx.partition(),
+                    consumer = ctx.consumer(),
+                    id = %msg.id(),
+                    msg_type = msg.msg_type(),
+                    codec = C::NAME,
+                    target = std::any::type_name::<T>(),
+                    error = %e,
+                    "Streams: skipping malformed message: its body failed to decode. The rest of the batch is still handled."
+                ),
+            }
+        }
+        if typed.is_empty() {
+            return Ok(());
+        }
+        self.inner.handle_batch(&typed, ctx).await
     }
 }
 
