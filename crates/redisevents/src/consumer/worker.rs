@@ -744,6 +744,9 @@ impl<H: BatchHandler> Processor<H> {
         let blocked_at = Instant::now();
         let mut last_logged = blocked_at;
         instruments::set_blocked(&part.key, 1);
+        // Health: Degraded now, Unhealthy past `unhealthy_block_seconds` (the clock runs across
+        // every retry).
+        self.positions.blocked(part.partition, true);
         tracing::error!(
             topic, partition, consumer,
             first = %first_id(&msgs[from..], last), %last, count = msgs.len() - from,
@@ -822,6 +825,7 @@ impl<H: BatchHandler> Processor<H> {
                 }
             }
         };
+        self.positions.blocked(part.partition, false);
         instruments::set_blocked(&part.key, 0);
         instruments::set_block_duration_ms(&part.key, 0.0);
         outcome

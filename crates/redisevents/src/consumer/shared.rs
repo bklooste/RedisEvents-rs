@@ -209,6 +209,10 @@ pub(crate) trait PositionSink: Send + Sync + 'static {
     /// Persists everything recorded so far and resolves when the write has landed.
     fn flush(&self) -> BoxFuture<'_, Result<()>>;
 
+    /// The worker entered (`true`) or left (`false`) the `HandleError::Block` back-off on
+    /// `partition`. Health hook: the host forwards it to the partition's monitor (C#
+    /// `Monitor.MarkBlocked` / `MarkUnblocked`). Nothing by default.
+    fn blocked(&self, _partition: u32, _blocked: bool) {}
 }
 
 /// A sink that keeps nothing: `PersistMode::None`, work-queue mode, and tests.
