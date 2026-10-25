@@ -287,7 +287,7 @@ impl Default for ProducerOptions {
 }
 
 /// Where a consumer starts (C# `StartFrom`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum StartFrom {
     /// The stored position, else [`ConsumerOptions::start_from_when_missing`].
     #[default]
@@ -301,7 +301,7 @@ pub enum StartFrom {
 }
 
 /// When positions are written (C# `PersistMode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum PersistMode {
     /// A background flusher writes them every `persist_interval_ms`.
     #[default]
@@ -316,7 +316,7 @@ pub enum PersistMode {
 
 /// What a partition does when a handler fails with an *ordinary* error (C# `ErrorPolicy`). A
 /// `Block` error always blocks and retries regardless of this policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ErrorPolicy {
     /// Log, advance the position, skip the message. The handler owns retrying transients.
     #[default]
@@ -328,7 +328,7 @@ pub enum ErrorPolicy {
 }
 
 /// Blocking or polling reads (C# `ReadMode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ReadMode {
     /// `XREAD BLOCK` on dedicated reader connections.
     #[default]
@@ -338,7 +338,7 @@ pub enum ReadMode {
 }
 
 /// How partitions are assigned to instances (C# `InstanceMode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum InstanceMode {
     /// Fixed index/count.
     Static,
@@ -348,7 +348,7 @@ pub enum InstanceMode {
 }
 
 /// Delivery semantics (C# `DeliveryMode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum DeliveryMode {
     /// Kafka-style: one owner per partition, in order.
     #[default]
@@ -358,7 +358,7 @@ pub enum DeliveryMode {
 }
 
 /// How `XADD`/`XTRIM` trims (C# `TrimMode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TrimMode {
     /// `MAXLEN ~`.
     #[default]
@@ -368,6 +368,38 @@ pub enum TrimMode {
     /// No trimming.
     None,
 }
+
+/// Case-insensitive deserialization for a config enum, so one config file binds the same way in
+/// both runtimes (C# binds enum values case-insensitively: `lease`, `LEASE` and `Lease` are equal).
+macro_rules! case_insensitive_enum {
+    ($ty:ident: $($variant:ident),+) => {
+        impl<'de> Deserialize<'de> for $ty {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let text = String::deserialize(deserializer)?;
+                $(
+                    if text.eq_ignore_ascii_case(stringify!($variant)) {
+                        return Ok($ty::$variant);
+                    }
+                )+
+                Err(serde::de::Error::unknown_variant(&text, &[$(stringify!($variant)),+]))
+            }
+        }
+    };
+}
+
+case_insensitive_enum!(StartFrom: Stored, Beginning, Now, Date);
+
+case_insensitive_enum!(PersistMode: AsyncBatch, SyncBatch, SyncMessage, None);
+
+case_insensitive_enum!(ErrorPolicy: BestEffort, StopPartition, Fail);
+
+case_insensitive_enum!(ReadMode: Block, Poll);
+
+case_insensitive_enum!(InstanceMode: Static, Lease);
+
+case_insensitive_enum!(DeliveryMode: Ordered, WorkQueue);
+
+case_insensitive_enum!(TrimMode: Approx, Exact, None);
 
 #[cfg(test)]
 mod tests {
