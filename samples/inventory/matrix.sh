@@ -40,7 +40,11 @@ for p in $PAIRINGS; do
     elif ! wait_http "$WRITE/InventoryCommand/IsAvailable" || ! wait_http "$READ/items/"; then res=FAIL; note="services not healthy"
     else
       # Order matters: the views suite asserts an exactly-one-item list, so it runs first on clean state.
-      SvcHttpUrl="$READ/" dotnet test "$CSHARP_SAMPLE_DIR/redis/inventory-views/tst/SimpleCQRS.Views.IntegrationTests" \
+      # when_create_event_then_its_in_list_view asserts the list is exactly one item, but the detail test
+      # also publishes one, and xUnit's order is not fixed. So run the list test alone first, then the rest.
+      V="$CSHARP_SAMPLE_DIR/redis/inventory-views/tst/SimpleCQRS.Views.IntegrationTests"
+      { SvcHttpUrl="$READ/" dotnet test "$V" --filter "FullyQualifiedName~its_in_list_view" &&
+        SvcHttpUrl="$READ/" dotnet test "$V" --no-build --filter "FullyQualifiedName!~its_in_list_view"; } \
         || { res=FAIL; note="$note views suite"; }
       SvcHttpUrl="$WRITE/InventoryCommand/" dotnet test "$CSHARP_SAMPLE_DIR/redis/inventory-logic/tst/SimpleCQRS.API.IntegrationTests" \
         || { res=FAIL; note="$note write suite"; }
