@@ -349,6 +349,28 @@ pub struct NullPositionStore;                     // complete
 - **B5**: `ownership::{PartitionOwner::format/parse, instance_id_for, stable_instance_id}` bodies
   and the crate-private registry. `instance_id_for` must equal C# `OwnershipRegistry.InstanceIdFor`
   (vector). `OwnershipMap`, `ContestedPartition` are complete data types.
+  **B5 handoff (crate-private, `ownership::registry`)** for C3 / C4 / D1 / D2:
+  - `OwnershipRegistryOptions::new(topic, consumer, partitions)` (C# defaults: Lease, TTL 30,
+    renew 10, pod `unknown`, `stable_instance_id()`); set `mode`, `owned_partitions` (Static only),
+    `pod_name`, `ttl_seconds`, `renew_seconds`, `instance_id`. `OwnershipRegistry::new(&conn, &keys,
+    options) -> Result` validates (`Config` / `InvalidArgument`, C# messages).
+  - `start().await -> Result`: `HEXPIRE` probe (Lease always, Static when it claims anything;
+    `Error::Config` if the server rejects it, a warning if Redis is just unreachable), one claim
+    (failure logged, not returned), then the renew loop on a `tokio` task. Idempotent.
+  - **Ownership changes:** `subscribe() -> watch::Receiver<Arc<[u32]>>` and `held()`: the sorted
+    partitions held. Lease mode updates it right after each lease script returns, before the rest
+    of the cycle, so a partition lost mid-batch is visible within one renew interval
+    (`changed()` / `borrow()`); C4 starts/stops workers from it, C3 checks it before saving.
+    Static mode: the pre-assigned set, never changes. Release on stop sets it to `[]`; so does a
+    whole TTL without a successful renew (Rust-only safety, C# keeps the stale set).
+  - `stop().await`: cancels the loop (an in-flight cycle completes), then the compare-and-delete
+    release (failure logged at debug). **Await it before dropping the `Connection`.** Dropping the
+    registry only cancels the loop (claims lapse at the TTL, like a SIGKILL). `dispose().await` =
+    `stop` + zero the `streams.partitions.unowned/contested` gauges + drop the snapshot.
+  - `refresh().await -> Result<OwnershipMap>`, `latest()`, `instance_id()`, statics
+    `any_degraded()` / `snapshot(topic, consumer)` (C# `Observed`, for D2 health), helpers
+    `presence_field(id)` (`i:<id>`, for C3's liveness cross-check), `read_owners`, `count_members`,
+    `hgetall`, `describe_map`.
 - **B1**: `admin/meta.rs` (`ensure_topic_meta`), used by `StreamPublisher::new` and C4 startup.
 - **D1** / **D2**: `admin/stream_admin.rs` / `admin/health.rs`, new public API reviewed by the lead;
   D3 consumes it.
