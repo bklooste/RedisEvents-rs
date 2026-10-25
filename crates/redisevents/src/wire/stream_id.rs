@@ -74,23 +74,58 @@ impl StreamId {
     /// # Errors
     /// As [`StreamId::parse`].
     pub fn parse_bytes(s: &[u8]) -> Result<Self, ParseStreamIdError> {
-        let _ = s;
-        todo!("A1")
+        let invalid = || ParseStreamIdError::new(String::from_utf8_lossy(s));
+        let dash = s.iter().position(|&b| b == b'-').ok_or_else(invalid)?;
+        let ms = parse_part(&s[..dash]).ok_or_else(invalid)?;
+        let seq = parse_part(&s[dash + 1..]).ok_or_else(invalid)?;
+        Ok(Self::new(ms, seq))
     }
 
     /// Formats as `<ms>-<seq>` into `buf` without allocating and returns the written slice.
     /// 41 bytes always suffice (39 for valid ids).
     pub fn format_into(self, buf: &mut [u8; 41]) -> &str {
-        let _ = buf;
-        todo!("A1")
+        let mut at = put_decimal(self.ms, buf);
+        buf[at] = b'-';
+        at += 1;
+        at += put_decimal(self.seq, &mut buf[at..]);
+        std::str::from_utf8(&buf[..at]).unwrap_or("")
     }
+}
+
+/// One part of an id: non-empty ASCII digits only, value `0..=MAX_PART`.
+fn parse_part(part: &[u8]) -> Option<u64> {
+    if part.is_empty() || !part.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    part.iter()
+        .try_fold(0u64, |acc, &d| {
+            acc.checked_mul(10)?.checked_add(u64::from(d - b'0'))
+        })
+        .filter(|&v| v <= StreamId::MAX_PART)
+}
+
+/// Writes `value` in decimal at the start of `out` and returns the digit count. `out` must have room.
+fn put_decimal(mut value: u64, out: &mut [u8]) -> usize {
+    let mut digits = [0u8; 20];
+    let mut n = 0;
+    loop {
+        digits[n] = u8::try_from(value % 10).map_or(b'0', |d| b'0' + d);
+        value /= 10;
+        n += 1;
+        if value == 0 {
+            break;
+        }
+    }
+    for (slot, &digit) in out.iter_mut().zip(digits[..n].iter().rev()) {
+        *slot = digit;
+    }
+    n
 }
 
 impl fmt::Display for StreamId {
     /// `<ms>-<seq>`, invariant decimal.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!("A1")
+        write!(f, "{}-{}", self.ms, self.seq)
     }
 }
 

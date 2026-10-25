@@ -14,7 +14,7 @@ use std::fmt;
 
 use bytes::Bytes;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Packed custom headers. Cheap to clone (it is a [`Bytes`]); equality is byte equality of the
 /// packed form, like the C# struct.
@@ -51,8 +51,35 @@ impl HeaderBlock {
     /// [`HeaderBlock::MAX_COUNT`] headers or the packed form would exceed
     /// [`HeaderBlock::MAX_BYTES`]. Never truncates.
     pub fn pack<K: AsRef<str>, V: AsRef<str>>(headers: &[(K, V)]) -> Result<Self> {
-        let _ = headers;
-        todo!("A1")
+        if headers.len() > Self::MAX_COUNT {
+            return Err(Error::invalid_argument(format!(
+                "A message may carry at most {} headers; {} were supplied.",
+                Self::MAX_COUNT,
+                headers.len()
+            )));
+        }
+        let total = headers.iter().try_fold(0usize, |total, (key, value)| {
+            total
+                .checked_add(field_size(key.as_ref().len()))
+                .and_then(|t| t.checked_add(field_size(value.as_ref().len())))
+        });
+        match total {
+            Some(total) if total <= Self::MAX_BYTES => {}
+            _ => {
+                return Err(Error::invalid_argument(format!(
+                    "Packed headers exceed the {} byte cap.",
+                    Self::MAX_BYTES
+                )));
+            }
+        }
+        let mut packed = Vec::with_capacity(total.unwrap_or(0));
+        for (key, value) in headers {
+            push_field(&mut packed, key.as_ref());
+            push_field(&mut packed, value.as_ref());
+        }
+        Ok(Self {
+            packed: Bytes::from(packed),
+        })
     }
 
     /// The packed bytes, as written to the `h` field.
@@ -72,8 +99,15 @@ impl HeaderBlock {
     /// # Errors
     /// [`Error::Transport`](crate::Error::Transport) when the block is malformed up to the match.
     pub fn get_bytes(&self, key: &[u8]) -> Result<Option<&[u8]>> {
-        let _ = key;
-        todo!("A1")
+        let data: &[u8] = &self.packed;
+        let mut at = 0;
+        while let Some((k_start, k_len)) = read_field(data, &mut at)? {
+            let value = read_value(data, &mut at)?;
+            if &data[k_start..k_start + k_len] == key {
+                return Ok(Some(&data[value.0..value.0 + value.1]));
+            }
+        }
+        Ok(None)
     }
 
     /// [`HeaderBlock::get_bytes`] for a UTF-8 key, decoding the value lossily (invalid UTF-8
@@ -167,7 +201,95 @@ impl<'a> Iterator for HeaderIter<'a> {
     type Item = Result<Header<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let _ = (self.data, self.at, self.failed);
-        todo!("A1")
+        if self.failed {
+            return None;
+        }
+        let result = read_header(self.data, &mut self.at);
+        match result {
+            Ok(Some(header)) => Some(Ok(header)),
+            Ok(None) => None,
+            Err(e) => {
+                self.failed = true;
+                Some(Err(e))
+            }
+        }
     }
+}
+
+/// The on-wire size of one field: the decimal length, `:`, then the bytes.
+const fn field_size(len: usize) -> usize {
+    decimal_digits(len) + 1 + len
+}
+
+const fn decimal_digits(mut value: usize) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+fn push_field(out: &mut Vec<u8>, text: &str) {
+    out.extend_from_slice(text.len().to_string().as_bytes());
+    out.push(b':');
+    out.extend_from_slice(text.as_bytes());
+}
+
+fn malformed(detail: &str) -> Error {
+    Error::transport(format!(
+        "Packed stream headers are malformed: {detail}. The entry was written by an incompatible codec or the value has been corrupted."
+    ))
+}
+
+/// Reads the field at `*at` and returns its `(start, len)`, or `None` at the end of the block.
+/// Advances `*at` past the field.
+fn read_field(data: &[u8], at: &mut usize) -> Result<Option<(usize, usize)>> {
+    if *at >= data.len() {
+        return Ok(None);
+    }
+    let mut declared: usize = 0;
+    let mut digits = 0;
+    let mut cursor = *at;
+    while cursor < data.len() && data[cursor] != b':' {
+        let digit = data[cursor];
+        if !digit.is_ascii_digit() {
+            return Err(malformed("a length prefix contains a non-digit byte"));
+        }
+        declared = declared
+            .checked_mul(10)
+            .and_then(|v| v.checked_add(usize::from(digit - b'0')))
+            .filter(|&v| v <= data.len())
+            .ok_or_else(|| malformed("a length prefix runs past the end of the block"))?;
+        cursor += 1;
+        digits += 1;
+    }
+    if digits == 0 || cursor >= data.len() {
+        return Err(malformed("a length prefix is empty or unterminated"));
+    }
+    cursor += 1;
+    if declared > data.len() - cursor {
+        return Err(malformed(
+            "a field's declared length runs past the end of the block",
+        ));
+    }
+    *at = cursor + declared;
+    Ok(Some((cursor, declared)))
+}
+
+/// Like [`read_field`], but a missing value is an error: a key with no value.
+fn read_value(data: &[u8], at: &mut usize) -> Result<(usize, usize)> {
+    read_field(data, at)?
+        .ok_or_else(|| malformed("the block ends after a key with no matching value"))
+}
+
+fn read_header<'a>(data: &'a [u8], at: &mut usize) -> Result<Option<Header<'a>>> {
+    let Some((k_start, k_len)) = read_field(data, at)? else {
+        return Ok(None);
+    };
+    let (v_start, v_len) = read_value(data, at)?;
+    Ok(Some(Header {
+        key_utf8: &data[k_start..k_start + k_len],
+        value_utf8: &data[v_start..v_start + v_len],
+    }))
 }
