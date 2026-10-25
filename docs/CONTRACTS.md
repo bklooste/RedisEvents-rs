@@ -445,6 +445,7 @@ Owners:
   ConsumerBuilder::consumer(name) / options(ConsumerOptions) / configure(|&mut ConsumerOptions|) -> Self
   ConsumerBuilder::consumer_options(&self) -> &ConsumerOptions
   ConsumerBuilder::position_store<S: PositionStore>(S) -> Self   // C# IPositionStore override
+  ConsumerBuilder::instance_id(Uuid) -> Self                       // default stable_instance_id(); tests run two instances
   ConsumerBuilder::handler<H: BatchHandler>(H) -> StreamsBuilder  // THE extension point
   StreamsHost: connection(), consumers(), consumers_started(), is_running(),
                owned_partitions(topic, consumer) -> Vec<u32>, async health() -> StreamHealthReport,

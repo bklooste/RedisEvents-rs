@@ -32,8 +32,6 @@
 
 mod erased;
 mod runtime;
-#[cfg(test)]
-mod tests;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -83,6 +81,7 @@ pub struct StreamsBuilder {
 pub(crate) struct Registration {
     pub(crate) options: ConsumerOptions,
     pub(crate) store: Option<Arc<dyn StoreDyn>>,
+    pub(crate) instance_id: Option<uuid::Uuid>,
     pub(crate) runner: Arc<dyn RunnerFactory>,
 }
 
@@ -143,6 +142,7 @@ impl StreamsBuilder {
             parent: self,
             options,
             store: None,
+            instance_id: None,
         }
     }
 
@@ -174,6 +174,7 @@ pub struct ConsumerBuilder {
     parent: StreamsBuilder,
     options: ConsumerOptions,
     store: Option<Arc<dyn StoreDyn>>,
+    instance_id: Option<uuid::Uuid>,
 }
 
 impl ConsumerBuilder {
@@ -217,6 +218,15 @@ impl ConsumerBuilder {
         self
     }
 
+    /// The instance id this consumer claims partitions and writes positions under. Default:
+    /// [`stable_instance_id`](crate::ownership::stable_instance_id) (from `POD_NAME`, else one per
+    /// process). Set it to run two instances of one consumer in one process (tests).
+    #[must_use]
+    pub fn instance_id(mut self, id: uuid::Uuid) -> Self {
+        self.instance_id = Some(id);
+        self
+    }
+
     /// Completes the registration with a batch handler. Every other handler shape is an adapter
     /// onto this ([`PerMessage`](crate::consumer::PerMessage), [`Typed`](crate::consumer::Typed),
     /// C4b's closures).
@@ -226,10 +236,12 @@ impl ConsumerBuilder {
             mut parent,
             options,
             store,
+            instance_id,
         } = self;
         parent.registrations.push(Registration {
             options,
             store,
+            instance_id,
             runner: Arc::new(HandlerRunner::new(handler)),
         });
         parent

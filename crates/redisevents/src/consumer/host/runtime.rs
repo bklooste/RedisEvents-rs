@@ -265,6 +265,7 @@ async fn start_consumer(
     let Registration {
         options: consumer,
         store,
+        instance_id,
         runner,
     } = registration;
     let name = binder::resolve_consumer_name(options, &consumer);
@@ -313,7 +314,7 @@ async fn start_consumer(
 
     let use_positions = consumer.persist != PersistMode::None;
     let instance_options = consumer.instances.clone().unwrap_or_default();
-    let instance_id = crate::ownership::stable_instance_id();
+    let instance_id = instance_id.unwrap_or_else(crate::ownership::stable_instance_id);
     let store: Arc<dyn StoreDyn> = store.unwrap_or_else(|| {
         Arc::new(StoreHolder::new(RedisPositionStore::new(
             conn.clone(),
