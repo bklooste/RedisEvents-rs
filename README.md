@@ -10,8 +10,19 @@ It is **wire-compatible** with the C# library. A Rust producer can feed a C# con
 reverse, on the same Redis, the same topics and the same consumer positions. The contract is
 written down in [`wire-spec/WIRE.md`](wire-spec/WIRE.md) and enforced in CI.
 
-> **Status: core library and event-sourcing crate merged.** The sample services are still in progress.
-> The roadmap is in [`docs/PLAN.md`](docs/PLAN.md).
+> **Status: 0.1.0 release candidate.** All crates and both sample services are implemented and
+> tested, and interop with the C# library runs in CI (RedisEvents NuGet >= 0.2.37, codec v1). The
+> crates are prepared for crates.io; see [`CHANGELOG.md`](CHANGELOG.md). Only the work-queue
+> delivery mode is deferred. The plan is in [`docs/PLAN.md`](docs/PLAN.md).
+
+| Crate | Purpose |
+| --- | --- |
+| `redisevents` | core: wire, publishers, consumer host, positions, admin, health (features `otel`, `testing`, `tls-rustls`) |
+| `redisevents-msgpack` | MessagePack payloads with MessagePack-CSharp compatible LZ4 |
+| `redisevents-projections` | typed projections and view stores |
+| `redisevents-eventsourcing` | aggregates and an optimistic-concurrency repository |
+| `redisevents-restate` | batched Restate workflow starts from a stream |
+| `redisevents-axum` | admin endpoints and a health check |
 
 ## Quick start
 
@@ -26,14 +37,14 @@ It has two services:
 Both sides speak the C# sample's wire format and HTTP API, so either can be swapped for its C#
 counterpart.
 
-The sample's domain crate (events, aggregate rules, projections, C# wire compatibility) is done:
+The sample's domain crate (events, aggregate rules, projections, C# wire compatibility):
 
 ```bash
 cargo test -p inventory-domain
 ```
 
-The two services follow as the library crates they use land (plan WPs E5b and E5c). The
-[sample README](samples/inventory/README.md) shows the routes and how to run the full stack.
+Both services are implemented (plan WPs E5b and E5c). They read `REDIS_URL`, else the C#-style
+`Streams__ConnectionString`. The [sample README](samples/inventory/README.md) shows the routes and how to run the full stack.
 
 ### Consuming typed messages
 

@@ -8,10 +8,10 @@
 //! | `start.rs` | B4 | [`StartPosition::resolve`] and friends |
 //! | `flusher.rs` | C3 | the position flusher (foreign-writer check, reset hand-off, trim interlock) |
 
-pub mod flusher;
+pub(crate) mod flusher;
 pub mod redis_store;
-pub mod reset_marker;
-pub mod start;
+pub(crate) mod reset_marker;
+pub(crate) mod start;
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -31,6 +31,7 @@ pub const ADMIN_INSTANCE_ID: Uuid = Uuid::from_u128(0x6f72_616e_6765_4164_6d69_6
 
 /// One stored position: `<streamId>|<instanceId>` (C# `PositionRecord`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct PositionRecord {
     /// The last processed id (exclusive resume point).
     pub id: StreamId,
@@ -74,6 +75,7 @@ impl PositionRecord {
 
 /// Where a partition's read starts (C# `StartPosition`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum StartPosition {
     /// Read strictly after this id (`MIN` = the beginning).
     After(StreamId),

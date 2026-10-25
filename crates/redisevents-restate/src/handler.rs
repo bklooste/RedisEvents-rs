@@ -60,6 +60,7 @@ impl RestateStart {
 
 /// A snapshot of a handler's counters (C# `restate.start.*` instruments, per handler instance).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RestateStats {
     /// `restate.start.kept`.
     pub kept: u64,

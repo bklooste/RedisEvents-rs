@@ -6,7 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = true
+readme = "README.md"
+documentation = "https://docs.rs/redisevents-eventsourcing"
+homepage = "https://github.com/bklooste/RedisEvents-rs"
+keywords = ["redis", "event-sourcing", "aggregates", "cqrs", "streams"]
+categories = ["asynchronous", "data-structures"]
 
 [lints]
 workspace = true
@@ -14,8 +19,8 @@ workspace = true
 [dependencies]
 bytes = "1.12.1"
 opentelemetry = { version = "0.33.1", default-features = false, features = ["metrics"], optional = true }
-redisevents = { path = "../redisevents" }
-redisevents-projections = { path = "../redisevents-projections" }
+redisevents = { path = "../redisevents", version = "0.1.0" }
+redisevents-projections = { path = "../redisevents-projections", version = "0.1.0" }
 thiserror = "2.0.21"
 tracing = "0.1.44"
 
@@ -23,7 +28,7 @@ tracing = "0.1.44"
 bytes = "1.12.1"
 inventory-domain = { path = "../../samples/inventory/inventory-domain" }
 redis = { version = "1.8.0", features = ["tokio-comp", "connection-manager"] }
-redisevents = { path = "../redisevents", features = ["testing"] }
+redisevents = { path = "../redisevents", version = "0.1.0", features = ["testing"] }
 redisevents-test-support = { path = "../redisevents-test-support" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

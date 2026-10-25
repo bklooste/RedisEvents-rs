@@ -17,6 +17,7 @@ use crate::error::{Error, Result};
 
 /// Where a resolved instance `count` or `index` came from, in precedence order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum InstanceSource {
     /// Explicit [`InstanceOptions`] configuration.
     Config,
@@ -30,6 +31,7 @@ pub enum InstanceSource {
 
 /// The resolved identity of this process within its instance pool.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct InstanceIdentity {
     /// Total instances in the pool (always `>= 1` from [`InstanceResolver::resolve`]).
     pub count: u32,
@@ -45,6 +47,7 @@ pub struct InstanceIdentity {
 
 /// A contiguous range of partitions `[start, start + len)` owned by one instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub struct PartitionRange {
     /// First owned partition. Meaningless when `len` is zero.
     pub start: u32,

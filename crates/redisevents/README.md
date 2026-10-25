@@ -367,7 +367,7 @@ async fn run() -> redisevents::Result<()> {
 
 | Key | Default | What goes wrong |
 |---|---|---|
-| `ConnectionString` | `redis-db.infra:6379,abortConnect=false` | Read by the C# host. **Not read by this crate**: you pass a `Connection`, and the host only uses the string for the `BlockMs` check. Point it at `redis-cache` and you lose everything on restart |
+| `ConnectionString` | `redis-db.infra:6379,abortConnect=false` | Build the connection from it with `Connection::from_options(&options)` (see [Connecting from the config](#connecting-from-the-config)); the host itself takes a `Connection` and only uses the string for the `BlockMs` check. Point it at `redis-cache` and you lose everything on restart |
 | `Consumer` | executable file name | Two services sharing a name share a position hash and each see half the messages |
 | `Topics:<t>:Partitions` | `1` | Can be increased, never decreased. Caps parallelism. See [Interop](#interop-rules) for the C# README's `2` |
 | `Topics:<t>:MaxLen` | `10000` | Below worst-case consumer lag, trimming eats unprocessed messages |
@@ -394,7 +394,38 @@ Two things differ from the C# host, and both are easy to miss:
   (the options for `topic("orders")` come from the first entry for that topic), but an entry with no
   handler is not started.
 - **The host does not open the connection.** Build a `Connection` yourself (`Connection::connect`
-  takes a redis-rs URL) and make sure it points at `redis-db`.
+  takes a redis-rs URL, `Connection::from_options` the bound config) and make sure it points at
+  `redis-db`.
+
+### Connecting from the config
+
+`Connection::from_options` reads `Streams:ConnectionString` from the bound `StreamOptions` and
+translates the StackExchange.Redis string (`host:6379,password=...,ssl=true,defaultDatabase=2`)
+into a redis-rs URL, so the same config file serves the C# and the Rust runtime. An unset string
+means the C# default (`redis-db.infra:6379`). `Connection::url_from_options` returns the URL
+without connecting.
+
+```rust,no_run
+use redisevents::Connection;
+use redisevents::config::binder::bind_json;
+
+# async fn run() -> redisevents::Result<()> {
+let options = bind_json(r#"{"ConnectionString": "redis-db.infra:6379,password=secret"}"#)?;
+let conn = Connection::from_options(&options).await?;
+# let _ = conn;
+# Ok(())
+# }
+```
+
+A malformed string is an `Error::Config` naming `Streams:ConnectionString`; the message never
+echoes the password.
+
+### TLS
+
+`ssl=true` produces a `rediss://` URL. Enabling TLS needs the `tls-rustls` cargo feature
+(`redisevents = { version = "0.1", features = ["tls-rustls"] }`), which turns on redis-rs's rustls
+support with the bundled webpki root certificates. Without it, connecting to a `rediss://` URL
+fails with a redis error saying TLS is not compiled in.
 
 ---
 
@@ -953,8 +984,9 @@ with a cancelled C# call, there is no retry.
 - **`Delivery: WorkQueue`.** Refused at startup. It is planned, behind the `XREADGROUP` work.
 - **The outbox's `conditions`.** The C# outbox takes conditions and returns `null` on a failed one.
   The Rust `Outbox` does not have them. Use `StreamStore::append_and_publish` for version checks.
-- **Host-managed connection string and DI.** Build the `Connection` yourself. Register consumers
-  in code; the `Streams` section is bound from JSON explicitly.
+- **Host-managed DI.** Build the `Connection` yourself (`Connection::from_options` does the
+  connection-string translation). Register consumers in code; the `Streams` section is bound from
+  JSON explicitly.
 
 ## Module layout
 

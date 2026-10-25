@@ -14,12 +14,12 @@
 pub mod builder;
 pub mod context;
 pub mod error;
-pub mod fetch;
+pub(crate) mod fetch;
 pub mod handler;
 pub mod host;
 pub(crate) mod shared;
-pub mod trimmer;
-pub mod work_queue;
+pub(crate) mod trimmer;
+pub(crate) mod work_queue;
 pub(crate) mod worker;
 
 pub use context::PartitionContext;

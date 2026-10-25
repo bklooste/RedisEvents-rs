@@ -96,6 +96,7 @@ impl ExecuteOptions {
 
 /// A command's value and the aggregate's version after it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CommandResult<T> {
     /// What the decide closure returned.
     pub value: T,

@@ -33,6 +33,7 @@ pub type HandleResult = Result<(), HandleError>;
 /// Why a handler failed, and so what the worker does next. See the [module docs](self).
 ///
 /// Deliberately not a `std::error::Error`, so that `?` can convert any error into it.
+#[non_exhaustive]
 pub enum HandleError {
     /// An ordinary failure: handled by the consumer's `on_error` policy (by default log and skip).
     Skip(BoxError),

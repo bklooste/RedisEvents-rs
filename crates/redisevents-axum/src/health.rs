@@ -103,6 +103,7 @@ fn health_value(value: &HealthValue) -> Value {
         }
         HealthValue::Bool(b) => json!(b),
         HealthValue::Text(t) => json!(t),
+        _ => Value::Null,
     }
 }
 
@@ -113,18 +114,14 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn report(status: StreamHealthStatus) -> StreamHealthReport {
-        StreamHealthReport {
-            status,
-            rule: StreamHealthRule::None,
-            description: "described".to_owned(),
-            data: BTreeMap::from([
+        StreamHealthReport::new(status, StreamHealthRule::None, "described").with_data(
+            BTreeMap::from([
                 ("consumers".to_owned(), HealthValue::Int(2)),
                 ("worstLagMs".to_owned(), HealthValue::Float(1.5)),
                 ("ownershipDegraded".to_owned(), HealthValue::Bool(true)),
                 ("rule".to_owned(), HealthValue::Text("Lagging".to_owned())),
             ]),
-            partition: None,
-        }
+        )
     }
 
     /// C# `StreamsHealthCheck` maps by name, never by cast: Healthy 200, Degraded 200 (the default

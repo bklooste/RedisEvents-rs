@@ -5,7 +5,6 @@
 //! marker in the same `HSET` as the position. The live hand-off (`ResetSignal`) and the flusher's
 //! clearing are C3's; this module owns the encoding and the cold-start path.
 // C2 (`read_from`) and C3 (`take_all`, `read_markers`) consume these; until then only tests do.
-#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 
