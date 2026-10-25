@@ -6,6 +6,16 @@
 
 use std::sync::Arc;
 
+const OVERRIDE_VARIABLE: &str = "STREAMS_KEY_PREFIX";
+/// Checked in order; the first one set wins.
+const ENVIRONMENT_VARIABLES: [&str; 3] = [
+    "ASPNETCORE_ENVIRONMENT",
+    "DOTNET_ENVIRONMENT",
+    "STREAMS_ENVIRONMENT",
+];
+const DEFAULT_ENVIRONMENT: &str = "production";
+const MARKER: &str = "re";
+
 /// Builds every key the library touches, under one prefix. Cheap to clone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Keys {
@@ -19,14 +29,20 @@ impl Keys {
     /// `STREAMS_ENVIRONMENT`, defaulting to `production`.
     #[must_use]
     pub fn from_env() -> Self {
-        todo!("A1")
+        Self::from_lookup(|name| std::env::var(name).ok())
     }
 
     /// Resolves the prefix from `var` instead of the process environment (for tests).
     #[must_use]
     pub fn from_lookup(var: impl Fn(&str) -> Option<String>) -> Self {
-        let _ = var;
-        todo!("A1")
+        if let Some(prefix) = var(OVERRIDE_VARIABLE).filter(|p| !p.trim().is_empty()) {
+            return Self::with_prefix(prefix);
+        }
+        let environment = ENVIRONMENT_VARIABLES
+            .iter()
+            .find_map(|name| var(name))
+            .unwrap_or_else(|| DEFAULT_ENVIRONMENT.to_owned());
+        Self::with_prefix(format!("{}:{MARKER}:", environment.to_lowercase()))
     }
 
     /// Uses `prefix` verbatim, as `STREAMS_KEY_PREFIX` would.
@@ -46,50 +62,47 @@ impl Keys {
     /// Partition stream: `<prefix>s:{topic}:<p>`, or `<prefix>s:topic:<p>` when `co_locate` is off.
     #[must_use]
     pub fn stream(&self, topic: &str, partition: u32, co_locate: bool) -> String {
-        let _ = (topic, partition, co_locate);
-        todo!("A1")
+        if co_locate {
+            format!("{}s:{{{topic}}}:{partition}", self.prefix)
+        } else {
+            format!("{}s:{topic}:{partition}", self.prefix)
+        }
     }
 
     /// Positions hash: `<prefix>p:{topic}:<consumer>`.
     #[must_use]
     pub fn positions(&self, topic: &str, consumer: &str) -> String {
-        let _ = (topic, consumer);
-        todo!("A1")
+        format!("{}p:{{{topic}}}:{consumer}", self.prefix)
     }
 
     /// Positions meta hash: `<prefix>p:{topic}:<consumer>:meta`.
     #[must_use]
     pub fn positions_meta(&self, topic: &str, consumer: &str) -> String {
-        let _ = (topic, consumer);
-        todo!("A1")
+        format!("{}p:{{{topic}}}:{consumer}:meta", self.prefix)
     }
 
     /// Ownership / lease hash: `<prefix>o:{topic}:<consumer>`.
     #[must_use]
     pub fn ownership(&self, topic: &str, consumer: &str) -> String {
-        let _ = (topic, consumer);
-        todo!("A1")
+        format!("{}o:{{{topic}}}:{consumer}", self.prefix)
     }
 
     /// Topic meta hash: `<prefix>m:{topic}`.
     #[must_use]
     pub fn topic_meta(&self, topic: &str) -> String {
-        let _ = topic;
-        todo!("A1")
+        format!("{}m:{{{topic}}}", self.prefix)
     }
 
     /// State stream (outbox / event sourcing): `<prefix>{topic}:state:<name>`.
     #[must_use]
     pub fn state(&self, topic: &str, name: &str) -> String {
-        let _ = (topic, name);
-        todo!("A1")
+        format!("{}{{{topic}}}:state:{name}", self.prefix)
     }
 
     /// View hash: `<prefix>{topic}:view:<owner>:<view_name>`.
     #[must_use]
     pub fn view(&self, topic: &str, owner: &str, view_name: &str) -> String {
-        let _ = (topic, owner, view_name);
-        todo!("A1")
+        format!("{}{{{topic}}}:view:{owner}:{view_name}", self.prefix)
     }
 
     /// Dedupe claim: `<prefix>dedupe:{scope}:<id>`.
@@ -97,21 +110,27 @@ impl Keys {
     /// # Errors
     /// [`Error::InvalidArgument`](crate::Error::InvalidArgument) when `scope` contains `{` or `}`.
     pub fn dedupe(&self, scope: &str, id: &str) -> crate::Result<String> {
-        let _ = (scope, id);
-        todo!("A1")
+        if scope.contains(['{', '}']) {
+            return Err(crate::Error::invalid_argument(format!(
+                "A dedupe scope must not contain '{{' or '}}': '{scope}'."
+            )));
+        }
+        Ok(format!("{}dedupe:{{{scope}}}:{id}", self.prefix))
     }
 
     /// `SCAN` pattern for every positions hash of a topic: `<prefix>p:{topic}:*`.
     #[must_use]
     pub fn positions_pattern(&self, topic: &str) -> String {
-        let _ = topic;
-        todo!("A1")
+        format!("{}p:{{{topic}}}:*", self.prefix)
     }
 
     /// `SCAN` pattern for every partition stream of a topic: `<prefix>s:{topic}:*`.
     #[must_use]
     pub fn stream_pattern(&self, topic: &str, co_locate: bool) -> String {
-        let _ = (topic, co_locate);
-        todo!("A1")
+        if co_locate {
+            format!("{}s:{{{topic}}}:*", self.prefix)
+        } else {
+            format!("{}s:{topic}:*", self.prefix)
+        }
     }
 }

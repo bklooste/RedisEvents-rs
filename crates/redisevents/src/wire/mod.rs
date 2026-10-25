@@ -1,7 +1,7 @@
 //! The wire layer: everything whose bytes must match the C# library (`wire-spec/WIRE.md`).
 //!
 //! **Types owned by W0.2** ([`StreamId`], [`StreamMsg`], [`TypedMsg`], [`HeaderBlock`] API, [`Keys`]
-//! API, codec signatures). **Bodies filled in by A1** (`todo!("A1")`), checked against the golden
+//! API, codec signatures). **Bodies: A1**, checked against the golden
 //! vectors from W0.1.
 
 pub mod codec;
