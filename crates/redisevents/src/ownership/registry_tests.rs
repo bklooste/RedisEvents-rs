@@ -8,7 +8,7 @@
     clippy::bool_to_int_with_if
 )]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use tracing::field::{Field, Visit};
@@ -105,19 +105,29 @@ fn describe_map_names_every_partition() {
 
 // ------------------------------------------------------------------ log capture
 
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<(Level, String, String)>>>);
+/// Every event in this test binary, as `(level, instance field, message)`. One global subscriber
+/// rather than a scoped one per test: scoped dispatchers race on tracing's callsite-interest cache
+/// when tests run in parallel. Tests tell their lines apart by their own (random) instance ids.
+static LOGS: Mutex<Vec<(Level, String, String)>> = Mutex::new(Vec::new());
+
+/// A view of [`LOGS`] from a starting point (`clear` moves it).
+#[derive(Default)]
+struct Capture(std::sync::atomic::AtomicUsize);
 
 impl Capture {
-    fn install(&self) -> tracing::subscriber::DefaultGuard {
-        tracing::subscriber::set_default(tracing_subscriber::registry().with(self.clone()))
+    fn install(&self) {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Sink))
+                .expect("no other global subscriber in the lib tests");
+        });
+        self.clear();
     }
 
     fn messages(&self, level: Level, instance: Uuid) -> Vec<String> {
         let id = instance.to_string();
-        self.0
-            .lock()
-            .unwrap()
+        let from = self.0.load(std::sync::atomic::Ordering::SeqCst);
+        LOGS.lock().unwrap()[from..]
             .iter()
             .filter(|(l, i, _)| *l == level && *i == id)
             .map(|(_, _, m)| m.clone())
@@ -125,9 +135,12 @@ impl Capture {
     }
 
     fn clear(&self) {
-        self.0.lock().unwrap().clear();
+        let len = LOGS.lock().unwrap().len();
+        self.0.store(len, std::sync::atomic::Ordering::SeqCst);
     }
 }
+
+struct Sink;
 
 #[derive(Default)]
 struct Fields {
@@ -145,12 +158,11 @@ impl Visit for Fields {
     }
 }
 
-impl<S: Subscriber> Layer<S> for Capture {
+impl<S: Subscriber> Layer<S> for Sink {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
         let mut fields = Fields::default();
         event.record(&mut fields);
-        self.0
-            .lock()
+        LOGS.lock()
             .unwrap()
             .push((*event.metadata().level(), fields.instance, fields.message));
     }
@@ -255,7 +267,7 @@ async fn s6_two_instances_own_contiguous_halves_with_no_overlap_and_no_gaps() {
     assert_eq!(range1.start, range0.end());
 
     let log = Capture::default();
-    let _guard = log.install();
+    log.install();
 
     let pod0 = simple(&conn, &topic, &consumer, range0, "svc-0");
     let pod1 = simple(&conn, &topic, &consumer, range1, "svc-1");
@@ -326,7 +338,7 @@ async fn s6b_a_missing_instance_leaves_its_partitions_unowned_and_health_degrade
     assert_eq!(missing.iter().collect::<Vec<_>>(), [6, 7]);
 
     let log = Capture::default();
-    let _guard = log.install();
+    log.install();
     let pod0 = simple(&conn, &topic, &consumer, range0, "svc-0");
     let pod1 = simple(&conn, &topic, &consumer, range1, "svc-1");
     pod0.start().await.unwrap();
@@ -379,7 +391,7 @@ async fn s6c_two_instances_claiming_index_zero_are_reported_as_contested() {
     );
 
     let log = Capture::default();
-    let _guard = log.install();
+    log.install();
     let pod_a = simple(&conn, &topic, &consumer, everything, "deploy-abc12-x2k9p");
     let pod_b = simple(&conn, &topic, &consumer, everything, "deploy-abc12-7f4dq");
     assert_ne!(pod_a.instance_id(), pod_b.instance_id());
@@ -458,7 +470,7 @@ async fn s6d_a_restarted_instance_reclaims_its_ordinal_range_with_no_stale_dupli
     assert_eq!(range_one.iter().collect::<Vec<_>>(), [4, 5, 6, 7]);
 
     let log = Capture::default();
-    let _guard = log.install();
+    log.install();
     let pod0 = simple(&conn, &topic, &consumer, owned_range(0, 2), "svc-0");
     pod0.start().await.unwrap();
 
