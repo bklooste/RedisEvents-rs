@@ -2,7 +2,30 @@
 //! size-gated LZ4.
 //!
 //! This is the pure layer (work package A3): [`encode_with`] / [`decode`] and the [`MessagePack`]
-//! and [`MessagePackMap`] [`PayloadCodec`] markers. Typed publish/consume glue is E1.
+//! and [`MessagePackMap`] [`PayloadCodec`] markers. The typed glue (work package E1) is:
+//!
+//! - **Publish**: [`MessagePackPublisherExt`] on any [`Publisher`] (the B1 `StreamPublisher`, the
+//!   B2 buffered publisher, an `Arc` of either, or a test double). `publish_msgpack` takes the
+//!   [`Options`] explicitly (layout, compression threshold, or disabling compression). For the
+//!   defaults, core's `PublisherExt::publish_message::<MessagePack, _>` does the same thing.
+//! - **Consume**: [`MessagePackTyped`] / [`MessagePackMapTyped`] wrap a `TypedHandler` or
+//!   `TypedBatchHandler` as `Typed<H, T, MessagePack>`. Decoding detects LZ4 from the bytes, so the
+//!   consumer needs no compression setting. [`MessagePackMsgExt::decode_msgpack`] decodes one
+//!   `StreamMsg` by hand.
+//!
+//! ```no_run
+//! use redisevents::{Message, PublishOptions, Publisher};
+//! use redisevents_msgpack::{MessagePackPublisherExt, Options};
+//!
+//! #[derive(serde::Serialize, serde::Deserialize)]
+//! struct OrderPlaced { id: i32 }
+//! impl Message for OrderPlaced { const TYPE: &'static str = "Orders.OrderPlaced"; }
+//!
+//! # async fn f(p: &redisevents::producer::StreamPublisher) -> redisevents::Result<()> {
+//! p.publish_msgpack("order-1", &OrderPlaced { id: 1 }, &Options::default(), &PublishOptions::new())
+//!     .await?;
+//! # Ok(()) }
+//! ```
 //!
 //! Wire rules (`wire-spec/WIRE.md` section 11):
 //! - Structs are MessagePack arrays by default (C# `[Key(int)]`); [`Layout::Map`] gives the
@@ -12,9 +35,13 @@
 //!   lengths, then one `bin` of raw LZ4 *block* data per chunk.
 //! - Readers detect `Lz4BlockArray` (ext 98), `Lz4Block` (ext 99) and plain bodies from the bytes.
 
+use std::future::Future;
+
 use bytes::Bytes;
-use redisevents::PayloadCodec;
+use redisevents::consumer::Typed;
 use redisevents::message::CodecError;
+use redisevents::producer::PublishOptions;
+use redisevents::{Message, PayloadCodec, Publisher, Result, StreamId, StreamMsg};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -372,5 +399,73 @@ impl PayloadCodec for MessagePackMap {
 
     fn decode<T: DeserializeOwned>(body: &[u8]) -> Result<T, CodecError> {
         decode(body)
+    }
+}
+
+/// A `TypedHandler` or `TypedBatchHandler` consuming [`MessagePack`] bodies (C# `AddStream` with a
+/// `MessagePackSerializerOptions`). Bodies are read as array-layout or map-layout, with or without
+/// LZ4.
+pub type MessagePackTyped<H, T> = Typed<H, T, MessagePack>;
+
+/// Like [`MessagePackTyped`], for [`MessagePackMap`] bodies. Decoding accepts either layout, so this
+/// alias only documents the producer's choice.
+pub type MessagePackMapTyped<H, T> = Typed<H, T, MessagePackMap>;
+
+/// Typed MessagePack publishing over any [`Publisher`] (C# `MessagePackPublishExtensions`). The
+/// type string is [`Message::TYPE`]. Blanket-implemented, so it is in scope wherever it is imported.
+pub trait MessagePackPublisherExt: Publisher {
+    /// Serializes `message` with `options` and publishes it under `M::TYPE`. A body over the
+    /// threshold is `Lz4BlockArray` (unless `options.compression` disables it).
+    ///
+    /// # Errors
+    /// [`redisevents::Error::Codec`] when serialization fails, otherwise whatever the publisher
+    /// returns.
+    fn publish_msgpack<M: Message + Serialize + Sync>(
+        &self,
+        partition_key: &str,
+        message: &M,
+        options: &Options,
+        publish: &PublishOptions,
+    ) -> impl Future<Output = Result<StreamId>> + Send {
+        let body = encode_with(message, options);
+        async move { self.publish(partition_key, body?, M::TYPE, publish).await }
+    }
+
+    /// Serializes each of `messages` with `options` and publishes them as one batch under `M::TYPE`,
+    /// in order.
+    ///
+    /// # Errors
+    /// As [`publish_msgpack`](Self::publish_msgpack).
+    fn publish_msgpack_batch<M: Message + Serialize + Sync>(
+        &self,
+        partition_key: &str,
+        messages: &[M],
+        options: &Options,
+        publish: &PublishOptions,
+    ) -> impl Future<Output = Result<()>> + Send {
+        let bodies: std::result::Result<Vec<Bytes>, CodecError> =
+            messages.iter().map(|m| encode_with(m, options)).collect();
+        async move {
+            self.publish_batch(partition_key, &bodies?, M::TYPE, publish)
+                .await
+        }
+    }
+}
+
+impl<P: Publisher + ?Sized> MessagePackPublisherExt for P {}
+
+/// Decodes a received message's MessagePack body by hand (C# `MessagePackConsumeExtensions`).
+/// Handlers normally get this through [`MessagePackTyped`]; use this for ad-hoc reads.
+pub trait MessagePackMsgExt {
+    /// Decodes the body as `T`, detecting LZ4 framing from the bytes.
+    ///
+    /// # Errors
+    /// [`CodecError`] when the framing or the content is not a valid `T`.
+    fn decode_msgpack<T: DeserializeOwned>(&self) -> std::result::Result<T, CodecError>;
+}
+
+impl MessagePackMsgExt for StreamMsg {
+    fn decode_msgpack<T: DeserializeOwned>(&self) -> std::result::Result<T, CodecError> {
+        decode(self.body())
     }
 }
