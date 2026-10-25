@@ -522,6 +522,92 @@ let outcome = harness.deliver(&my_handler, &msg).await;   // HandleResult, as th
 assert!(outcome.is_ok());
 ```
 
+### E2 projections (`redisevents-projections`, public)
+Typed event projections over any topic; E3 (event sourcing) and the Inventory view service (E5c)
+build on it. A `Projector` is a core `BatchHandler`, so positions, replay and the `Skip` / `Block`
+contract are core's.
+```rust
+// registry: explicit wire strings, never Rust type names
+EventTypeRegistry::new()
+    .register_json::<T>("wire.type")?                    // serde + Json (T: Serialize + DeserializeOwned)
+    .register::<T, C: PayloadCodec>("wire.type")?        // any codec
+    .register_with::<T>("wire.type", encode_fn, decode_fn)?   // hand-rolled pair (C# Register)
+    .register_family::<E, _>(&["w1", "w2"], |wire, body| -> Result<Option<E>, _>)?  // many wires -> one enum, decode-only
+// encode::<T>(&T) -> (&str, Bytes); decode::<T>(wire, body) -> Result<Option<T>, BoxError>; try_decode -> Decoded
+// duplicate wire / same type under two wires / blank wire -> Error::Config; encode of unregistered -> InvalidArgument
+
+pub trait Projection<T>: Send + Sync + 'static {
+    fn handle(&self, event: &T, meta: &EventMeta, ctx: &PartitionContext) -> impl Future<Output = HandleResult> + Send;
+}
+pub trait BatchProjection: Send + Sync + 'static {       // buffer in meta.batch, write once in flush
+    fn flush(&self, batch: &ProjectionBatch, ctx: &PartitionContext) -> impl Future<Output = HandleResult> + Send;
+}
+Projector::builder(topic, registry)                      // registry: EventTypeRegistry or Arc<..>
+    .projection::<T, _>(Arc<P: Projection<T>>)
+    .batch_projection::<T, _>(Arc<P: Projection<T> + BatchProjection>)
+    .build()? -> Projector                               // Config error if T is not decodable by the registry
+// Projector: BatchHandler. Register it with the consumer like any batch handler.
+
+pub struct EventMeta { partition_key, id: StreamId, correlation_id, partition: u32, batch: Option<ProjectionBatch> }
+ProjectionBatch::{with_state(owner, create, f), try_with_state(owner, f), take_state(owner), topic(), partition(), is_closed()}
+pub trait ViewStore<T> { get(&str) -> Option<T>; set(&str, &T); delete(&str); list() -> Vec<T> }   // all async, Result<_, redisevents::Error>
+InMemoryViewStore::<T>::new()                            // T: Clone
+RedisViewStore::<T>::new(&Connection, &Keys, topic, view_name)?            // owner = default_owner()
+RedisViewStore::<T>::with_owner(&Connection, &Keys, topic, view_name, owner)?
+```
+- **Dispatch (no reflection).** Rust cannot enumerate a type's trait impls, so binding is explicit:
+  `.projection::<T, _>(p)` once per event type. Decoding yields a type-erased value tagged with its
+  `TypeId`; the projector looks the bound projections up by that id and a generic shim downcasts and
+  calls `Projection<T>::handle`. Two shapes fit: one `T` per wire type (as C#), or **one enum `E` for
+  the topic** via `register_family` (the inventory sample: `InventoryEvent::decode` plugs in as is and
+  the projection `match`es the enum).
+- **Errors** (C# `EventProjector`): unknown wire type skipped (warn once per type, then debug); known
+  type without a bound projection skipped; a **malformed entry is skipped per entry** (error log with
+  id and type, `redisevents.projections.events.malformed` counter, `malformed_events_total()`) and the
+  rest of the batch is still projected; a projection error ends the batch and is returned unchanged.
+  Batch projections are flushed once after the last event, only if handed an event; on an ordinary
+  event error the events before it are still flushed and the original error returned (a `Block` from
+  that flush wins); on `Block` or shutdown (`ctx.is_cancelled()`) nothing is flushed; several failing
+  flushes all run and the first error is returned.
+- **Batch scope.** `ProjectionBatch` is keyed by the owner's address (pass `self`), is closed when the
+  projector returns, and misuse is `BatchError::{Closed, WrongType}`.
+- **Diagnostics.** `tracing` spans `projections.project` (one per dispatched event) and
+  `projections.flush`, with C# names in `otel.name` and failures as `otel.status_code = "ERROR"`.
+  Feature `otel` exports the malformed counter on meter `RedisEvents.Projections`.
+- **View key** `<prefix>{<topic>}:view:<owner>:<view_name>` (`Keys::view`), a hash of id to JSON.
+  `default_owner()` is the executable's file stem (C#: entry assembly name). `list` is an `HSCAN` loop.
+- **JSON casing.** `Json` keeps Rust field names. C# events are PascalCase, so types shared with C#
+  normally need `#[serde(rename_all = "PascalCase")]` (a mismatch is silent on the C# side); per-type
+  naming is plain serde attributes. A wrong-cased body fails to decode and is skipped as malformed.
+- **Not ported**: DI/builder registration (`AddEventProjector`, `AddRedisViewStore`): C4b.
+
+```rust
+// Inventory view service (E5c): both read models from one projection over the domain's event enum.
+let registry = EventTypeRegistry::new().register_family::<InventoryEvent, _>(
+    &[wire_type::CREATED, wire_type::RENAMED, wire_type::CHECKED_IN, wire_type::REMOVED, wire_type::DEACTIVATED],
+    InventoryEvent::decode)?;
+
+struct InventoryViews { list: Arc<RedisViewStore<InventoryItemListDto>>, detail: Arc<RedisViewStore<InventoryItemDetailsDto>> }
+impl Projection<InventoryEvent> for InventoryViews {
+    async fn handle(&self, event: &InventoryEvent, meta: &EventMeta, _: &PartitionContext) -> HandleResult {
+        let id = event.id().to_string();
+        let pos = StreamPosition { ms: meta.id.ms, seq: meta.id.seq };
+        let current = self.detail.get(&id).await.map_err(HandleError::block)?;
+        match project_detail(current.as_ref(), event, pos) {
+            ViewChange::Set(row) => self.detail.set(&id, &row).await,
+            ViewChange::Delete => self.detail.delete(&id).await,
+            ViewChange::Unchanged => Ok(()),
+        }.map_err(HandleError::block)
+        // ... same for project_list
+    }
+}
+let projector = Projector::builder(TOPIC, registry)
+    .projection::<InventoryEvent, _>(Arc::new(views))
+    .build()?;      // hand to the consumer as a BatchHandler
+```
+The full, tested version is `crates/redisevents-projections/tests/inventory.rs`. Tests use D4's
+`StreamTestHarness::deliver_batch`.
+
 ## 5. Positions, ownership, admin, diagnostics
 
 ```rust
@@ -685,7 +771,7 @@ W0.1's generator, never by hand).
   whether `Connection` sets them.
 - **Closure handlers** for C4b: the shape (`handler_fn` taking owned vs borrowed messages) is C4b's
   proposal, reviewed by the lead.
-- **Projection dispatch** across many event types (E2) without reflection: E2's design; it builds
-  on `BatchHandler` and `PayloadCodec`.
+- **Projection dispatch** across many event types (E2) without reflection: decided, see "E2
+  projections" in §4 (explicit `TypeId` bindings, or one enum per topic via `register_family`).
 - **`StreamMsg` string storage** may move from `String` to `Bytes`-backed strings in F1; accessors
   keep that invisible.
