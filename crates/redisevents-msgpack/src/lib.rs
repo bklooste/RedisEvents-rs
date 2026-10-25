@@ -283,10 +283,6 @@ fn checked_len(n: usize) -> Result<usize, CodecError> {
 }
 
 fn inflate(chunk: &[u8], len: usize) -> Result<Vec<u8>, CodecError> {
-    // A real LZ4 block is never exactly as long as its content, so equal lengths mean stored raw.
-    if chunk.len() == len {
-        return Ok(chunk.to_vec());
-    }
     let out = lz4_flex::block::decompress(chunk, len).map_err(err)?;
     if out.len() == len {
         Ok(out)

@@ -286,3 +286,19 @@ proptest! {
         let _ = decode::<Order>(&bytes);
     }
 }
+
+/// A valid LZ4 block whose length equals its decompressed length must still be LZ4-decoded, not
+/// mistaken for a raw chunk. Hand-built: token 0x10 (1 literal, match len 4) + literal `a` +
+/// offset 1 gives `aaaaa`, then the final literals token 0x50 + 5 literals `bcdef`
+/// (a block must end in literals): 10 bytes of output from a 10-byte block.
+#[test]
+fn lz4_block_as_long_as_its_content_is_not_treated_as_raw() {
+    let block: [u8; 10] = [0x10, b'a', 0x01, 0x00, 0x50, b'b', b'c', b'd', b'e', b'f'];
+    let expected = b"aaaaabcdef"; // 1 literal + 4 match copy = "aaaaa", then "bcdef"
+    assert_eq!(block.len(), expected.len());
+    assert_eq!(lz4_flex::block::decompress(&block, 10).unwrap(), expected);
+
+    let mut body = vec![0x92, 0xc7, 0x01, 0x62, 0x0a, 0xc4, 0x0a];
+    body.extend_from_slice(&block);
+    assert_eq!(&decompress(&body).unwrap()[..], expected);
+}
