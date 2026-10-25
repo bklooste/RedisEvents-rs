@@ -149,3 +149,51 @@ jobs:
         run: docker build -f samples/inventory/inventory-command/Dockerfile -t redisevents-inventory-command:local .
       - name: Run the matrix
         run: CSHARP_SAMPLE_DIR=$PWD/csharp-sample samples/inventory/matrix.sh
+
+  publish:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git height for the version
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compute version (version.json major.minor + git height)
+        id: version
+        run: echo "version=$(scripts/set_version.sh)" >> "$GITHUB_OUTPUT"
+      - name: Package check
+        run: >
+          cargo package --allow-dirty -p redisevents -p redisevents-msgpack -p redisevents-projections
+          -p redisevents-restate -p redisevents-axum -p redisevents-eventsourcing
+      - name: crates.io login (OIDC trusted publishing)
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+        # Trusted publishing only works for a crate that already exists; the first publish uses the
+        # CARGO_REGISTRY_TOKEN secret instead (docs/PUBLISHING.md).
+        continue-on-error: true
+      - name: Publish to crates.io
+        run: scripts/publish_crates.sh "${{ steps.version.outputs.version }}"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Record published version
+        run: |
+          echo "### Published redisevents `v${{ steps.version.outputs.version }}`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          for c in redisevents redisevents-msgpack redisevents-projections redisevents-restate redisevents-axum redisevents-eventsourcing; do
+            echo "- $c" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Tag release
+        run: |
+          tag="v${{ steps.version.outputs.version }}"
+          if git ls-remote --exit-code --tags origin "$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists, skipping"
+          else
+            git tag "$tag"
+            git push origin "$tag"
+          fi

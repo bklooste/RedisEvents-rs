@@ -10,7 +10,7 @@ It is **wire-compatible** with the C# library. A Rust producer can feed a C# con
 reverse, on the same Redis, the same topics and the same consumer positions. The contract is
 written down in [`wire-spec/WIRE.md`](wire-spec/WIRE.md) and enforced in CI.
 
-> **Status: 0.1.0 release candidate.** All crates and both sample services are implemented and
+> **Status: 0.2 release candidate.** All crates and both sample services are implemented and
 > tested, and interop with the C# library runs in CI (RedisEvents NuGet >= 0.2.37, codec v1). The
 > crates are prepared for crates.io; see [`CHANGELOG.md`](CHANGELOG.md). Only the work-queue
 > delivery mode is deferred. The plan is in [`docs/PLAN.md`](docs/PLAN.md).
@@ -98,7 +98,7 @@ async fn run() -> redisevents::Result<()> {
 | `redisevents-restate` | `RedisEvents.Restate` | batched Restate workflow starts |
 | `redisevents-axum` | `RedisEvents.Web`, `RedisEvents.HealthChecks` | admin endpoints and health checks |
 
-Samples live under [`samples/`](samples). They are not published.
+Samples live under [`samples/`](samples). They are not published. `redisevents-test-support` is a test helper and is not published either (as the C# test projects are not). Publishing: [docs/PUBLISHING.md](docs/PUBLISHING.md).
 
 ## Interop rules worth knowing up front
 

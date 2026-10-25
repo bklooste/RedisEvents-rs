@@ -1,6 +1,6 @@
 # Plan: RedisEvents for Rust (`bklooste/RedisEvents-rs`)
 
-Status: all work packages done except the deferred C6; 0.1.0 prepared for release (F3), 2026-10-25. Source of truth for the port is this repo at `f34c43a`.
+Status: all work packages done except the deferred C6; 0.2 prepared for release (F3; published by CI, see docs/PUBLISHING.md), 2026-10-25. Source of truth for the port is this repo at `f34c43a`.
 
 ## 1. Goal
 
