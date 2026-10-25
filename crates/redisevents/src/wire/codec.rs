@@ -150,7 +150,6 @@ pub(crate) fn max_len_args(trim: TrimMode, max_len: u64) -> Vec<String> {
 }
 
 /// The `MINID` arguments for `XTRIM` under `trim` (C# `TrimArgs.GetMinIdArgs`).
-#[allow(dead_code, reason = "consumed by the trimmer (C5)")]
 pub(crate) fn min_id_args(trim: TrimMode, min_id: StreamId) -> Vec<String> {
     match trim {
         TrimMode::None => Vec::new(),

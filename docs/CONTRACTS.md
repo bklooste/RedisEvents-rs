@@ -329,6 +329,22 @@ Owners:
 - **D4**, **E2**, **E4** and tests construct `PartitionContext::new(..)` and call handlers directly.
 - `redisevents-test-support::RecordingHandler` implements both handler traits (C2t/C4t use it).
 
+### C5 trimmer handle (`consumer/trimmer.rs`, crate-private)
+```rust
+BackgroundTrimmer::new(conn: Connection, keys: Keys, options: &StreamOptions) -> Self
+BackgroundTrimmer::is_enabled(&TopicOptions) -> bool     // interval > 0 && retention > 0 && trim != None
+Arc<BackgroundTrimmer>::start(&self) -> StartedTrimmer   // one tokio task per enabled topic; no-op if none
+StartedTrimmer::stop(&self).await                         // cancels and joins; idempotent; Drop cancels
+BackgroundTrimmer::trim_topic_once(&self, topic) -> Result<TopicTrimResult>
+```
+C4 builds one trimmer per host (also for publish-only pods), calls `start` after the flusher and
+`stop` before the connection closes. Interlock: per partition, `MINID = min(cutoff, min over every
+`p:{topic}:*` hash (SCAN, `:meta` skipped) of the stored position)`; a consumer hash lacking the
+partition counts as `0-0`; no staleness timeout (as C#). Only the release valve overrides it
+(`XLEN >= ClampReleaseThreshold * MaxLen`): `MINID cutoff`, then `MAXLEN` to a length-derived
+target, one `streams.clamp.released` per transition into the released state. A failed scan or
+command fails the sweep and trims nothing; the loop logs and retries next interval.
+
 ## 5. Positions, ownership, admin, diagnostics
 
 ```rust
