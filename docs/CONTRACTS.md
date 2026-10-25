@@ -324,6 +324,39 @@ Owners:
   `Error::Transport` for a malformed reply. `last` covers entries C2's type filter drops.
 - **C2** owns `worker.rs` and the `PerMessage` / `Typed` bodies. **C2 and C3 agree the reset hand-off
   and read-cursor interface (both crate-private) through the lead on day one.**
+- **C2↔C3 interface** (crate-private, `consumer/shared.rs`, owner C2, agreed with C3):
+  ```rust
+  // Reset hand-off (C# ResetSignal). One per consumer, indexed by partition 0..partition_count.
+  ResetSignal::new(partition_count: u32) -> Self                 // shared as Arc<ResetSignal>
+  fn has_pending(&self) -> bool                                  // read loop, once per round
+  fn request(&self, ResetMarker) -> bool                         // flusher tick; true = newly pending (log it)
+  fn try_take(&self, partition) -> Option<ResetMarker>           // read loop, before the next fetch
+  fn is_taken(&self, partition) -> bool
+  fn try_clear_taken(&self, partition) -> Option<ResetMarker>    // flusher: Some = rewound, delete the field now
+  fn forget(&self, partition)                                    // host (C4): partition no longer read here
+  // slot states: Empty -> Pending(m) -> Taken(m) -> Empty; a different marker replaces Pending/Taken
+
+  // Positions (C# PositionRecorder + PositionFlush + PositionFlusher.Rewind). Arc<dyn PositionSink>.
+  trait PositionSink: Send + Sync + 'static {
+      fn record(&self, partition: u32, id: StreamId);   // after handling only; never blocks
+      fn rewind(&self, partition: u32);                  // read loop, at take time, BEFORE Fetch::seek
+      fn flush(&self) -> BoxFuture<'_, Result<()>>;      // Sync* modes: resolves when the write landed
+  }
+  struct NoPositions;                                    // PersistMode::None, work queue, tests
+
+  // Per-partition stop input (C4 drives it; C3's contested callback and B5's lease loss end in revoke()).
+  PartitionStop::new(&host_token) -> Self   // child token; Clone; its token is the handler's ctx token
+  fn shutdown(&self)   // graceful: in-flight batch finishes and is recorded; queued batches drain
+  fn revoke(&self)     // lost: stop; nothing queued is handled; NOTHING more is recorded
+  fn is_stopped(&self) -> bool; fn is_revoked(&self) -> bool; fn token(&self) -> &CancellationToken
+  ```
+  Rules: (1) **positions are recorded when processed, never when read**: `record` follows a
+  successful batch (or message, `SyncMessage`), a `BestEffort` skip, or a batch the type filter
+  emptied; `last` covers filtered entries. (2) Under `PersistMode::None` the worker calls neither
+  `record` nor `flush`. (3) Reset order in the read loop: `try_take` → `rewind` → `Fetch::seek`, all
+  before the next fetch; the flusher deletes `__reset:<p>` only after `try_clear_taken` returns it.
+  (4) The flusher only `request`s markers for partitions this instance owns. (5) After `revoke` the
+  worker stops reporting that partition; the flusher keeps its own stood-down guard as well.
 - **C4** owns `host.rs` (`Streams::builder(conn)…spawn() -> StreamsHost`), new public API reviewed by
   the lead; C4b and C4t start from its first-commit skeleton.
 - **D4**, **E2**, **E4** and tests construct `PartitionContext::new(..)` and call handlers directly.
