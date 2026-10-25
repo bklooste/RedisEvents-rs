@@ -27,6 +27,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     runs-on: ubuntu-latest
@@ -40,6 +41,8 @@ jobs:
         ports: ["6379:6379"]
     env:
       REDIS_URL: redis://localhost:6379
+      # CI always has Redis: a missing one must fail the run, not skip the Redis tests.
+      REDISEVENTS_REQUIRE_REDIS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -47,6 +50,10 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
+      # The `otel` feature (and `testing`) is off by default; stable only, so MSRV is not gated on it.
+      - name: Test with all features
+        if: matrix.toolchain == 'stable'
+        run: cargo test --workspace --all-features
 
   wire-drift:
     runs-on: ubuntu-latest
@@ -72,6 +79,8 @@ jobs:
         ports: ["6379:6379"]
     env:
       REDIS_URL: redis://localhost:6379
+      # CI always has Redis: a missing one must fail the run, not skip the Redis tests.
+      REDISEVENTS_REQUIRE_REDIS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4

@@ -5,6 +5,7 @@
 //! Skips without Redis (`require_redis!`).
 
 use std::collections::HashMap;
+#[cfg(not(feature = "otel"))]
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -15,11 +16,17 @@ use redisevents::wire::codec::{CODEC_VERSION, decode};
 use redisevents::wire::{HeaderBlock, StreamId, partition_for_key};
 use redisevents::{Error, Publisher};
 use redisevents_test_support::RedisFixture;
+#[cfg(not(feature = "otel"))]
 use tracing::field::{Field, Visit};
+#[cfg(not(feature = "otel"))]
 use tracing::span::{Attributes, Id, Record};
+#[cfg(not(feature = "otel"))]
 use tracing::{Instrument, Subscriber};
+#[cfg(not(feature = "otel"))]
 use tracing_subscriber::Layer;
+#[cfg(not(feature = "otel"))]
 use tracing_subscriber::layer::{Context, SubscriberExt};
+#[cfg(not(feature = "otel"))]
 use tracing_subscriber::registry::LookupSpan;
 
 async fn raw(redis: &RedisFixture) -> ConnectionManager {
@@ -708,14 +715,18 @@ async fn zero_partitions_is_refused() {
 
 #[derive(Debug, Clone)]
 struct SpanRecord {
+    /// Read only by the `tracing` layer's `on_record`.
+    #[cfg_attr(feature = "otel", allow(dead_code))]
     id: u64,
     parent: Option<u64>,
     fields: HashMap<String, String>,
 }
 
+#[cfg(not(feature = "otel"))]
 #[derive(Default)]
 struct FieldMap(HashMap<String, String>);
 
+#[cfg(not(feature = "otel"))]
 impl Visit for FieldMap {
     fn record_str(&mut self, field: &Field, value: &str) {
         self.0.insert(field.name().to_owned(), value.to_owned());
@@ -732,9 +743,11 @@ impl Visit for FieldMap {
 }
 
 /// The Rust counterpart of C#'s `ActivityListener`: records every span with its fields and parent.
+#[cfg(not(feature = "otel"))]
 #[derive(Clone, Default)]
 struct SpanCapture(Arc<Mutex<Vec<SpanRecord>>>);
 
+#[cfg(not(feature = "otel"))]
 impl SpanCapture {
     /// The `streams.publish {topic}` spans for one topic.
     fn for_topic(&self, topic: &str) -> Vec<SpanRecord> {
@@ -749,6 +762,7 @@ impl SpanCapture {
     }
 }
 
+#[cfg(not(feature = "otel"))]
 impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SpanCapture {
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
         let mut fields = FieldMap::default();
@@ -784,6 +798,7 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SpanCapture {
 /// dispatcher per test instead races tracing's global callsite-interest cache under parallel tests
 /// (a span is intermittently missing); one global subscriber never changes, so the cache is stable.
 /// Each span test selects its own spans by topic, which is unique per test.
+#[cfg(not(feature = "otel"))]
 fn capture() -> &'static SpanCapture {
     static CAPTURE: std::sync::OnceLock<SpanCapture> = std::sync::OnceLock::new();
     CAPTURE.get_or_init(|| {
@@ -793,6 +808,111 @@ fn capture() -> &'static SpanCapture {
         );
         capture
     })
+}
+
+/// With `otel` the publisher's spans are OpenTelemetry spans on the global tracer (B6), not
+/// `tracing` spans, so the capture is an in-memory exporter installed once as the global provider.
+/// Its finished spans are presented as the same [`SpanRecord`]s the `tracing` capture yields
+/// (`otel.name`, `otel.kind`, the attributes, `otel.status_code` on an error), so the assertions
+/// are identical in both builds.
+#[cfg(feature = "otel")]
+fn capture() -> &'static SpanCapture {
+    static CAPTURE: std::sync::OnceLock<SpanCapture> = std::sync::OnceLock::new();
+    CAPTURE.get_or_init(|| {
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        opentelemetry::global::set_tracer_provider(provider);
+        SpanCapture(exporter)
+    })
+}
+
+#[cfg(feature = "otel")]
+#[derive(Clone)]
+struct SpanCapture(opentelemetry_sdk::trace::InMemorySpanExporter);
+
+#[cfg(feature = "otel")]
+impl SpanCapture {
+    /// The `streams.publish {topic}` spans for one topic.
+    fn for_topic(&self, topic: &str) -> Vec<SpanRecord> {
+        use opentelemetry::trace::{SpanId, SpanKind, Status};
+        let name = format!("streams.publish {topic}");
+        let span_u64 = |id: SpanId| u64::from_be_bytes(id.to_bytes());
+        self.0
+            .get_finished_spans()
+            .expect("finished spans")
+            .iter()
+            .filter(|s| s.name == name)
+            .map(|s| {
+                let mut fields = HashMap::new();
+                fields.insert("otel.name".to_owned(), s.name.to_string());
+                let kind = match s.span_kind {
+                    SpanKind::Producer => "producer",
+                    SpanKind::Consumer => "consumer",
+                    _ => "other",
+                };
+                fields.insert("otel.kind".to_owned(), kind.to_owned());
+                for kv in &s.attributes {
+                    fields.insert(kv.key.as_str().to_owned(), kv.value.to_string());
+                }
+                if let Status::Error { description } = &s.status {
+                    fields.insert("otel.status_code".to_owned(), "ERROR".to_owned());
+                    fields.insert("otel.status_message".to_owned(), description.to_string());
+                }
+                SpanRecord {
+                    id: span_u64(s.span_context.span_id()),
+                    parent: (s.parent_span_id != SpanId::INVALID)
+                        .then(|| span_u64(s.parent_span_id)),
+                    fields,
+                }
+            })
+            .collect()
+    }
+}
+
+/// The work that asks for a publish: a span the publish should hang off, and a wrapper that runs
+/// a future inside it. Under `tracing` the caller is a `tracing` span; under `otel` it is a span in
+/// the current OpenTelemetry context.
+#[cfg(not(feature = "otel"))]
+struct Caller(tracing::Span);
+
+#[cfg(not(feature = "otel"))]
+impl Caller {
+    fn new() -> Self {
+        Self(tracing::info_span!("caller"))
+    }
+    fn id(&self) -> u64 {
+        self.0.id().expect("caller span").into_u64()
+    }
+    fn run<F: std::future::Future>(&self, fut: F) -> impl std::future::Future<Output = F::Output> {
+        fut.instrument(self.0.clone())
+    }
+}
+
+#[cfg(feature = "otel")]
+struct Caller(opentelemetry::Context);
+
+#[cfg(feature = "otel")]
+impl Caller {
+    fn new() -> Self {
+        use opentelemetry::trace::{TraceContextExt as _, Tracer as _};
+        let _ = capture();
+        let span = opentelemetry::global::tracer("RedisEvents").start("caller");
+        Self(opentelemetry::Context::current_with_span(span))
+    }
+    fn id(&self) -> u64 {
+        u64::from_be_bytes(
+            opentelemetry::trace::TraceContextExt::span(&self.0)
+                .span_context()
+                .span_id()
+                .to_bytes(),
+        )
+    }
+    fn run<F: std::future::Future>(&self, fut: F) -> impl std::future::Future<Output = F::Output> {
+        use opentelemetry::trace::FutureExt as _;
+        fut.with_context(self.0.clone())
+    }
 }
 
 /// C# `Publish_emits_a_streams_publish_span_in_the_callers_trace`.
@@ -811,16 +931,15 @@ async fn publish_emits_a_streams_publish_span_in_the_callers_trace() {
     .await;
     let capture = capture();
 
-    let root = tracing::info_span!("caller");
-    let root_id = root.id().expect("root span").into_u64();
-    let id = publisher
-        .publish(
+    let root = Caller::new();
+    let root_id = root.id();
+    let id = root
+        .run(publisher.publish(
             "customer-42",
             body("hello"),
             "OrderPlaced",
             &PublishOptions::new(),
-        )
-        .instrument(root)
+        ))
         .await
         .unwrap();
 
@@ -863,9 +982,8 @@ async fn a_batch_publish_emits_one_span_carrying_its_message_count() {
     let capture = capture();
 
     let bodies = [body("a"), body("b"), body("c")];
-    publisher
-        .publish_batch("k", &bodies, "T", &PublishOptions::new())
-        .instrument(tracing::info_span!("caller"))
+    Caller::new()
+        .run(publisher.publish_batch("k", &bodies, "T", &PublishOptions::new()))
         .await
         .unwrap();
 
@@ -893,9 +1011,8 @@ async fn a_failed_publish_marks_its_span_as_an_error() {
         .unwrap();
     let capture = capture();
 
-    let result = publisher
-        .publish("k", body("x"), "T", &PublishOptions::new())
-        .instrument(tracing::info_span!("caller"))
+    let result = Caller::new()
+        .run(publisher.publish("k", body("x"), "T", &PublishOptions::new()))
         .await;
     assert!(matches!(result, Err(Error::Transport { .. })));
 
@@ -916,9 +1033,8 @@ async fn publishing_does_not_leave_its_span_current() {
     let _ = capture();
 
     let before = tracing::Span::current().id();
-    let _ = publisher
-        .publish("k", body("x"), "T", &PublishOptions::new())
-        .instrument(tracing::info_span!("caller"))
+    let _ = Caller::new()
+        .run(publisher.publish("k", body("x"), "T", &PublishOptions::new()))
         .await
         .unwrap();
     assert_eq!(
