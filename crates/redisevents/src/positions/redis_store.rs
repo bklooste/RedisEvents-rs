@@ -158,13 +158,28 @@ impl PositionStore for RedisPositionStore {
                 .map(|existing| (existing, to))
                 .collect(),
         };
+        self.reset_targets(topic, consumer, &targets).await
+    }
+}
+
+impl RedisPositionStore {
+    /// Writes each `(partition, target)` position and its `__reset:<partition>` marker, stamped
+    /// with the admin identity and one issue time, in the same two commands as [`PositionStore::reset`].
+    /// `StreamAdmin` (D1) writes through this; an empty list writes nothing.
+    pub(crate) async fn reset_targets(
+        &self,
+        topic: &str,
+        consumer: &str,
+        targets: &[(u32, StreamId)],
+    ) -> Result<()> {
+        check_names(topic, consumer)?;
         if targets.is_empty() {
             return Ok(());
         }
         self.write(
             topic,
             consumer,
-            &targets,
+            targets,
             ADMIN_INSTANCE_ID,
             Some(OffsetDateTime::now_utc()),
         )
