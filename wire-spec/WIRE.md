@@ -88,7 +88,7 @@ Rules:
   the topic keeps metadata on state entries. It never has `k`.
 
 ### Stream ids
-`<ms>-<seq>`, both unsigned 64-bit decimal. A stored position is *exclusive*: the consumer
+`<ms>-<seq>`, both non-negative decimal integers no larger than **2^63 − 1** (C# stores them as `long`, so it rejects `9223372036854775808-0` even though Redis allows up to 2^64 − 1). Implementations MUST reject ids above that limit, so both sides accept the same set. A stored position is *exclusive*: the consumer
 resumes strictly after it.
 
 ### Type strings
