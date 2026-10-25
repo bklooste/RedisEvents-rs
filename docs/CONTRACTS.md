@@ -424,6 +424,39 @@ pub struct NullPositionStore;                     // complete
 - **B4**: store bodies (non-numeric fields skipped on load; meta fields `<p>:updatedUtc`,
   `<p>:instanceId`), `PositionRecord`, `StartPosition`, reset markers (crate-private).
 - **C3**: flusher; the foreign-writer check treats `ADMIN_INSTANCE_ID` as a rewind.
+  **C3 handoff (crate-private, `positions::flusher`)** for C4:
+  ```rust
+  FlusherOptions::new(topic, consumer, partitions, interval /*persist_interval_ms*/, instance_id)
+      // then set: redis: Some((conn, keys))          second-writer check + reset polling (Redis store only)
+      //           owned: Some(registry.subscribe())  only held partitions are written / have markers requested
+      //           resets: Some(Arc<ResetSignal>)     the same signal the read loops take from
+      //           reset_poll_interval, exclusive_claims (= InstanceMode::Lease),
+      //           contested_grace (contested_grace_seconds), recheck_interval (contested_recheck_seconds),
+      //           on_contested: Arc<dyn Fn(p, mine, theirs)>, on_recovered: Arc<dyn Fn(p, theirs)>
+  PositionFlusher::new(store: S /*PositionStore*/, FlusherOptions) -> Result<Self>  // wrap in Arc
+  impl PositionSink for PositionFlusher<S>      // Arc<PositionFlusher<S>> -> Arc<dyn PositionSink> for workers
+  fn start(&self)                               // spawns the timer; idempotent
+  async fn stop(&self)                          // stops the timer, then one final flush
+  async fn dispose(&self)                       // stop + zero the contention gauge
+  fn attach(&self, p, PartitionStop); fn detach(&self, p)   // the stop revoked on a stand-down
+  async fn flush_now / recheck / poll_resets    // one round now (tests, diagnostics)
+  dirty_count, flushes, failures, contested_count, contention_count, recoveries,
+  resets_applied, backwards_records, is_stood_down(p), reported(p)   // counters for health/tests
+  ```
+  Rules for C4: one flusher per consumer; `PersistMode::None` uses `NoPositions` instead. Attach
+  each worker's `PartitionStop` when starting it (again after `on_recovered`). On a stand-down the
+  flusher revokes the attached stop and then calls `on_contested`; C4 calls `ResetSignal::forget`
+  and must not restart the partition until `on_recovered`. **Shutdown order**: stop workers →
+  `flusher.stop()` (final flush) → `registry.stop()` (a released registry holds nothing, and
+  positions of partitions not held are dropped, not written). Cold start: `reset_marker::take_all`
+  before any worker or the flusher starts.
+  Behaviour: a timer tick writes all dirty partitions in one `save` (nothing when idle), then polls
+  markers, then re-arbitrates stood-down partitions. A failed write is re-queued, logged at warn
+  and counted on `streams.positions.flush_failures`; `PositionSink::flush` also returns the error
+  (the worker applies `HandleError::from`). A dropped flush re-queues what it drained. While a
+  reset is pending for a partition the flusher does not write it (keeps the admin target, and the
+  trim clamp, in place) until the read loop's `rewind`; the marker field is then removed with a
+  compare-and-delete, so a newer marker survives.
 - **B5**: `ownership::{PartitionOwner::format/parse, instance_id_for, stable_instance_id}` bodies
   and the crate-private registry. `instance_id_for` must equal C# `OwnershipRegistry.InstanceIdFor`
   (vector). `OwnershipMap`, `ContestedPartition` are complete data types.
