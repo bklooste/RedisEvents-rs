@@ -1,0 +1,253 @@
+[
+  {
+    "name": "minimal",
+    "input": {
+      "body_b64": "aGVsbG8=",
+      "type": "order.created",
+      "partitionKey": null,
+      "correlationId": null,
+      "traceParent": null,
+      "headers": null,
+      "state": false
+    },
+    "fields": [
+      [
+        "b",
+        "aGVsbG8="
+      ],
+      [
+        "t",
+        "b3JkZXIuY3JlYXRlZA=="
+      ],
+      [
+        "k",
+        ""
+      ]
+    ]
+  },
+  {
+    "name": "empty-key",
+    "input": {
+      "body_b64": "aGVsbG8=",
+      "type": "order.created",
+      "partitionKey": "",
+      "correlationId": null,
+      "traceParent": null,
+      "headers": null,
+      "state": false
+    },
+    "fields": [
+      [
+        "b",
+        "aGVsbG8="
+      ],
+      [
+        "t",
+        "b3JkZXIuY3JlYXRlZA=="
+      ],
+      [
+        "k",
+        ""
+      ]
+    ]
+  },
+  {
+    "name": "all-fields",
+    "input": {
+      "body_b64": "eyJvcmRlcklkIjo0MiwidG90YWwiOjE5Ljk1fQ==",
+      "type": "order.placed.v2",
+      "partitionKey": "customer-42",
+      "correlationId": "c-123",
+      "traceParent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      "headers": [
+        [
+          "tenant",
+          "acme"
+        ],
+        [
+          "schema",
+          "2"
+        ]
+      ],
+      "state": false
+    },
+    "fields": [
+      [
+        "b",
+        "eyJvcmRlcklkIjo0MiwidG90YWwiOjE5Ljk1fQ=="
+      ],
+      [
+        "t",
+        "b3JkZXIucGxhY2VkLnYy"
+      ],
+      [
+        "k",
+        "Y3VzdG9tZXItNDI="
+      ],
+      [
+        "c",
+        "Yy0xMjM="
+      ],
+      [
+        "p",
+        "MDAtNGJmOTJmMzU3N2IzNGRhNmEzY2U5MjlkMGUwZTQ3MzYtMDBmMDY3YWEwYmE5MDJiNy0wMQ=="
+      ],
+      [
+        "h",
+        "Njp0ZW5hbnQ0OmFjbWU2OnNjaGVtYTE6Mg=="
+      ]
+    ]
+  },
+  {
+    "name": "unicode-key-and-type",
+    "input": {
+      "body_b64": "Y2Fmw6kg4pyT",
+      "type": "commande.créé.\uD83C\uDF89",
+      "partitionKey": "é✓\uD83C\uDF89",
+      "correlationId": null,
+      "traceParent": null,
+      "headers": null,
+      "state": false
+    },
+    "fields": [
+      [
+        "b",
+        "Y2Fmw6kg4pyT"
+      ],
+      [
+        "t",
+        "Y29tbWFuZGUuY3LDqcOpLvCfjok="
+      ],
+      [
+        "k",
+        "w6ninJPwn46J"
+      ]
+    ]
+  },
+  {
+    "name": "binary-body-zero-bytes",
+    "input": {
+      "body_b64": "AAEA/wAAgA==",
+      "type": "blob",
+      "partitionKey": "bin",
+      "correlationId": null,
+      "traceParent": null,
+      "headers": null,
+      "state": false
+    },
+    "fields": [
+      [
+        "b",
+        "AAEA/wAAgA=="
+      ],
+      [
+        "t",
+        "YmxvYg=="
+      ],
+      [
+        "k",
+        "Ymlu"
+      ]
+    ]
+  },
+  {
+    "name": "state-minimal",
+    "input": {
+      "body_b64": "ZXZlbnQtYm9keQ==",
+      "type": "es.order.placed",
+      "partitionKey": null,
+      "correlationId": null,
+      "traceParent": null,
+      "headers": null,
+      "state": true
+    },
+    "fields": [
+      [
+        "b",
+        "ZXZlbnQtYm9keQ=="
+      ],
+      [
+        "t",
+        "ZXMub3JkZXIucGxhY2Vk"
+      ]
+    ]
+  },
+  {
+    "name": "state-with-metadata",
+    "input": {
+      "body_b64": "ZXZlbnQtYm9keQ==",
+      "type": "es.order.placed",
+      "partitionKey": null,
+      "correlationId": "c-9",
+      "traceParent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+      "headers": [
+        [
+          "source",
+          "orders"
+        ]
+      ],
+      "state": true
+    },
+    "fields": [
+      [
+        "b",
+        "ZXZlbnQtYm9keQ=="
+      ],
+      [
+        "t",
+        "ZXMub3JkZXIucGxhY2Vk"
+      ],
+      [
+        "c",
+        "Yy05"
+      ],
+      [
+        "p",
+        "MDAtMGFmNzY1MTkxNmNkNDNkZDg0NDhlYjIxMWM4MDMxOWMtYjdhZDZiNzE2OTIwMzMzMS0wMQ=="
+      ],
+      [
+        "h",
+        "Njpzb3VyY2U2Om9yZGVycw=="
+      ]
+    ]
+  },
+  {
+    "name": "headers-present",
+    "input": {
+      "body_b64": "cGF5bG9hZA==",
+      "type": "order.placed",
+      "partitionKey": "k",
+      "correlationId": null,
+      "traceParent": null,
+      "headers": [
+        [
+          "a:1",
+          "2:ab"
+        ],
+        [
+          "k",
+          ""
+        ]
+      ],
+      "state": false
+    },
+    "fields": [
+      [
+        "b",
+        "cGF5bG9hZA=="
+      ],
+      [
+        "t",
+        "b3JkZXIucGxhY2Vk"
+      ],
+      [
+        "k",
+        "aw=="
+      ],
+      [
+        "h",
+        "MzphOjE0OjI6YWIxOmswOg=="
+      ]
+    ]
+  }
+]

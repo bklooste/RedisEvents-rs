@@ -1,0 +1,125 @@
+{
+  "prefix": "test:re:",
+  "keys": [
+    {
+      "name": "orders:stream:p0:colocated",
+      "key": "test:re:s:{orders}:0"
+    },
+    {
+      "name": "orders:stream:p3:spread",
+      "key": "test:re:s:orders:3"
+    },
+    {
+      "name": "orders:positions",
+      "key": "test:re:p:{orders}:svc"
+    },
+    {
+      "name": "orders:positions-meta",
+      "key": "test:re:p:{orders}:svc:meta"
+    },
+    {
+      "name": "orders:ownership",
+      "key": "test:re:o:{orders}:svc"
+    },
+    {
+      "name": "orders:topic-meta",
+      "key": "test:re:m:{orders}"
+    },
+    {
+      "name": "orders:state",
+      "key": "test:re:{orders}:state:es:Order:42"
+    },
+    {
+      "name": "orders:dedupe",
+      "key": "test:re:dedupe:{orders}:evt-1"
+    },
+    {
+      "name": "a.b-c:stream:p0:colocated",
+      "key": "test:re:s:{a.b-c}:0"
+    },
+    {
+      "name": "a.b-c:stream:p3:spread",
+      "key": "test:re:s:a.b-c:3"
+    },
+    {
+      "name": "a.b-c:positions",
+      "key": "test:re:p:{a.b-c}:svc"
+    },
+    {
+      "name": "a.b-c:positions-meta",
+      "key": "test:re:p:{a.b-c}:svc:meta"
+    },
+    {
+      "name": "a.b-c:ownership",
+      "key": "test:re:o:{a.b-c}:svc"
+    },
+    {
+      "name": "a.b-c:topic-meta",
+      "key": "test:re:m:{a.b-c}"
+    },
+    {
+      "name": "a.b-c:state",
+      "key": "test:re:{a.b-c}:state:es:Order:42"
+    },
+    {
+      "name": "a.b-c:dedupe",
+      "key": "test:re:dedupe:{a.b-c}:evt-1"
+    }
+  ],
+  "prefix_resolution": [
+    {
+      "name": "aspnetcore-development",
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": null,
+        "STREAMS_KEY_PREFIX": null
+      },
+      "prefix": "development:re:"
+    },
+    {
+      "name": "dotnet-qa-only",
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": null,
+        "DOTNET_ENVIRONMENT": "QA",
+        "STREAMS_KEY_PREFIX": null
+      },
+      "prefix": "qa:re:"
+    },
+    {
+      "name": "both-set-aspnetcore-wins",
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Staging",
+        "DOTNET_ENVIRONMENT": "QA",
+        "STREAMS_KEY_PREFIX": null
+      },
+      "prefix": "staging:re:"
+    },
+    {
+      "name": "none-is-production",
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": null,
+        "DOTNET_ENVIRONMENT": null,
+        "STREAMS_KEY_PREFIX": null
+      },
+      "prefix": "production:re:"
+    },
+    {
+      "name": "override-verbatim",
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": null,
+        "STREAMS_KEY_PREFIX": "custom:"
+      },
+      "prefix": "custom:"
+    },
+    {
+      "name": "blank-override-ignored",
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": null,
+        "STREAMS_KEY_PREFIX": "   "
+      },
+      "prefix": "development:re:"
+    }
+  ]
+}
