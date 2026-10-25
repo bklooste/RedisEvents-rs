@@ -400,8 +400,7 @@ async fn start_consumer(
         let service = crate::diagnostics::names::service_name();
         (0..count)
             .map(|index| {
-                let client_name =
-                    names::reader_client_name(&service, &name, index, &pod_name);
+                let client_name = names::reader_client_name(&service, &name, index, &pod_name);
                 ReaderConnection::named(conn, consumer.block_ms, Some(client_name))
             })
             .collect::<Result<Vec<_>>>()?
