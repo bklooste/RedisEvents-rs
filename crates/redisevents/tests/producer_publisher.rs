@@ -782,6 +782,11 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SpanCapture {
     }
 }
 
+/// The span tests install a `tracing` dispatcher. Each install and drop rebuilds tracing's global
+/// callsite-interest cache, so two such tests running at once can leave a callsite disabled for
+/// the other; they take this lock so only one captures at a time.
+static SPAN_CAPTURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn capturing() -> (SpanCapture, tracing::subscriber::DefaultGuard) {
     let capture = SpanCapture::default();
     let guard =
@@ -792,6 +797,7 @@ fn capturing() -> (SpanCapture, tracing::subscriber::DefaultGuard) {
 /// C# `Publish_emits_a_streams_publish_span_in_the_callers_trace`.
 #[tokio::test]
 async fn publish_emits_a_streams_publish_span_in_the_callers_trace() {
+    let _serial = SPAN_CAPTURE.lock().await;
     let redis = redisevents_test_support::require_redis!();
     let topic = redis.new_topic("span");
     let publisher = publisher(
@@ -851,6 +857,7 @@ async fn publish_emits_a_streams_publish_span_in_the_callers_trace() {
 /// C# `A_batch_publish_emits_one_span_carrying_its_message_count`.
 #[tokio::test]
 async fn a_batch_publish_emits_one_span_carrying_its_message_count() {
+    let _serial = SPAN_CAPTURE.lock().await;
     let redis = redisevents_test_support::require_redis!();
     let topic = redis.new_topic("span-batch");
     let publisher = publisher(redis, &topic, TopicOptions::default()).await;
@@ -875,6 +882,7 @@ async fn a_batch_publish_emits_one_span_carrying_its_message_count() {
 /// C# `A_failed_publish_marks_its_span_as_an_error`, with a real failure (`WRONGTYPE`).
 #[tokio::test]
 async fn a_failed_publish_marks_its_span_as_an_error() {
+    let _serial = SPAN_CAPTURE.lock().await;
     let redis = redisevents_test_support::require_redis!();
     let topic = redis.new_topic("span-fail");
     let mut conn = raw(redis).await;
@@ -904,6 +912,7 @@ async fn a_failed_publish_marks_its_span_as_an_error() {
 /// C# `Publishing_does_not_leave_its_span_current`.
 #[tokio::test]
 async fn publishing_does_not_leave_its_span_current() {
+    let _serial = SPAN_CAPTURE.lock().await;
     let redis = redisevents_test_support::require_redis!();
     let topic = redis.new_topic("span-current");
     let publisher = publisher(redis, &topic, TopicOptions::default()).await;
