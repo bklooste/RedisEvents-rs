@@ -1286,6 +1286,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "clap",
+ "redis",
  "redisevents",
  "serde_json",
  "tokio",

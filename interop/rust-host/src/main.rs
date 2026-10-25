@@ -1,13 +1,17 @@
 //! Rust twin of `interop/dotnet/InteropHost`: same verbs, same flags, same JSON-lines output.
 //!
-//! `publish`, `meta` and `admin-reset` are real, over `redisevents`. `consume` and `positions` still
-//! exit with code 3 ("not implemented"), which the scenario runner treats as a skip (they need the
-//! consumer host, WP C4). Nothing here fakes behaviour.
+//! Every verb is real, over `redisevents`: `consume` runs the consumer host (WP C4) exactly as the
+//! C# host runs `AddStream` (persist interval 100 ms, positions flushed on stop). Nothing here
+//! fakes behaviour; a verb that cannot run would exit with code 3, which the runner skips.
 //!
 //! Exit codes: 0 ok, 1 usage or unexpected failure, 2 timeout, 3 not implemented, 4 library refused.
 
 use std::future::Future;
+use std::io::Write as _;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -15,14 +19,14 @@ use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use redisevents::Connection;
 use redisevents::admin::stream_admin::{ResetOptions, ResetTarget, StreamAdmin};
-use redisevents::config::{ProducerOptions, TopicOptions};
+use redisevents::config::{ConsumerOptions, ProducerOptions, StreamOptions, TopicOptions};
+use redisevents::consumer::Streams;
 use redisevents::producer::{
     BufferedPublisher, BufferedStreamPublisher, PublishOptions, Publisher, StreamPublisher,
 };
 use redisevents::wire::{Keys, StreamId};
-
-/// Exit code meaning "this verb is not implemented yet"; the runner skips on it.
-const EXIT_NOT_IMPLEMENTED: u8 = 3;
+use redisevents::{BatchHandler, HandleResult, PartitionContext, StreamMsg};
+use tokio::sync::Notify;
 
 #[derive(Parser)]
 #[command(
@@ -119,17 +123,6 @@ enum Verb {
     },
 }
 
-impl Verb {
-    /// For a verb that is still a stub: its CLI name and the work package that implements it.
-    fn not_implemented(&self) -> Option<(&'static str, &'static str)> {
-        match self {
-            Verb::Consume { .. } => Some(("consume", "WP C4 (consumer host)")),
-            Verb::Positions { .. } => Some(("positions", "WP B4 (position store) and C4")),
-            _ => None,
-        }
-    }
-}
-
 fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -149,15 +142,14 @@ fn main() -> ExitCode {
             partition,
             to_id,
         } => run_admin_reset(redis, topic, consumer, *partition, to_id),
-        verb => {
-            let (name, needs) = verb.not_implemented().unwrap_or(("unknown", "no verb"));
-            println!(
-                "{}",
-                serde_json::json!({"event": "not_implemented", "verb": name, "needs": needs})
-            );
-            eprintln!("not implemented yet: {name} needs {needs}");
-            ExitCode::from(EXIT_NOT_IMPLEMENTED)
-        }
+        Verb::Consume {
+            topic,
+            consumer,
+            partitions,
+            expect,
+            timeout,
+        } => run_consume(redis, topic, consumer, *partitions, *expect, *timeout),
+        Verb::Positions { topic, consumer } => run_positions(redis, topic, consumer),
     }
 }
 
@@ -378,6 +370,153 @@ fn run_admin_reset(
             println!(
                 "{}",
                 serde_json::json!({"event": "reset", "targets": targets})
+            );
+            ExitCode::SUCCESS
+        }
+        Err(code) => code,
+    }
+}
+
+/// Prints one JSON line per delivered message, and signals when `expect` were seen.
+struct Emitter {
+    seen: AtomicU32,
+    expect: u32,
+    reached: Notify,
+}
+
+impl BatchHandler for Emitter {
+    #[allow(clippy::unused_async_trait_impl)] // the trait's shape
+    async fn handle_batch(&self, batch: &[StreamMsg], _ctx: &PartitionContext) -> HandleResult {
+        let mut out = std::io::stdout().lock();
+        for m in batch {
+            let headers: Vec<[String; 2]> = m
+                .headers()
+                .to_vec()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(k, v)| [k, v])
+                .collect();
+            let line = serde_json::json!({
+                "event": "message",
+                "partition": m.partition(),
+                "id": m.id().to_string(),
+                "key": m.partition_key(),
+                "type": m.msg_type(),
+                "body_b64": STANDARD.encode(m.body()),
+                "headers": headers,
+                "correlation": m.correlation_id(),
+                "traceparent": m.trace_parent(),
+            });
+            let _ = writeln!(out, "{line}");
+            let seen = self.seen.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.expect > 0 && seen >= self.expect {
+                self.reached.notify_one();
+            }
+        }
+        let _ = out.flush();
+        Ok(())
+    }
+}
+
+/// `consume`: runs the consumer host until `expect` messages arrived or `timeout` seconds passed,
+/// stops it (which flushes positions), then prints `done`. Exit 2 on a timeout.
+fn run_consume(
+    redis: Option<&str>,
+    topic: &str,
+    consumer: &str,
+    partitions: u32,
+    expect: u32,
+    timeout: u32,
+) -> ExitCode {
+    let url = redis_url(redis);
+    let emitter = Arc::new(Emitter {
+        seen: AtomicU32::new(0),
+        expect,
+        reached: Notify::new(),
+    });
+    let handler = emitter.clone();
+    let counter = emitter.clone();
+    let result = run(async move {
+        let conn = Connection::connect(&url).await?;
+        let mut options = StreamOptions::default();
+        options.topics.insert(
+            topic.to_owned(),
+            TopicOptions {
+                partitions,
+                ..TopicOptions::default()
+            },
+        );
+        options.consumers.push(ConsumerOptions {
+            topic: topic.to_owned(),
+            consumer: Some(consumer.to_owned()),
+            persist_interval_ms: 100,
+            ..ConsumerOptions::default()
+        });
+        let host = Streams::builder(conn)
+            .options(options)
+            .topic(topic)
+            .handler(handler)
+            .spawn()
+            .await?;
+        let reached = expect == 0
+            || tokio::time::timeout(
+                Duration::from_secs(u64::from(timeout)),
+                emitter.reached.notified(),
+            )
+            .await
+            .is_ok()
+            || emitter.seen.load(Ordering::SeqCst) >= expect;
+        host.shutdown().await?;
+        Ok(reached)
+    });
+    match result {
+        Ok(reached) => {
+            let timed_out = !reached && expect > 0;
+            let seen = counter.seen.load(Ordering::SeqCst);
+            println!(
+                "{}",
+                serde_json::json!({"event": "done", "consumed": seen, "timed_out": timed_out})
+            );
+            if timed_out {
+                ExitCode::from(2)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(code) => code,
+    }
+}
+
+/// `positions`: the consumer's positions hash, `{"event":"positions","positions":{"p":"id"},"markers":{..}}`.
+fn run_positions(redis: Option<&str>, topic: &str, consumer: &str) -> ExitCode {
+    let url = redis_url(redis);
+    let result = run(async {
+        let conn = Connection::connect(&url).await?;
+        let key = Keys::from_env().positions(topic, consumer);
+        let entries: Vec<(String, String)> = redis::cmd("HGETALL")
+            .arg(&key)
+            .query_async(&mut conn.shared())
+            .await?;
+        Ok(entries)
+    });
+    match result {
+        Ok(entries) => {
+            let mut positions = serde_json::Map::new();
+            let mut markers = serde_json::Map::new();
+            for (name, value) in entries {
+                if !name.is_empty()
+                    && name.bytes().all(|b| b.is_ascii_digit())
+                    && let Ok(p) = name.parse::<u32>()
+                {
+                    let id = value.split('|').next().unwrap_or_default().to_owned();
+                    positions.insert(p.to_string(), id.into());
+                    continue;
+                }
+                markers.insert(name, value.into());
+            }
+            println!(
+                "{}",
+                serde_json::json!({"event": "positions", "positions": positions, "markers": markers})
             );
             ExitCode::SUCCESS
         }
