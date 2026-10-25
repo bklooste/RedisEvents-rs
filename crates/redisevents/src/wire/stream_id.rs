@@ -92,32 +92,32 @@ impl StreamId {
     }
 }
 
-/// One part of an id: non-empty ASCII digits only, value `0..=MAX_PART`.
+/// One part of an id: non-empty ASCII digits only, value `0..=MAX_PART`. One pass: digit check
+/// and accumulation together (F1: the two-pass form cost about twice as much).
 fn parse_part(part: &[u8]) -> Option<u64> {
-    if part.is_empty() || !part.iter().all(u8::is_ascii_digit) {
+    if part.is_empty() {
         return None;
     }
-    part.iter()
-        .try_fold(0u64, |acc, &d| {
-            acc.checked_mul(10)?.checked_add(u64::from(d - b'0'))
-        })
-        .filter(|&v| v <= StreamId::MAX_PART)
+    let mut acc = 0u64;
+    for &b in part {
+        let d = b.wrapping_sub(b'0');
+        if d > 9 {
+            return None;
+        }
+        acc = acc.checked_mul(10)?.checked_add(u64::from(d))?;
+    }
+    (acc <= StreamId::MAX_PART).then_some(acc)
 }
 
 /// Writes `value` in decimal at the start of `out` and returns the digit count. `out` must have room.
+/// Counts the digits first and writes them in place, back to front, with no scratch buffer.
 fn put_decimal(mut value: u64, out: &mut [u8]) -> usize {
-    let mut digits = [0u8; 20];
-    let mut n = 0;
-    loop {
-        digits[n] = u8::try_from(value % 10).map_or(b'0', |d| b'0' + d);
+    let n = value
+        .checked_ilog10()
+        .map_or(1, |l| usize::try_from(l).unwrap_or(0) + 1);
+    for slot in out[..n].iter_mut().rev() {
+        *slot = b'0' + u8::try_from(value % 10).unwrap_or(0);
         value /= 10;
-        n += 1;
-        if value == 0 {
-            break;
-        }
-    }
-    for (slot, &digit) in out.iter_mut().zip(digits[..n].iter().rev()) {
-        *slot = digit;
     }
     n
 }
@@ -125,7 +125,8 @@ fn put_decimal(mut value: u64, out: &mut [u8]) -> usize {
 impl fmt::Display for StreamId {
     /// `<ms>-<seq>`, invariant decimal.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}-{}", self.ms, self.seq)
+        // Through `format_into` rather than `write!`: skips the formatting machinery (F1).
+        f.write_str(self.format_into(&mut [0u8; 41]))
     }
 }
 
