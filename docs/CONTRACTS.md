@@ -91,8 +91,9 @@ fn parse_bytes(&[u8]) -> Result<Self, ParseStreamIdError>; // A1, for raw RESP i
 fn format_into(self, &mut [u8; 41]) -> &str;               // A1, allocation-free
 impl Display (A1), FromStr
 ```
-- Derived `Ord` is the Redis order (ms, then seq). Unsigned per `WIRE.md` §4. `MAX` is `u64::MAX`
-  twice (C# uses `i64::MAX`; neither is ever stored).
+- Derived `Ord` is the Redis order (ms, then seq). Stored as `u64`, but **each part is
+  `0..=i64::MAX`** (C# `long`): `StreamId::MAX_PART = i64::MAX`, `MAX = MAX_PART-MAX_PART`
+  (= C# `StreamId.Max`), and parse **rejects** a part above `i64::MAX`.
 - Parse rules = C# `StreamId.TryParse`: digits `-` digits, nothing else.
 - Time type crate-wide is `time::OffsetDateTime`.
 
@@ -146,8 +147,11 @@ Headers are packed by the **publisher** once per call (`HeaderBlock::pack`), not
 Trim arguments (`TrimArgs.cs`) are A1's to add as `pub(crate)` in `wire/` (B1 and C5 use them).
 
 ### `wire::router` (W0.2 API; A1 bodies)
-`partition_for_key(key: &[u8], partitions: u32) -> u32` (non-empty keys) and
-`RoundRobin::next(&self, partitions) -> u32` (empty keys; one per publisher).
+`partition_for_key(key: &[u8], partitions: u32) -> u32` and
+`RoundRobin::next(&self, partitions) -> u32` (one per publisher). The split is the caller's: B1
+checks for an empty key **before** routing and round-robins it, as C# `StreamPublisher` checks
+`IsNullOrEmpty` before `PartitionRouter.ForKey`. `partition_for_key` is only called with a
+non-empty key.
 
 ### `message` (W0.2, complete)
 ```rust
@@ -159,6 +163,9 @@ pub trait PayloadCodec: Send + Sync + 'static {
 }
 pub struct Json;   // serde_json
 ```
+LZ4 MessagePack bodies use MessagePack-CSharp's `Lz4BlockArray` framing (ext 98), which C#
+`Standard` options and plain MessagePack decoders cannot read; the MessagePack codec must decode
+`Lz4BlockArray` (and `Lz4Block`, ext 99) itself.
 E1 adds `MessagePack` (and LZ4 variants) in `redisevents-msgpack` implementing `PayloadCodec`;
 A3 provides the pure framing it uses.
 
@@ -344,7 +351,21 @@ pub struct NullPositionStore;                     // complete
 - `wait_until(cond, timeout, because)` / `wait_until_async` for polling.
 - Name tests after the C# test they port (`PLAN.md` §8.6 rule 3).
 
-## 7. Deliberately open
+## 7. Golden vectors (`wire-spec/vectors/`, from W0.1)
+
+Wire WPs load these in tests and must pass every case (`PLAN.md` §8.6 rule 6: extend them through
+W0.1's generator, never by hand).
+
+| File | Shape | Pins | WP |
+| --- | --- | --- | --- |
+| `routing.json` | object `{routes: [{key, partitions, partition}], xxh3: [{key, hash_u64_decimal_string}]}` | `partition_for_key`, raw xxh3 | A1 |
+| `entries.json` | array `[{name, input: {body_b64, type, partitionKey, correlationId, traceParent, headers, state}, fields: [[name, value]…]}]`; `state: true` = state entry (`partition_key: None`) | `EntryFields::write_to` field order/omission, `decode` | A1 |
+| `headers.json` | `{valid: [{name, headers: [[k, v]…], packed_b64}], invalid: [{name, packed_b64}], pack_rejects: [{name, headers}]}` | `HeaderBlock::pack` / iter / error cases | A1 |
+| `keys.json` | `{prefix, keys: [{name, key}], prefix_resolution: [{name, env: {ASPNETCORE_ENVIRONMENT, DOTNET_ENVIRONMENT, STREAMS_KEY_PREFIX}, prefix}]}` | `Keys` (use `Keys::from_lookup` for `env`) | A1 |
+| `formats.json` | `{stream_id_format, stream_id_parse: [{input, valid, ms, seq}], position_value, reset_marker, reset_marker_parse, owner_value, admin_instance_id, datetime_offset_o}`; numbers as decimal strings | `StreamId` (A1); `PositionRecord`, reset marker (B4); `PartitionOwner` (B5); .NET `"O"` time format (B4, B1 `createdUtc`) | A1, B4, B5 |
+| `messagepack.json` | `{threshold_bytes, cases: [{name, type, compression, uncompressed_length, description, body_b64}]}` | `Lz4BlockArray` / `Lz4Block` framing, array vs map layout | A3, E1 |
+
+## 8. Deliberately open
 
 - **Cluster support** (`cluster-async`): `Connection` wraps a single-node `Client` only. Adding a
   cluster variant is a lead-reviewed change to `connection.rs` when a WP needs it.

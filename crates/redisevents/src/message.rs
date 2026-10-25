@@ -4,6 +4,10 @@
 //! The C# typed API defaults the type to `typeof(T).FullName`, which Rust cannot reproduce, so here
 //! it is mandatory (`WIRE.md` §4 "Type strings"). The payload format is a type parameter
 //! implementing [`PayloadCodec`]: [`Json`] here, MessagePack (+ LZ4) in `redisevents-msgpack` (E1).
+//!
+//! An LZ4 MessagePack body is in MessagePack-CSharp's `Lz4BlockArray` framing (ext 98), which a
+//! plain MessagePack decoder (or C# `Standard` options) cannot read: a codec that may receive such
+//! bodies must decode `Lz4BlockArray` (and `Lz4Block`, ext 99) itself.
 
 use bytes::Bytes;
 use serde::Serialize;
