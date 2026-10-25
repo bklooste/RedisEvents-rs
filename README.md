@@ -34,6 +34,47 @@ cargo test -p inventory-domain
 The two services follow as the library crates they use land (plan WPs E5b and E5c). The
 [sample README](samples/inventory/README.md) shows the routes and how to run the full stack.
 
+### Consuming typed messages
+
+A consumer host is built from a builder: pick a topic, register a handler, and spawn. A typed
+handler receives decoded messages (JSON by default; `typed_handler_with::<MessagePack, _, _>` in
+`redisevents-msgpack` for MessagePack).
+
+```rust
+use redisevents::consumer::{HandleResult, PartitionContext, Streams, TypedHandler};
+use redisevents::{Connection, Message, TypedMsg};
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+struct OrderPlaced {
+    order_id: String,
+}
+
+impl Message for OrderPlaced {
+    const TYPE: &'static str = "Shop.OrderPlaced";
+}
+
+struct Shipping;
+
+impl TypedHandler<OrderPlaced> for Shipping {
+    async fn handle(&self, msg: &TypedMsg<OrderPlaced>, _ctx: &PartitionContext) -> HandleResult {
+        println!("ship {}", msg.value.order_id);
+        Ok(())
+    }
+}
+
+async fn run() -> redisevents::Result<()> {
+    let conn = Connection::connect("redis://localhost:6379").await?;
+    let host = Streams::builder(conn)
+        .topic("orders")
+        .typed_handler::<OrderPlaced, _>(Shipping)
+        .spawn()
+        .await?;
+    // ... until shutdown
+    host.shutdown().await
+}
+```
+
 ## Crates
 
 | Crate | Ports | Purpose |
