@@ -112,7 +112,7 @@ on your own target infrastructure for numbers you would actually size capacity a
 
 **Throughput** - release build, against a local Redis:
 
-```
+```bash
 docker run -d --name perf-redis -p 6379:6379 redis:8-alpine
 REDIS_URL=redis://127.0.0.1:6379 cargo test --release -p redisevents --test perf -- \
     --ignored --nocapture --test-threads=1
@@ -144,7 +144,7 @@ reader threads do not help a co-located topic: its partitions are read by one mu
 
 **Low-level latency** - criterion, release build, the per-call cost every message pays:
 
-```
+```bash
 cargo bench -p redisevents --bench micro
 ```
 
