@@ -12,4 +12,14 @@ publish = false
 workspace = true
 
 [dependencies]
+axum = "0.8.9"
+redis = "1.8.0"
 redisevents = { path = "../redisevents" }
+serde_json = "1.0.154"
+time = { version = "0.3.55", features = ["parsing", "formatting"] }
+tower = "0.5.3"
+
+[dev-dependencies]
+redisevents-test-support = { path = "../redisevents-test-support" }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
+tower = { version = "0.5.3", features = ["util"] }
