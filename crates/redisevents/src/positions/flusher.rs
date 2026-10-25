@@ -11,7 +11,7 @@
 //! - `record` stores the last processed id in the partition's slot and
 //!   marks it dirty. A short uncontended lock; no await, no Redis.
 //! - the timer (`start`) writes every dirty partition in one
-//!   [`PositionStore::save`] per `interval`, and writes nothing at all when nothing is dirty.
+//!   `PositionStore::save` per `interval`, and writes nothing at all when nothing is dirty.
 //! - `flush` is the same write on demand (`SyncBatch` / `SyncMessage`); it
 //!   resolves once everything recorded before the call has landed, or with the write's error.
 //! - `stop` stops the timer and does a final flush.
@@ -28,7 +28,7 @@
 //!
 //! - nil (legacy) or our own id (this instance, or a previous life of it: the id is stable per pod)
 //!   → nothing to do;
-//! - [`ADMIN_INSTANCE_ID`] → an operator rewind; never stood down for (the reset hand-off applies it);
+//! - `ADMIN_INSTANCE_ID` → an operator rewind; never stood down for (the reset hand-off applies it);
 //! - otherwise one `HMGET` on the ownership hash asks whether that id still has a live presence
 //!   field (`i:<id>`) and who holds the partition's claim. No presence → stale (a previous life,
 //!   an admin tool, a dead pod): keep writing. Lease mode and the claim names us → a late flush
@@ -139,7 +139,7 @@ pub(crate) struct FlusherOptions {
     /// How often a stood-down partition re-probes its contender (`contested_recheck_seconds`);
     /// `None` or zero disables recovery.
     pub(crate) recheck_interval: Option<Duration>,
-    /// Stand-down notification (after the attached [`PartitionStop`] was revoked).
+    /// Stand-down notification (after the attached `PartitionStop` was revoked).
     pub(crate) on_contested: Option<ContestedCallback>,
     /// Recovery notification: the host restarts the partition's worker.
     pub(crate) on_recovered: Option<RecoveredCallback>,
@@ -282,7 +282,7 @@ impl<S: PositionStore> PositionFlusher<S> {
     /// A flusher writing through `store`.
     ///
     /// # Errors
-    /// [`Error::InvalidArgument`] for a blank topic or consumer, [`Error::Config`] for zero
+    /// `Error::InvalidArgument` for a blank topic or consumer, `Error::Config` for zero
     /// partitions or a zero interval.
     pub(crate) fn new(store: S, options: FlusherOptions) -> Result<Self> {
         if options.topic.trim().is_empty() {
@@ -390,14 +390,14 @@ impl<S: PositionStore> PositionFlusher<S> {
         let _ = self.inner.flush().await;
     }
 
-    /// [`stop`](Self::stop), then zeroes the contention gauge (C# `DisposeAsync`).
+    /// `stop`, then zeroes the contention gauge (C# `DisposeAsync`).
     pub(crate) async fn dispose(&self) {
         self.stop().await;
         instruments::set_contested_partitions(&self.inner.metric_key, 0);
     }
 
     /// Registers the stop the flusher revokes when it stands `partition` down. The host attaches
-    /// each worker's [`PartitionStop`] when it starts it (again after a recovery).
+    /// each worker's `PartitionStop` when it starts it (again after a recovery).
     pub(crate) fn attach(&self, partition: u32, stop: PartitionStop) {
         lock(&self.inner.stops).insert(partition, stop);
     }
