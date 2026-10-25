@@ -1,8 +1,9 @@
 //! Shared test fixtures: events, messages, a tracing capture rig.
 #![allow(dead_code, missing_docs, clippy::unwrap_used, clippy::expect_used)]
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 
 use bytes::Bytes;
 use redisevents::{HandleError, StreamId, StreamMsg};
@@ -80,20 +81,37 @@ impl Visit for Collect {
     }
 }
 
-impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Rig {
+// The rig capturing on this thread, if any. Tests run on current-thread runtimes, so a test's
+// events and spans all happen on its own thread.
+thread_local! {
+    static CURRENT: RefCell<Option<Rig>> = const { RefCell::new(None) };
+}
+
+/// Remembers which rig a span belongs to, so later records reach it from any thread.
+struct Owner(Rig);
+
+/// The one process-wide layer. A per-thread `set_default` subscriber races with tracing's global
+/// callsite-interest cache (a callsite first hit on a thread with no subscriber can be cached as
+/// "never"), which made the capture tests flaky; a global subscriber that is always installed keeps
+/// every callsite enabled, and each test only picks which rig its thread feeds.
+struct Global;
+
+impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Global {
     fn on_new_span(
         &self,
         attrs: &tracing::span::Attributes<'_>,
         id: &tracing::span::Id,
         ctx: Context<'_, S>,
     ) {
+        let Some(rig) = CURRENT.with(|c| c.borrow().clone()) else {
+            return;
+        };
         let mut visit = Collect::default();
         attrs.record(&mut visit);
-        let mut spans = self.spans.lock().unwrap();
-        ctx.span(id)
-            .unwrap()
-            .extensions_mut()
-            .insert(Index(spans.len()));
+        let mut spans = rig.spans.lock().unwrap();
+        let span = ctx.span(id).unwrap();
+        span.extensions_mut().insert(Index(spans.len()));
+        span.extensions_mut().insert(Owner(rig.clone()));
         spans.push(Rec {
             name: attrs.metadata().name().to_owned(),
             level: attrs.metadata().level().to_string(),
@@ -107,16 +125,24 @@ impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Rig {
         values: &tracing::span::Record<'_>,
         ctx: Context<'_, S>,
     ) {
+        let span = ctx.span(id).unwrap();
+        let ext = span.extensions();
+        let (Some(Owner(rig)), Some(Index(index))) = (ext.get::<Owner>(), ext.get::<Index>())
+        else {
+            return;
+        };
         let mut visit = Collect::default();
         values.record(&mut visit);
-        let index = ctx.span(id).unwrap().extensions().get::<Index>().unwrap().0;
-        self.spans.lock().unwrap()[index].fields.extend(visit.0);
+        rig.spans.lock().unwrap()[*index].fields.extend(visit.0);
     }
 
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        let Some(rig) = CURRENT.with(|c| c.borrow().clone()) else {
+            return;
+        };
         let mut visit = Collect::default();
         event.record(&mut visit);
-        self.events.lock().unwrap().push(Rec {
+        rig.events.lock().unwrap().push(Rec {
             name: event.metadata().name().to_owned(),
             level: event.metadata().level().to_string(),
             fields: visit.0,
@@ -124,10 +150,26 @@ impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Rig {
     }
 }
 
+/// Stops this thread feeding its rig when dropped.
+pub struct RigGuard;
+
+impl Drop for RigGuard {
+    fn drop(&mut self) {
+        CURRENT.with(|c| *c.borrow_mut() = None);
+    }
+}
+
 impl Rig {
-    /// Captures on this thread until the guard drops. Use with a current-thread test runtime.
-    pub fn install(&self) -> tracing::subscriber::DefaultGuard {
-        tracing::subscriber::set_default(tracing_subscriber::registry().with(self.clone()))
+    /// Captures what this thread traces until the guard drops. Use with a current-thread test
+    /// runtime.
+    pub fn install(&self) -> RigGuard {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Global))
+                .expect("no other test installs a global tracing subscriber");
+        });
+        CURRENT.with(|c| *c.borrow_mut() = Some(self.clone()));
+        RigGuard
     }
 
     pub fn spans(&self) -> Vec<Rec> {

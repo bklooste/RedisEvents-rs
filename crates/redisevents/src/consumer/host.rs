@@ -337,7 +337,11 @@ impl StreamsHost {
     /// The failure that stopped the host, if a consumer had already failed it.
     pub async fn shutdown(self) -> Result<()> {
         self.stop.cancel();
-        self.closed().await
+        let outcome = self.closed().await;
+        for consumer in &self.consumers {
+            consumer.release_monitors();
+        }
+        outcome
     }
 
     fn outcome(&self) -> Result<()> {
@@ -353,5 +357,8 @@ impl Drop for StreamsHost {
     /// awaited. Call [`StreamsHost::shutdown`] to wait for it.
     fn drop(&mut self) {
         self.stop.cancel();
+        for consumer in &self.consumers {
+            consumer.release_monitors();
+        }
     }
 }

@@ -117,6 +117,9 @@ pub(crate) enum SinkEvent {
 pub(crate) struct RecordingSink {
     events: Mutex<Vec<SinkEvent>>,
     fail_flushes: Mutex<usize>,
+    /// Every `blocked(partition, flag)` health call, kept apart from `events` so the exact-sequence
+    /// assertions on record/flush order are unaffected.
+    blocked_calls: Mutex<Vec<(u32, bool)>>,
 }
 
 impl RecordingSink {
@@ -125,7 +128,16 @@ impl RecordingSink {
         Self {
             events: Mutex::default(),
             fail_flushes: Mutex::new(n),
+            blocked_calls: Mutex::default(),
         }
+    }
+
+    /// Every `blocked(partition, flag)` call so far.
+    pub(crate) fn blocked_calls(&self) -> Vec<(u32, bool)> {
+        self.blocked_calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Every call so far.
@@ -162,6 +174,13 @@ impl PositionSink for RecordingSink {
 
     fn rewind(&self, partition: u32) {
         self.push(SinkEvent::Rewind(partition));
+    }
+
+    fn blocked(&self, partition: u32, blocked: bool) {
+        self.blocked_calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((partition, blocked));
     }
 
     fn flush(&self) -> BoxFuture<'_, Result<()>> {

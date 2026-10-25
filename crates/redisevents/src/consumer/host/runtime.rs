@@ -35,6 +35,7 @@ use crate::consumer::fetch::{Fetch, ReaderConnection, StreamStart};
 use crate::consumer::shared::{BoxFuture, NoPositions, PartitionStop, PositionSink, ResetSignal};
 use crate::consumer::trimmer::{BackgroundTrimmer, StartedTrimmer};
 use crate::consumer::worker::{PartitionSlot, WorkerConfig, WorkerError, block_delay};
+use crate::diagnostics::names;
 use crate::error::{Error, Result};
 use crate::ownership::registry::{OwnershipRegistry, OwnershipRegistryOptions};
 use crate::positions::flusher::FlusherOptions;
@@ -118,6 +119,9 @@ pub(crate) struct ConsumerState {
     consumer: String,
     owned: Mutex<Vec<u32>>,
     started: AtomicBool,
+    /// Monitors kept registered after a fault (`ErrorPolicy::Fail`) so health still reports the
+    /// stopped partitions; forgotten by [`ConsumerState::release_monitors`].
+    retained: Mutex<Vec<Arc<PartitionMonitor>>>,
 }
 
 impl ConsumerState {
@@ -134,6 +138,15 @@ impl ConsumerState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// Forgets the monitors a faulted consumer kept (C# forgets them in `StopAsync`).
+    pub(crate) fn release_monitors(&self) {
+        let kept =
+            std::mem::take(&mut *self.retained.lock().unwrap_or_else(PoisonError::into_inner));
+        for monitor in &kept {
+            monitor::forget(monitor);
+        }
     }
 
     pub(crate) fn is_started(&self) -> bool {
@@ -353,6 +366,7 @@ async fn start_consumer(
         consumer: name.clone(),
         owned: Mutex::new(Vec::new()),
         started: AtomicBool::new(false),
+        retained: Mutex::new(Vec::new()),
     });
 
     let registry = if !lease && assigned.is_empty() {
@@ -383,8 +397,13 @@ async fn start_consumer(
     // Reader sockets: block mode only, one per ReaderThreads (>= 1), kept across generations.
     let readers = if consumer.read_mode == ReadMode::Block {
         let count = consumer.reader_threads.max(1);
+        let service = crate::diagnostics::names::service_name();
         (0..count)
-            .map(|_| ReaderConnection::new(conn, consumer.block_ms))
+            .map(|index| {
+                let client_name =
+                    names::reader_client_name(&service, &name, index as u32, &pod_name);
+                ReaderConnection::named(conn, consumer.block_ms, Some(client_name))
+            })
             .collect::<Result<Vec<_>>>()?
     } else {
         Vec::new()
@@ -525,6 +544,12 @@ impl PositionSink for MonitoredSink {
 
     fn flush(&self) -> BoxFuture<'_, Result<()>> {
         self.inner.flush()
+    }
+
+    fn stopped(&self, partition: u32, reason: &str) {
+        if let Some(monitor) = self.monitors.get(&partition) {
+            monitor.mark_stopped(reason, false);
+        }
     }
 
     fn blocked(&self, partition: u32, blocked: bool) {
@@ -1012,6 +1037,7 @@ impl Supervisor {
                         .is_some_and(PartitionStop::is_revoked);
                     if let Some(monitor) = self.generation.monitors.get(p)
                         && !revoked
+                        && !monitor.is_stopped()
                     {
                         monitor.mark_stopped("stopped by ErrorPolicy.StopPartition", false);
                     }
@@ -1065,8 +1091,29 @@ impl Supervisor {
             budget_seconds = self.ctx.budget().as_secs(),
             "Streams: stopping consumer; draining."
         );
-        self.state.started.store(false, Ordering::Release);
-        let generation = std::mem::replace(&mut self.generation, Generation::empty(0));
+        // C# `IsRunning` is "StartAsync ran and StopAsync has not": a consumer that faulted the
+        // host (`ErrorPolicy.Fail`) still counts as started until the host is stopped, so health
+        // reports "all partition workers have stopped", not "no consumer has started".
+        let faulted = self
+            .fault
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some();
+        if !faulted {
+            self.state.started.store(false, Ordering::Release);
+        }
+        let mut generation = std::mem::replace(&mut self.generation, Generation::empty(0));
+        if faulted {
+            // Kept registered (stopped, not gone) until the host handle is shut down or dropped.
+            let kept: Vec<_> = std::mem::take(&mut generation.monitors)
+                .into_values()
+                .collect();
+            *self
+                .state
+                .retained
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = kept;
+        }
         self.ctx.stop_generation(generation, true).await;
         self.state.set_owned(&[]);
         if let Some(registry) = self.registry.take()

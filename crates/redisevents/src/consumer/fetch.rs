@@ -108,6 +108,9 @@ pub(crate) struct ReaderConnection {
 struct ReaderInner {
     conn: Connection,
     block_ms: u32,
+    /// `CLIENT SETNAME` for every socket this reader opens (C# `StreamNames.ReaderClientName`);
+    /// `None` leaves it unnamed.
+    client_name: Option<String>,
     /// The live socket and its generation; `None` until the first read and after a discard.
     slot: Mutex<Slot>,
     /// Serialises opening a socket so concurrent first reads open one, not several.
@@ -134,6 +137,18 @@ impl ReaderConnection {
     /// # Errors
     /// [`Error::Config`] when `block_ms` is 0: `BLOCK 0` (block forever) is never issued, as in C#.
     pub(crate) fn new(conn: &Connection, block_ms: u32) -> Result<Self> {
+        Self::named(conn, block_ms, None)
+    }
+
+    /// [`new`](Self::new), naming each socket it opens with `CLIENT SETNAME client_name`.
+    ///
+    /// # Errors
+    /// As [`new`](Self::new).
+    pub(crate) fn named(
+        conn: &Connection,
+        block_ms: u32,
+        client_name: Option<String>,
+    ) -> Result<Self> {
         if block_ms == 0 {
             return Err(Error::config(
                 "Streams: BlockMs must be positive (it is 0). BLOCK 0 — block forever — is deliberately never issued: a bounded block keeps the reader's wake-up cadence predictable.",
@@ -143,6 +158,7 @@ impl ReaderConnection {
             inner: Arc::new(ReaderInner {
                 conn: conn.clone(),
                 block_ms,
+                client_name,
                 slot: Mutex::new(Slot::default()),
                 connecting: tokio::sync::Mutex::new(()),
             }),
@@ -181,6 +197,18 @@ impl ReaderConnection {
                 e,
             )
         })?;
+        let mut socket = socket;
+        if let Some(name) = &self.inner.client_name {
+            // A name is diagnostics only: a server that refuses it still serves reads.
+            if let Err(e) = redis::cmd("CLIENT")
+                .arg("SETNAME")
+                .arg(name)
+                .query_async::<()>(&mut socket)
+                .await
+            {
+                tracing::debug!(client_name = %name, error = %e, "Streams: CLIENT SETNAME failed on the reader connection.");
+            }
+        }
         let mut slot = self.lock_slot();
         slot.generation += 1;
         slot.socket = Some(socket.clone());

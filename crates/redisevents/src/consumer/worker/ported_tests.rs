@@ -1173,6 +1173,12 @@ async fn a_transient_transport_failure_is_retried_rather_than_fatal() {
         "a transport outage must not end the group"
     );
     assert_eq!(handler.bodies(), ["after-the-outage"]);
+    // C# `WaitOutTransportFailureAsync` marks every partition of the shared read blocked for the
+    // outage and running again once a fetch succeeds.
+    assert_eq!(
+        sink.blocked_calls(),
+        [(0, true), (1, true), (0, false), (1, false)]
+    );
 
     for s in &stops {
         s.shutdown();

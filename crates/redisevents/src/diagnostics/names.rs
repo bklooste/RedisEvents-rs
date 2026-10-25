@@ -20,6 +20,15 @@ pub(crate) fn reader_client_name(service: &str, consumer: &str, index: u32, pod:
     ))
 }
 
+/// The service name in client names (C# `Assembly.GetEntryAssembly().GetName().Name`): the
+/// running executable's file stem, or `unknown`.
+pub(crate) fn service_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
 /// Client name for the shared (admin and write) connection: `streams:{service}:{pod}`.
 pub(crate) fn shared_client_name(service: &str, pod: &str) -> String {
     truncate(format!("streams:{}:{}", sanitise(service), sanitise(pod)))
