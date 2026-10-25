@@ -166,8 +166,20 @@ pub struct Json;   // serde_json
 LZ4 MessagePack bodies use MessagePack-CSharp's `Lz4BlockArray` framing (ext 98), which C#
 `Standard` options and plain MessagePack decoders cannot read; the MessagePack codec must decode
 `Lz4BlockArray` (and `Lz4Block`, ext 99) itself.
-E1 adds `MessagePack` (and LZ4 variants) in `redisevents-msgpack` implementing `PayloadCodec`;
-A3 provides the pure framing it uses.
+E1 (`redisevents-msgpack`, done) adds `MessagePack` and `MessagePackMap` implementing `PayloadCodec`
+(A3 provides the pure framing), plus:
+```rust
+pub type MessagePackTyped<H, T> = Typed<H, T, MessagePack>;      // consume; LZ4 auto-detected
+pub type MessagePackMapTyped<H, T> = Typed<H, T, MessagePackMap>;
+pub trait MessagePackPublisherExt: Publisher {                   // blanket for every Publisher
+    fn publish_msgpack<M: Message + Serialize + Sync>(&self, key, &M, &Options, &PublishOptions) -> Result<StreamId>;
+    fn publish_msgpack_batch<M: ...>(&self, key, &[M], &Options, &PublishOptions) -> Result<()>;
+}
+pub trait MessagePackMsgExt { fn decode_msgpack<T>(&self) -> Result<T, CodecError>; }  // impl for StreamMsg
+```
+`Options` (layout, `Compression` threshold/disable) is passed per call; core's
+`PublisherExt::publish_message::<MessagePack, _>` covers the defaults. Not ported: the C#
+`AddStream<THandler, TMessage>` registrations (C4b).
 
 ### `error` (W0.2)
 ```rust

@@ -1804,11 +1804,14 @@ dependencies = [
  "bytes",
  "lz4_flex",
  "proptest",
+ "redis",
  "redisevents",
+ "redisevents-test-support",
  "rmp",
  "rmp-serde",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
