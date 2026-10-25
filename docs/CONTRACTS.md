@@ -303,6 +303,25 @@ logged and dropped, the rest are delivered (never an empty call).
 
 Owners:
 - **C1** produces `Vec<StreamMsg>` per partition read via `codec::decode`, on dedicated connections.
+- **C1 handoff (crate-private, `consumer::fetch`)**. All `pub(crate)`; no new `pub` items.
+  ```rust
+  ReaderConnection::new(&Connection, block_ms: u32) -> Result<Self>   // Clone = share one socket; block_ms 0 -> Config
+  type StreamStart = (u32 /*partition*/, String /*stream key*/, StreamId /*read after*/);
+  Fetch::block(ReaderConnection, Vec<StreamStart>, batch_size: u32, codec_version: u32) -> Result<Fetch>
+  Fetch::poll(&Connection, Vec<StreamStart>, batch_size: u32, max_idle_delay_ms: u32, codec_version: u32) -> Result<Fetch>
+  async fn Fetch::fetch(&mut self) -> Result<Vec<StreamBatch>>   // one per partition with entries; cancel-safe
+  fn Fetch::seek(&mut self, partition: u32, after: StreamId) -> bool   // reset-marker protocol (C# ResetSeek)
+  fn Fetch::position(&self, partition: u32) -> Option<StreamId>
+  struct StreamBatch { partition: u32, msgs: Vec<StreamMsg>, last: StreamId }   // last = cursor after the batch
+  ```
+  One `Fetch` per read loop: a co-located group is one `Fetch` over all its partitions (one
+  multi-stream `XREAD`); `CoLocatePartitions = false` is one `Fetch` per partition, all built from
+  clones of one `ReaderConnection` per consumer (C# semantics). The loop never sleeps itself: block
+  mode parks in Redis, poll mode applies the idle back-off inside `fetch`. Cursors advance only when
+  `fetch` returns `Ok`; dropping the future (shutdown, revoke) loses nothing, and a dropped blocking
+  read discards its socket so the next read is not queued behind a parked `BLOCK`. Errors:
+  `Error::Redis` (the reader reconnects on the next read; C2 owns the outage back-off) and
+  `Error::Transport` for a malformed reply. `last` covers entries C2's type filter drops.
 - **C2** owns `worker.rs` and the `PerMessage` / `Typed` bodies. **C2 and C3 agree the reset hand-off
   and read-cursor interface (both crate-private) through the lead on day one.**
 - **C4** owns `host.rs` (`Streams::builder(conn)…spawn() -> StreamsHost`), new public API reviewed by
