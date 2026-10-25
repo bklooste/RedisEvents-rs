@@ -474,6 +474,29 @@ pub struct NullPositionStore;                     // complete
     `read_topic_meta(topic) -> BTreeMap<String, String>`, `read_topic_layout(topic) -> TopicOptions`,
     `StreamAdmin::reset_marker_field(p)`; consts `RESET_MARKER_PREFIX`, `DEFAULT_MAX_COUNT_SCAN`.
   - A2's `ResetOnStart` refusal names `StreamAdmin::reset_position`; that is this method.
+  **D2 public API (`admin/health.rs`, added by D2, lead review):**
+  - `StreamHealth::check(connection: Option<&Connection>, consumers: u32, consumers_started: u32) -> StreamHealthReport`
+    (async): the readiness answer. Reads `StreamStatus::partitions()`, a `PING` (1 s bound) when a
+    connection is given, and `OwnershipRegistry::any_degraded()`. `consumers` / `consumers_started`
+    are the consumer host's counts (`0, 0` when none); C4 supplies them.
+  - `StreamHealth::evaluate(&[StreamPartitionStatus], &StreamHealthContext) -> StreamHealthReport`
+    (pure, C# `Evaluate`), `StreamHealth::grade(&StreamPartitionStatus) -> StreamPartitionHealth`,
+    `StreamHealth::find_silent(&[..]) -> Option<StreamSilentConsumer>`.
+  - Types: `StreamHealthStatus` and `StreamHealthRule` (`#[non_exhaustive]`, `Copy`),
+    `StreamPartitionRunState`, `StreamPartitionHealth { status, rule }`, `StreamHealthContext`
+    (pub fields, `Default`), `StreamHealthReport { status, rule, description, data:
+    BTreeMap<String, HealthValue>, partition }`, `HealthValue { Int, Float, Bool, Text }`,
+    `StreamSilentConsumer`, `StreamPartitionStatus` (pub fields: one snapshot per partition, C# names
+    in snake_case, `StreamId` positions, `f64` milliseconds, `-1.0` for "never sampled").
+  - `StreamStatus::any()`, `StreamStatus::partitions()`: snapshots of the process-wide monitors.
+  - `StreamLag::{DEFAULT_SAMPLE_INTERVAL (15 s), DEFAULT_PUSH_INTERVAL (1 s), TAIL_STALE_AFTER (60 s)}`,
+    `StreamLag::estimate_entries_behind(length, first, last, processed) -> i64`.
+  - Crate-private (C2/C4 wire these, `admin/health/monitor.rs`): `PartitionMonitor` (created with
+    `monitor::track(..)`, fed by `observe`, `set_tail`, `mark_blocked/unblocked/stopped/running`,
+    `set_lag_entries`), `StreamLagSampler::start(conn, sample, push)` (publishes `streams.lag.ms`,
+    samples `XINFO STREAM` into `streams.lag.entries` and `streams.stream.length`).
+  - Gauges: `streams.lag.entries`, `streams.lag.ms`, `streams.stream.length` (existing B6 helpers),
+    plus `streams.blocked` / block duration from the monitor.
 - **B6**: everything in `diagnostics/` except the frozen name constants (`METER_NAME = "RedisEvents"`,
   `metrics::*`, `spans::*`), `traceparent` parsing/injection (used by B1 when
   `PublishOptions::trace_parent` is `None`, and by C2 per batch), and an `otel` feature.
