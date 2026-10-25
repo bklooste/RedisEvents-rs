@@ -401,7 +401,7 @@ async fn start_consumer(
         (0..count)
             .map(|index| {
                 let client_name =
-                    names::reader_client_name(&service, &name, index as u32, &pod_name);
+                    names::reader_client_name(&service, &name, index, &pod_name);
                 ReaderConnection::named(conn, consumer.block_ms, Some(client_name))
             })
             .collect::<Result<Vec<_>>>()?
