@@ -27,5 +27,6 @@ pub use error::{BLOCK_BACKOFF, HandleError, HandleResult, ResultExt};
 pub use handler::{
     BatchHandler, MessageHandler, PerMessage, Typed, TypedBatchHandler, TypedHandler,
 };
+pub use host::{ConsumerBuilder, Streams, StreamsBuilder, StreamsHost};
 /// Re-exported so handlers and harnesses need no direct `tokio-util` dependency.
 pub use tokio_util::sync::CancellationToken;

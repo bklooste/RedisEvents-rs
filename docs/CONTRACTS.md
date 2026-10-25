@@ -435,6 +435,26 @@ Owners:
   worker stops reporting that partition; the flusher keeps its own stood-down guard as well.
 - **C4** owns `host.rs` (`Streams::builder(conn)…spawn() -> StreamsHost`), new public API reviewed by
   the lead; C4b and C4t start from its first-commit skeleton.
+- **C4 API** (`consumer::host`, re-exported from `consumer`; new public API, lead review):
+  ```rust
+  Streams::builder(conn: Connection) -> StreamsBuilder
+  StreamsBuilder::keys(Keys) / options(StreamOptions) / environment(name) / topic_options(topic, TopicOptions) -> Self
+  StreamsBuilder::stream_options(&self) -> &StreamOptions
+  StreamsBuilder::topic(topic) -> ConsumerBuilder        // seeded from the first Streams:Consumers entry for it
+  async StreamsBuilder::spawn(self) -> Result<StreamsHost> // startup checks fail here (Config / Redis / Transport)
+  ConsumerBuilder::consumer(name) / options(ConsumerOptions) / configure(|&mut ConsumerOptions|) -> Self
+  ConsumerBuilder::consumer_options(&self) -> &ConsumerOptions
+  ConsumerBuilder::position_store<S: PositionStore>(S) -> Self   // C# IPositionStore override
+  ConsumerBuilder::handler<H: BatchHandler>(H) -> StreamsBuilder  // THE extension point
+  StreamsHost: connection(), consumers(), consumers_started(), is_running(),
+               owned_partitions(topic, consumer) -> Vec<u32>, async health() -> StreamHealthReport,
+               async closed() -> Result<()> /* Err = a consumer failed the host */,
+               async shutdown(self) -> Result<()>
+  ```
+  **C4b** adds every other registration form (message handlers via `PerMessage`, typed handlers
+  via `Typed`, closures, `AddStream`-style sugar) as additional inherent `impl ConsumerBuilder` /
+  `impl StreamsBuilder` blocks in `consumer/builder.rs`, each ending in `self.handler(adapter)`;
+  it never edits `host.rs`. **C4t** drives tests through this surface only.
 - **D4**, **E2**, **E4** and tests construct `PartitionContext::new(..)` and call handlers directly.
 - `redisevents-test-support::RecordingHandler` implements both handler traits (C2t/C4t use it).
 
