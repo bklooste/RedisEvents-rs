@@ -60,6 +60,8 @@ use crate::error::{BoxError, Error, Result};
 use crate::wire::{StreamId, StreamMsg};
 
 #[cfg(test)]
+mod ported_tests;
+#[cfg(test)]
 pub(crate) mod testing;
 #[cfg(test)]
 mod tests;
