@@ -296,11 +296,8 @@ def _bulk(ctx: Ctx, mode: str, *extra: str):
 
 scenario("batch_publish")(lambda ctx: _bulk(ctx, "batch"))
 scenario("buffered_publish")(lambda ctx: _bulk(ctx, "buffered"))
-scenario(
-    "buffered_publish_cold_order",
-    xfail="BufferedStreamPublisher reorders the first flush of a cold publisher "
-    "(each pipelined PublishAsync awaits EnsureTopicAsync); to be reported upstream",
-)(lambda ctx: _bulk(ctx, "buffered", "--no-warmup"))
+# A cold buffered publisher keeps per-key order on its first flush (C# fixed in RedisEvents #49).
+scenario("buffered_publish_cold_order")(lambda ctx: _bulk(ctx, "buffered", "--no-warmup"))
 
 
 @scenario("positions_resume")
@@ -518,21 +515,23 @@ def work_queue_dead_member(ctx: Ctx):
         _collect(doomed)
     rows = ctx.redis.call("XPENDING", key, group)
     check([c[0].decode() for c in rows[3]] == [f"wq-doomed-{ctx.tag}x"], f"PEL owners: {rows[3]}")
-    # The survivor runs until the PEL is empty (it is not stopped on its 10th message: a host
-    # stopping mid-batch may legitimately leave that batch unacknowledged, and redelivered).
-    survivor = ctx.c.spawn("consume", *common, "--expect", "1000", "--timeout", "120",
+    # The survivor stops by itself right after its 10th message (--expect 10). Every batch it
+    # finished must be acknowledged before it exits, so the PEL is empty once it has gone: a host
+    # that drops the ack of a completed batch on shutdown leaves entries to be delivered twice
+    # (fixed in C# RedisEvents 0.2.44, #55).
+    survivor = ctx.c.spawn("consume", *common, "--expect", "10", "--timeout", "120",
                            env={"POD_NAME": f"wq-survivor-{ctx.tag}x"})
     try:
-        deadline = time.time() + 75
-        while _wq_pending(ctx, key, group) != 0:
-            if survivor.poll() is not None:
-                raise AssertionError(f"the survivor exited {survivor.returncode}")
-            check(time.time() < deadline, "the survivor never claimed and acknowledged the entries")
-            time.sleep(0.2)
+        try:
+            survivor.wait(timeout=75)
+        except subprocess.TimeoutExpired:
+            raise AssertionError("the survivor never claimed and finished the entries") from None
         claimed_after = time.time() - taken
-        time.sleep(0.5)
+        check(survivor.returncode == 0, f"the survivor exited {survivor.returncode}")
     finally:
         lines = _collect(survivor)
+    pending = _wq_pending(ctx, key, group)
+    check(pending == 0, f"{pending} entries left unacknowledged after the survivor stopped")
     ids = [m["id"] for m in ctx.messages(lines)]
     want = [eid for eid, _ in ctx.redis.xrange(key)]
     check(sorted(ids) == sorted(want), f"survivor got {len(ids)} of {len(want)} (dupes: {len(ids) - len(set(ids))})")
