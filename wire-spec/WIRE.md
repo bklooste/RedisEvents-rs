@@ -171,7 +171,11 @@ Fields that do not parse as a non-negative integer are not positions, and reader
 ### Lease mode (default)
 Every renew interval, each instance runs [`lua/lease.lua`](lua/lease.lua) with
 `KEYS[1]` = the ownership key and
-`ARGV` = `[ownerValue, ttlSeconds, partitionCount, "i:<instanceId>"]`. The script returns the
+`ARGV` = `[ownerValue, ttlSeconds, partitionCount, "i:<instanceId>", quarantined…]`. The optional
+trailing `quarantined` arguments (C# RedisEvents#52) are partition numbers this instance has stood
+down: it drops those claims, will not re-claim them, and withdraws its `i:<instanceId>` presence from
+the fair share for that cycle. With no trailing arguments the script behaves exactly as before, so an
+implementation that never quarantines sends the first four only. The script returns the
 sorted partitions this instance now holds. On shutdown it runs [`lua/release.lua`](lua/release.lua)
 with `ARGV` = `[ownerValue, field…]`, which deletes only fields still holding `ownerValue`.
 
