@@ -296,11 +296,8 @@ def _bulk(ctx: Ctx, mode: str, *extra: str):
 
 scenario("batch_publish")(lambda ctx: _bulk(ctx, "batch"))
 scenario("buffered_publish")(lambda ctx: _bulk(ctx, "buffered"))
-scenario(
-    "buffered_publish_cold_order",
-    xfail="BufferedStreamPublisher reorders the first flush of a cold publisher "
-    "(each pipelined PublishAsync awaits EnsureTopicAsync); to be reported upstream",
-)(lambda ctx: _bulk(ctx, "buffered", "--no-warmup"))
+# A cold buffered publisher keeps per-key order on its first flush (C# fixed in RedisEvents #49).
+scenario("buffered_publish_cold_order")(lambda ctx: _bulk(ctx, "buffered", "--no-warmup"))
 
 
 @scenario("positions_resume")

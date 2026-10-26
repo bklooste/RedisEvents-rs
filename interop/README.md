@@ -53,8 +53,8 @@ and same-language pairs are the `baseline`. A pair is SKIPPED when a host return
 | work_queue | `work_queue_competing_consumers` (pair = the two members' languages): one consumer group, one topic, members compete; every message processed exactly once across both, both members did work, group = consumer name, members = `POD_NAME`, no position hash. `work_queue_dead_member_claimed` (pair = dying member's language x survivor's language): the first member takes the entries and is killed unacknowledged; the other claims them (`XAUTOCLAIM`) no earlier than the 30 s threshold, processes each once and stops by itself, leaving nothing unacknowledged (C# needs RedisEvents ≥ 0.2.44) (~31 s per pair) | consume `--delivery work_queue`. A C# host without `ConsumerOptions.Delivery` exits 3 |
 | G4, G5 | not yet: JSON/MessagePack/LZ4 payloads, outbox/ES (E1, E3); the CQRS-ES sample matrix runs separately (E5d) | later WPs add verbs/scenarios |
 
-`buffered_publish_cold_order` is an expected failure (XFAIL): a cold C# `BufferedStreamPublisher` reorders
-its first flush.
+`buffered_publish_cold_order` checks that a cold buffered publisher keeps per-key order on its first
+flush. It was an expected failure for C# producers until RedisEvents #49 fixed it.
 
 ## Adding a Rust verb
 
