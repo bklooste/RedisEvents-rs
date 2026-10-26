@@ -60,15 +60,28 @@ jobs:
         run: cargo test --workspace --all-features
 
   semver-checks:
-    # Non-blocking until a baseline is published to crates.io: with no published version the check
-    # has nothing to compare against and fails, so it is advisory for now. Make it required after 0.1.0.
+    # Compares the public API with the latest version on crates.io and fails on an unannounced break.
+    # Before the first publish there is nothing to compare against, so the check skips (green) instead
+    # of failing; it starts gating by itself once `redisevents` exists on crates.io.
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+      - name: Is there a published baseline?
+        id: baseline
+        run: |
+          if curl -fsS -A "RedisEvents-rs CI (github.com/bklooste/RedisEvents-rs)" \
+              https://crates.io/api/v1/crates/redisevents >/dev/null; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "No version of redisevents on crates.io yet: semver check skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.baseline.outputs.published == 'true'
       - uses: Swatinem/rust-cache@v2
+        if: steps.baseline.outputs.published == 'true'
       - uses: obi1kenobi/cargo-semver-checks-action@v2
+        if: steps.baseline.outputs.published == 'true'
         with:
           exclude: interop-rust-host,inventory-domain,inventory-command,inventory-views,redisevents-test-support
 
