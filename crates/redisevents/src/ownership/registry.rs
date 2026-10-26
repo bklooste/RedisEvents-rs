@@ -122,6 +122,8 @@ struct Shared {
     metric_key: String,
     held: watch::Sender<Held>,
     state: Mutex<State>,
+    /// Partitions this instance must neither renew nor claim, each with when its quarantine ends.
+    quarantine: Mutex<BTreeMap<u32, tokio::time::Instant>>,
 }
 
 #[derive(Default)]
@@ -198,6 +200,7 @@ impl OwnershipRegistry {
             metric_key: format!("{}:{}", options.topic, options.consumer),
             held: watch::Sender::new(initial),
             state: Mutex::new(State::default()),
+            quarantine: Mutex::new(BTreeMap::new()),
             options,
         };
         Ok(Self {
@@ -282,6 +285,29 @@ impl OwnershipRegistry {
         observed().remove(&self.shared.metric_key);
     }
 
+    /// Gives `partitions` up and keeps them away from this instance for `duration`: every lease
+    /// cycle until then releases them if still held, claims none of them, and withdraws this
+    /// instance's presence field so it stops counting towards the fair share (the lease script's
+    /// trailing arguments, WIRE.md §8). The quarantine ends on its own; an instance that is the
+    /// only one left then takes the partitions back. Static mode has no leases and ignores it.
+    ///
+    /// Takes effect on the next cycle; call [`refresh`](Self::refresh) to give the leases up now.
+    pub(crate) fn quarantine(&self, partitions: &[u32], duration: Duration) {
+        if !self.shared.lease {
+            return;
+        }
+        let until = tokio::time::Instant::now() + duration;
+        let mut quarantine = self.shared.quarantine();
+        for &partition in partitions {
+            quarantine.insert(partition, until);
+        }
+    }
+
+    /// The partitions quarantined now, ascending.
+    pub(crate) fn quarantined(&self) -> Vec<u32> {
+        self.shared.quarantined()
+    }
+
     /// Runs one cycle now.
     ///
     /// # Errors
@@ -331,6 +357,20 @@ impl Shared {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn quarantine(&self) -> MutexGuard<'_, BTreeMap<u32, tokio::time::Instant>> {
+        self.quarantine
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The live quarantine, ascending; expired entries are dropped.
+    fn quarantined(&self) -> Vec<u32> {
+        let now = tokio::time::Instant::now();
+        let mut quarantine = self.quarantine();
+        quarantine.retain(|_, until| *until > now);
+        quarantine.keys().copied().collect()
+    }
+
     async fn refresh(&self) -> Result<OwnershipMap> {
         if self.lease {
             self.refresh_lease().await
@@ -347,6 +387,8 @@ impl Shared {
             .arg(self.options.ttl_seconds)
             .arg(self.options.partitions)
             .arg(&self.presence)
+            // ARGV[5..]: quarantined partitions. With any present the script withdraws presence.
+            .arg(self.quarantined())
             .invoke_async(&mut conn)
             .await?;
         claimed.sort_unstable();

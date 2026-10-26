@@ -811,3 +811,150 @@ async fn start_probes_hexpire_and_leaves_no_probe_field() {
     assert!(!field_exists(&conn, &topic, &consumer, &probe).await);
     a.dispose().await;
 }
+
+// ------------------------------------------------------------------ quarantine (C# #52)
+
+fn two_partition_lease(
+    conn: &Connection,
+    topic: &str,
+    consumer: &str,
+    pod: &str,
+) -> OwnershipRegistry {
+    let mut options = OwnershipRegistryOptions::new(topic, consumer, 2);
+    options.pod_name = pod.to_owned();
+    options.instance_id = crate::ownership::instance_id_for(Some(pod));
+    options.ttl_seconds = 3;
+    options.renew_seconds = 1;
+    OwnershipRegistry::new(conn, &keys(), options).expect("valid options")
+}
+
+/// C# `StalledLeaseHandoffTests.A_quarantined_lease_is_handed_over_whole_and_not_reclaimed_until_the_quarantine_ends`.
+/// A quarantined partition is given back at once and never re-claimed while the quarantine lasts,
+/// and the quarantining instance stops counting towards the fair share (the script's trailing
+/// arguments), or the rival would stay capped at `ceil(partitions / members)` and leave the rest
+/// unowned. When the quarantine ends the two settle back to an even split.
+#[tokio::test]
+async fn a_quarantined_lease_is_handed_over_whole_and_not_reclaimed_until_the_quarantine_ends() {
+    let redis = redisevents_test_support::require_redis!();
+    let conn = connection(redis).await;
+    let topic = redis.new_topic("stall-quarantine");
+    let consumer = redis.new_consumer("stall-quarantine");
+
+    let stuck = two_partition_lease(
+        &conn,
+        &topic,
+        &consumer,
+        "offer-odds-projection-76d86fc5f8-vr5zj",
+    );
+    let rival = two_partition_lease(
+        &conn,
+        &topic,
+        &consumer,
+        "offer-odds-projection-76d86fc5f8-q2m7t",
+    );
+
+    stuck.refresh().await.unwrap();
+    assert_eq!(
+        &stuck.held()[..],
+        [0, 1],
+        "the first instance up claims every free partition"
+    );
+
+    // Without a quarantine the stuck instance keeps its fair share for as long as it lives.
+    for _ in 0..3 {
+        rival.refresh().await.unwrap();
+        stuck.refresh().await.unwrap();
+    }
+    assert!(
+        rival.held().len() <= 1,
+        "the stuck instance still counts as a member"
+    );
+    assert!(!stuck.held().is_empty());
+
+    stuck.quarantine(&[0, 1], Duration::from_secs(4));
+    assert_eq!(stuck.quarantined(), [0, 1]);
+    stuck.refresh().await.unwrap();
+    assert!(
+        stuck.held().is_empty(),
+        "a quarantined partition is given back on the next cycle"
+    );
+    assert!(
+        !field_exists(
+            &conn,
+            &topic,
+            &consumer,
+            &presence_field(stuck.instance_id())
+        )
+        .await,
+        "an instance that cannot read must not count towards the fair share"
+    );
+
+    rival.refresh().await.unwrap();
+    assert_eq!(
+        &rival.held()[..],
+        [0, 1],
+        "with the stuck instance out of the member count, the rival takes the whole topic"
+    );
+
+    // Still quarantined: cycling claims nothing back.
+    stuck.refresh().await.unwrap();
+    assert!(stuck.held().is_empty());
+    let owners = owners_on_server(&conn, &topic, &consumer).await;
+    assert!(
+        owners
+            .values()
+            .all(|o| o.instance_id == rival.instance_id())
+    );
+
+    // The quarantine lapses on its own; the two settle back to one partition each.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        stuck.refresh().await.unwrap();
+        rival.refresh().await.unwrap();
+        if stuck.held().len() == 1 && rival.held().len() == 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the instances never rebalanced after the quarantine"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(stuck.quarantined().is_empty());
+    assert!(
+        field_exists(
+            &conn,
+            &topic,
+            &consumer,
+            &presence_field(stuck.instance_id())
+        )
+        .await
+    );
+
+    stuck.dispose().await;
+    rival.dispose().await;
+}
+
+/// The quarantine ends on tokio's clock, and a Static-mode registry has no leases to quarantine.
+#[tokio::test]
+async fn a_quarantine_expires_on_its_own_and_static_mode_ignores_it() {
+    let redis = redisevents_test_support::require_redis!();
+    let conn = connection(redis).await;
+    // Paused only once connected: nothing below touches Redis.
+    tokio::time::pause();
+    let lease = two_partition_lease(&conn, "stall-expiry", "c", "pod-x");
+    lease.quarantine(&[1], Duration::from_secs(10));
+    lease.quarantine(&[0], Duration::from_secs(20));
+    assert_eq!(lease.quarantined(), [0, 1]);
+    tokio::time::advance(Duration::from_secs(10)).await;
+    assert_eq!(lease.quarantined(), [0], "partition 1's quarantine ended");
+    tokio::time::advance(Duration::from_secs(10)).await;
+    assert!(lease.quarantined().is_empty());
+
+    let fixed = simple(&conn, "stall-expiry", "c", owned_range(0, 1), "pod-x");
+    fixed.quarantine(&[0], Duration::from_secs(60));
+    assert!(
+        fixed.quarantined().is_empty(),
+        "Static mode has no lease to give up"
+    );
+}

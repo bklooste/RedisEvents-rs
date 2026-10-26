@@ -5,6 +5,7 @@ use std::any::TypeId;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::consumer::fetch::Fetch;
 use crate::consumer::handler::BatchHandler;
@@ -64,6 +65,7 @@ pub(crate) trait FlusherDyn: PositionSink {
     fn dispose(&self) -> BoxFuture<'_, ()>;
     fn attach(&self, partition: u32, stop: PartitionStop);
     fn detach(&self, partition: u32);
+    fn failing_for(&self) -> Duration;
 }
 
 impl<S: PositionStore> FlusherDyn for PositionFlusher<S> {
@@ -81,6 +83,10 @@ impl<S: PositionStore> FlusherDyn for PositionFlusher<S> {
 
     fn detach(&self, partition: u32) {
         PositionFlusher::detach(self, partition);
+    }
+
+    fn failing_for(&self) -> Duration {
+        PositionFlusher::failing_for(self)
     }
 }
 

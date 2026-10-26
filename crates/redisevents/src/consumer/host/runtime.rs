@@ -46,6 +46,8 @@ const MAX_RECOVERIES: u32 = 5;
 /// Attempts to rebuild the read side after a lease change before the host fails (C#: 3, 2 s apart).
 const REBUILD_ATTEMPTS: u32 = 3;
 const REBUILD_DELAY: Duration = Duration::from_secs(2);
+/// How often the stall rule is checked. Its threshold is whole seconds.
+const STALL_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 // ------------------------------------------------------------------------------------------------
 // Faults and shared state
@@ -419,6 +421,8 @@ async fn start_consumer(
         recoveries: 0,
         fetch_failures: 0,
         restart_at: None,
+        stalled_out: Vec::new(),
+        stall_logged: BTreeSet::new(),
     };
 
     let held = supervisor.held();
@@ -529,7 +533,7 @@ impl PositionSink for MonitoredSink {
     }
 
     fn blocked(&self, partition: u32, blocked: bool) {
-        let Some(monitor) = self.monitors.get(&partition) else {
+        let Some(monitor) = self.live(partition) else {
             return;
         };
         if blocked {
@@ -539,11 +543,50 @@ impl PositionSink for MonitoredSink {
             monitor.mark_unblocked();
         }
     }
+
+    fn read_failing(&self, partition: u32) {
+        if let Some(monitor) = self.live(partition) {
+            monitor.mark_transport_blocked();
+        }
+    }
+
+    fn fetched(&self, partition: u32) {
+        if let Some(monitor) = self.monitors.get(&partition) {
+            monitor.mark_fetched();
+        }
+    }
+
+    fn busy(&self, partition: u32, busy: bool) {
+        if let Some(monitor) = self.monitors.get(&partition) {
+            if busy {
+                monitor.mark_busy();
+            } else {
+                monitor.mark_idle();
+            }
+        }
+    }
+}
+
+impl MonitoredSink {
+    /// The partition's monitor, unless the host stood it down for stalling: a late report from
+    /// the read side it abandoned must not repaint that verdict.
+    fn live(&self, partition: u32) -> Option<&Arc<PartitionMonitor>> {
+        self.monitors
+            .get(&partition)
+            .filter(|m| !m.is_stalled_out())
+    }
 }
 
 impl Ctx {
     fn topic(&self) -> &str {
         &self.options.topic
+    }
+
+    /// Drops every reader socket, so the next read side reads on fresh connections.
+    fn recycle_readers(&self) {
+        for reader in &self.readers {
+            reader.recycle();
+        }
     }
 
     fn budget(&self) -> Duration {
@@ -562,6 +605,7 @@ impl Ctx {
             unhealthy_stopped_seconds: self.options.unhealthy_stopped_seconds,
             unhealthy_behind_seconds: self.options.unhealthy_behind_seconds,
             degraded_silence_seconds: self.options.degraded_silence_seconds,
+            unhealthy_stalled_seconds: self.options.unhealthy_stalled_seconds,
         }
     }
 
@@ -816,18 +860,35 @@ struct Supervisor {
     fetch_failures: usize,
     /// A scheduled read-side restart (after a read failure).
     restart_at: Option<tokio::time::Instant>,
+    /// Monitors of partitions stood down for stalling, kept registered after their read side is
+    /// gone so health keeps reporting the stall. Dropped when the partition is read again, or at
+    /// shutdown.
+    stalled_out: Vec<Arc<PartitionMonitor>>,
+    /// Partitions whose stall has been logged (Static mode logs once, not once a second).
+    stall_logged: BTreeSet<u32>,
 }
 
 impl Supervisor {
+    /// What the read side should cover: the held set, never a quarantined partition (even one
+    /// the registry still lists because the cycle that gives it up has not landed yet).
     fn held(&self) -> Vec<u32> {
-        self.registry
-            .as_ref()
-            .map(|r| r.held().to_vec())
-            .unwrap_or_default()
+        let Some(registry) = self.registry.as_ref() else {
+            return Vec::new();
+        };
+        let quarantined = registry.quarantined();
+        registry
+            .held()
+            .iter()
+            .copied()
+            .filter(|p| !quarantined.contains(p))
+            .collect()
     }
 
     async fn run(mut self) {
         let mut held_rx = self.registry.as_ref().map(OwnershipRegistry::subscribe);
+        let stall_rule = self.ctx.options.unhealthy_stalled_seconds > 0;
+        let mut stall_tick = tokio::time::interval(STALL_CHECK_INTERVAL);
+        stall_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             let restart_at = self.restart_at;
             tokio::select! {
@@ -842,14 +903,26 @@ impl Supervisor {
                         held_rx = None;
                         continue;
                     }
-                    let held = held_rx.as_mut().map(|rx| rx.borrow_and_update().to_vec()).unwrap_or_default();
+                    if let Some(rx) = held_rx.as_mut() {
+                        rx.borrow_and_update();
+                    }
+                    let held = self.held();
                     if held != self.generation.owned {
                         self.rebalance(held).await;
                     }
                 }
                 Some(event) = self.events.recv() => self.on_event(event).await,
                 Some(joined) = self.generation.workers.join_next(), if !self.generation.workers.is_empty() => {
-                    self.on_worker_exit(joined);
+                    self.on_worker_exit(joined).await;
+                }
+                _ = stall_tick.tick(), if stall_rule => {
+                    self.check_stalls().await;
+                    // A quarantine that ended without the held set changing (the cycle that gave
+                    // the lease up never landed) still has to put the partition back.
+                    let held = self.held();
+                    if held != self.generation.owned {
+                        self.rebalance(held).await;
+                    }
                 }
                 () = async {
                     match restart_at {
@@ -913,6 +986,14 @@ impl Supervisor {
                 Ok(generation) => {
                     self.generation = generation;
                     self.state.set_owned(&owned);
+                    // Read again: its fresh monitor replaced the stalled-out one under its key.
+                    self.stalled_out.retain(|m| {
+                        let again = owned.contains(&m.partition());
+                        if again {
+                            monitor::forget(m);
+                        }
+                        !again
+                    });
                     return;
                 }
                 Err(e) if matches!(e, Error::Config(_)) || attempt == REBUILD_ATTEMPTS => {
@@ -990,7 +1071,7 @@ impl Supervisor {
         }
     }
 
-    fn on_worker_exit(
+    async fn on_worker_exit(
         &mut self,
         joined: std::result::Result<
             (Vec<u32>, std::result::Result<(), WorkerError>),
@@ -1032,6 +1113,12 @@ impl Supervisor {
                         Fault::from_worker(&context, &error),
                     );
                 }
+                WorkerError::Fetch(e) if self.hands_on() => {
+                    // Lease mode (C# #52): a dead read loop reads nothing however long it is left,
+                    // so it is not worth waiting out the stall window; hand its partitions on.
+                    let reason = format!("its read loop failed: {e}");
+                    self.stand_down(partitions, &reason).await;
+                }
                 WorkerError::Fetch(e) => {
                     let delay = block_delay(self.fetch_failures);
                     self.fetch_failures += 1;
@@ -1046,6 +1133,14 @@ impl Supervisor {
                 }
             },
             Err(e) if e.is_cancelled() => {}
+            Err(e) if self.hands_on() => {
+                tracing::error!(
+                    topic = %self.ctx.topic(), consumer = %self.ctx.name, error = %e,
+                    "Streams: a read loop panicked; its partitions are handed to another instance."
+                );
+                let all = self.generation.owned.clone();
+                self.stand_down(all, "its read loop panicked").await;
+            }
             Err(e) => {
                 // A panic outside the handler (the handler's own are caught by the worker).
                 let delay = block_delay(self.fetch_failures);
@@ -1058,6 +1153,122 @@ impl Supervisor {
                 self.restart_at = Some(self.restart_at.map_or(at, |t| t.min(at)));
             }
         }
+    }
+
+    /// Whether a stuck partition is handed to another instance (Lease mode) rather than only
+    /// reported (Static mode: no lease to give up; the orchestrator restarts the process).
+    fn hands_on(&self) -> bool {
+        self.ctx.lease && self.registry.is_some()
+    }
+
+    /// One pass of the stall rule (C# `CheckStallsAsync`): feeds each monitor how long position
+    /// writes have been failing, finds the partitions past `unhealthy_stalled_seconds`, and in
+    /// Lease mode stands them down. In Static mode it only logs, once per stall; the monitor's own
+    /// clock grades the partition Unhealthy.
+    async fn check_stalls(&mut self) {
+        let threshold_ms = f64::from(self.ctx.options.unhealthy_stalled_seconds) * 1000.0;
+        if threshold_ms <= 0.0 || self.stop.is_cancelled() {
+            return;
+        }
+        let unpersisted = self
+            .generation
+            .flusher
+            .as_ref()
+            .map_or(Duration::ZERO, |f| f.failing_for());
+        let mut stalled = Vec::new();
+        let mut worst_ms = 0.0_f64;
+        for (&partition, monitor) in &self.generation.monitors {
+            monitor.set_persist_failing(unpersisted);
+            let stalled_ms = monitor.stalled_ms();
+            if stalled_ms < threshold_ms {
+                self.stall_logged.remove(&partition);
+                continue;
+            }
+            stalled.push(partition);
+            worst_ms = worst_ms.max(stalled_ms);
+        }
+        if stalled.is_empty() {
+            return;
+        }
+        let stalled_seconds = Duration::from_secs_f64(worst_ms / 1000.0).as_secs();
+        let cause = if unpersisted.is_zero() {
+            "no read returned and no batch completed".to_owned()
+        } else {
+            format!("position writes failing for {}s", unpersisted.as_secs())
+        };
+        if !self.hands_on() {
+            let fresh: Vec<u32> = stalled
+                .into_iter()
+                .filter(|p| self.stall_logged.insert(*p))
+                .collect();
+            if !fresh.is_empty() {
+                tracing::error!(
+                    topic = %self.ctx.topic(), consumer = %self.ctx.name, partitions = ?fresh,
+                    stalled_seconds = stalled_seconds, threshold_seconds = self.ctx.options.unhealthy_stalled_seconds,
+                    "Streams: partitions have made no progress ({cause}) past unhealthy_stalled_seconds. Health reports \
+                     Unhealthy; instances.mode = static has no lease to hand on, so a restart is what moves them."
+                );
+            }
+            return;
+        }
+        let reason = format!("stalled: no progress for {stalled_seconds}s ({cause})");
+        self.stand_down(stalled, &reason).await;
+    }
+
+    /// The Lease-mode stand-down (C# `StandDownStalled` + `ForceLeaseCycleAsync`): marks each
+    /// partition stalled-out and keeps its monitor registered, revokes it, quarantines it in the
+    /// registry (the next cycle releases it, claims none of it, and withdraws this instance's
+    /// presence), recycles the reader sockets, runs that cycle now, and rebuilds the read side on
+    /// what is left. A cycle that does not reach Redis only means the leases are not renewed and
+    /// lapse within the TTL: another instance can claim them either way.
+    async fn stand_down(&mut self, partitions: Vec<u32>, reason: &str) {
+        let Some(registry) = self.registry.as_ref() else {
+            return;
+        };
+        let instances = self.ctx.options.instances.clone().unwrap_or_default();
+        // Long enough that a lone instance stays Unhealthy for a whole stall window (for a probe to
+        // act on) before it tries the partitions again itself, on fresh connections.
+        let quarantine = Duration::from_secs(u64::from(
+            (2 * instances.lease_ttl_seconds).max(self.ctx.options.unhealthy_stalled_seconds),
+        ));
+        for p in &partitions {
+            if let Some(monitor) = self.generation.monitors.remove(p) {
+                monitor.mark_stalled_out(reason);
+                self.stalled_out.push(monitor);
+            }
+            if let Some(stop) = self.generation.stops.get(p) {
+                stop.revoke();
+            }
+            if let Some(resets) = &self.generation.resets {
+                resets.forget(*p);
+            }
+            if let Some(flusher) = &self.generation.flusher {
+                flusher.detach(*p);
+            }
+        }
+        registry.quarantine(&partitions, quarantine);
+        self.ctx.recycle_readers();
+        tracing::error!(
+            topic = %self.ctx.topic(), consumer = %self.ctx.name, ?partitions, reason,
+            renew_seconds = instances.lease_renew_seconds, quarantine_seconds = quarantine.as_secs(),
+            "Streams: giving up the lease on stuck partitions. Another instance claims them within a renew interval; \
+                     this instance will not take them back during the quarantine, and its health reports Unhealthy (rule \
+                     stalled) until it reads them again or restarts. A restart rebuilds its Redis connections, which is what \
+                     usually wedged."
+        );
+        if let Err(e) = registry.refresh().await {
+            tracing::warn!(
+                topic = %self.ctx.topic(), consumer = %self.ctx.name, error = %e,
+                ttl_seconds = instances.lease_ttl_seconds,
+                "Streams: could not run the lease cycle that gives up the stuck partitions; they are no longer renewed \
+                 and lapse within the lease TTL."
+            );
+        }
+        let held = self.held();
+        self.recoveries = 0;
+        self.fetch_failures = 0;
+        self.restart_at = None;
+        self.rebuild(held).await;
     }
 
     /// The C3 order: workers → flusher (final flush) → registry release.
@@ -1091,6 +1302,9 @@ impl Supervisor {
                 .unwrap_or_else(PoisonError::into_inner) = kept;
         }
         self.ctx.stop_generation(generation, true).await;
+        for monitor in self.stalled_out.drain(..) {
+            monitor::forget(&monitor);
+        }
         self.state.set_owned(&[]);
         if let Some(registry) = self.registry.take()
             && tokio::time::timeout(self.ctx.budget(), registry.dispose())

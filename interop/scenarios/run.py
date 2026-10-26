@@ -98,10 +98,11 @@ class Host:
     def __init__(self, lang: str, argv: list[str], env: dict[str, str]) -> None:
         self.lang, self.argv, self.env = lang, argv, env
 
-    def run(self, verb: str, *args: str, timeout: int = 90, allow: tuple[int, ...] = (0,)):
+    def run(self, verb: str, *args: str, timeout: int = 90, allow: tuple[int, ...] = (0,),
+            env: dict[str, str] | None = None):
         """Run one verb. Returns (rc, json_lines). Raises Skip on 3, AssertionError on other rc."""
         cmd = [*self.argv, verb, *args]
-        p = subprocess.run(cmd, env=self.env, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(cmd, env={**self.env, **(env or {})}, capture_output=True, text=True, timeout=timeout)
         lines = []
         for ln in p.stdout.splitlines():
             ln = ln.strip()
@@ -115,6 +116,11 @@ class Host:
                 f"  cmd: {' '.join(cmd)}\n  stdout: {p.stdout[-800:]}\n  stderr: {p.stderr[-800:]}"
             )
         return p.returncode, lines
+
+    def spawn(self, verb: str, *args: str, env: dict[str, str] | None = None) -> subprocess.Popen:
+        """Start one verb in the background (stdout piped, stderr discarded)."""
+        return subprocess.Popen([*self.argv, verb, *args], env={**self.env, **(env or {})},
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
 
 
 def b64(s: str | bytes) -> str:
@@ -365,6 +371,43 @@ def codec_guard(ctx: Ctx):
     check(not ctx.messages(lines), "a v=2 topic must not be decoded")
     rc, lines = ctx.p.run("publish", "--topic", topic, "--partitions", "1", "--key", "a", "--type", "t",
                           "--body-b64", b64("x"), allow=(REFUSED,))
+
+
+@scenario("stalled_owner_handover", gate="ownership")
+def stalled_owner_handover(ctx: Ctx):
+    # Here the pair is (stalled owner's language, rival's language). The owner's handler never
+    # returns; past the stall window (2 s) it must give its leases up and withdraw its presence
+    # (the lease script's trailing quarantine arguments, WIRE.md section 8), so the rival takes the
+    # whole topic. Without that the rival is capped at ceil(2 / 2) = 1 partition and never sees the
+    # second message.
+    topic = ctx.topic("stall")
+    lease = ["--lease-ttl", "3", "--lease-renew", "1"]
+    ctx.publish(ctx.p, topic, 2, ["a", "b", "c", "d"], count=1)
+    lengths = [int(ctx.redis.call("XLEN", ctx.stream_key(topic, p))) for p in (0, 1)]
+    check(all(lengths), f"the keys must cover both partitions: {lengths}")
+    key = f"{ctx.prefix}o:{{{topic}}}:g"
+    stuck = ctx.p.spawn("consume", "--topic", topic, "--consumer", "g", "--partitions", "2", "--expect", "1000",
+                        "--timeout", "60", "--wedge", "--stall-seconds", "2", *lease,
+                        env={"POD_NAME": f"stall-owner-{ctx.tag}"})
+    try:
+        deadline = time.time() + 20
+        while not {"0", "1"} <= set(ctx.redis.hgetall(key)):
+            if stuck.poll() is not None:
+                if stuck.returncode == NOT_IMPLEMENTED:
+                    raise Skip(f"{ctx.p.lang} consume --stall-seconds")
+                raise AssertionError(f"stalled owner exited {stuck.returncode} before claiming")
+            check(time.time() < deadline, "the owner never claimed both partitions")
+            time.sleep(0.1)
+        _, lines = ctx.c.run("consume", "--topic", topic, "--consumer", "g", "--partitions", "2", "--expect", "4",
+                             "--timeout", "30", *lease, env={"POD_NAME": f"stall-rival-{ctx.tag}"})
+        got = ctx.messages(lines)
+        partitions = {m["partition"] for m in got}
+        check(len(got) >= 4 and partitions == {0, 1},
+              f"the rival got {len(got)} messages from partitions {sorted(partitions)}; the stalled owner kept a lease")
+        check(stuck.poll() is None, "the stalled owner must keep running (it hands on, it does not exit)")
+    finally:
+        stuck.kill()
+        stuck.wait()
 
 
 # --------------------------------------------------------------------------------- main

@@ -5,6 +5,22 @@ and the crates follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added: a stalled Lease owner hands its partitions on (port of C# RedisEvents#52)
+
+- `ConsumerOptions::unhealthy_stalled_seconds` (default 300, `0` off) and the health rule
+  `StreamHealthRule::Stalled` (Unhealthy). Measured on the process's own clock: no read returned, no
+  batch completed, a batch held too long, or position writes failing. `StreamPartitionStatus` gains
+  `stalled_ms`, `unhealthy_stalled_seconds` and `stood_down_stalled`; `StreamHealthDetails` gains
+  `stalled_partition` and `stalled_ms`.
+- In Lease mode the host stands a stalled partition down, and a read loop that fails with an error no
+  back-off fixes (or panics): it gives the lease up at once, quarantines the partition from re-claim
+  for `max(2 x lease_ttl_seconds, unhealthy_stalled_seconds)`, withdraws its presence from the fair
+  share, and rebuilds the read side on fresh reader connections. Static mode grades and logs only.
+- Wire: the lease script is now sent with its optional trailing quarantine arguments (WIRE.md §8)
+  while a quarantine lasts. Unchanged otherwise, so mixed C# / Rust groups hand over to each other.
+- An `XREAD` reply the client cannot read (wrong shape, ids not after the cursor sent) is now a
+  transport failure the read loop waits out on a fresh reader socket, instead of ending the loop.
+
 ### Changed (breaking): idiomatic Rust in the core, axum and test-support crates (0.3)
 
 The port was done too literally. Nothing written to or read from Redis changes; metric and span names are unchanged.

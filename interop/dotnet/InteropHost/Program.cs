@@ -55,7 +55,7 @@ internal sealed class Args
             var a = argv[i];
             if (!a.StartsWith("--", StringComparison.Ordinal)) throw new CliException($"unexpected argument '{a}'");
             var name = a[2..];
-            if (name is "batch" or "buffered" or "seq" or "no-warmup") { flags.Add(name); continue; }
+            if (name is "batch" or "buffered" or "seq" or "no-warmup" or "wedge") { flags.Add(name); continue; }
             if (i + 1 >= argv.Length) throw new CliException($"--{name} needs a value");
             if (!values.TryGetValue(name, out var list)) values[name] = list = [];
             list.Add(argv[++i]);
@@ -118,6 +118,18 @@ internal static class Cli
             cfg["Streams:Consumers:0:Topic"] = topic;
             cfg["Streams:Consumers:0:Consumer"] = consumer;
             cfg["Streams:Consumers:0:PersistIntervalMs"] = "100";
+            // The stalled-owner scenario: short leases, a short stall window, a short shutdown budget.
+            if (a.Opt("lease-ttl") is { } ttl)
+            {
+                cfg["Streams:Consumers:0:Instances:Mode"] = "Lease";
+                cfg["Streams:Consumers:0:Instances:LeaseTtlSeconds"] = ttl;
+                cfg["Streams:Consumers:0:Instances:LeaseRenewSeconds"] = a.Opt("lease-renew") ?? "1";
+            }
+            if (a.Opt("stall-seconds") is { } stall)
+            {
+                cfg["Streams:Consumers:0:UnhealthyStalledSeconds"] = stall;
+                cfg["Streams:Consumers:0:ShutdownTimeoutSeconds"] = "1";
+            }
         }
         b.Configuration.AddInMemoryCollection(cfg);
         return b;
@@ -216,9 +228,26 @@ internal static class Cli
         var reached = new TaskCompletionSource();
         if (expect <= 0) reached.TrySetResult();
 
+        // --stall-seconds needs a RedisEvents with the stall rule (RedisEvents#52); older packages
+        // would silently ignore the key, so the pair is skipped instead.
+        if (a.Opt("stall-seconds") is not null && typeof(ConsumerOptions).GetProperty("UnhealthyStalledSeconds") is null)
+        {
+            Emit(new() { ["event"] = "not_implemented", ["what"] = "ConsumerOptions.UnhealthyStalledSeconds" });
+            return 3;
+        }
+
+        var wedge = a.Flag("wedge");
         var builder = NewBuilder(a, topic, a.Int("partitions", 1), consumer);
         builder.AddStream(topic, (batch, _) =>
         {
+            if (wedge)
+            {
+                // A handler that never returns and ignores its token, like one stuck on a call that
+                // will not complete.
+                Emit(new() { ["event"] = "wedged", ["partition"] = batch.Span[0].Partition });
+                return new ValueTask(Task.Delay(Timeout.Infinite, CancellationToken.None));
+            }
+
             for (var i = 0; i < batch.Length; i++)
             {
                 var m = batch.Span[i];

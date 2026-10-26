@@ -242,6 +242,8 @@ struct Inner<S> {
     contention_count: AtomicI64,
     flushes: AtomicU64,
     failures: AtomicU64,
+    /// When the current run of failed writes began; `None` once one lands.
+    failing_since: Mutex<Option<tokio::time::Instant>>,
     resets_applied: AtomicU64,
     recoveries: AtomicU64,
     backwards: AtomicU64,
@@ -355,6 +357,7 @@ impl<S: PositionStore> PositionFlusher<S> {
             contention_count: AtomicI64::new(0),
             flushes: AtomicU64::new(0),
             failures: AtomicU64::new(0),
+            failing_since: Mutex::new(None),
             resets_applied: AtomicU64::new(0),
             recoveries: AtomicU64::new(0),
             backwards: AtomicU64::new(0),
@@ -441,6 +444,12 @@ impl<S: PositionStore> PositionFlusher<S> {
     /// Writes that failed and were re-queued (`streams.positions.flush_failures`).
     pub(crate) fn failures(&self) -> u64 {
         self.inner.failures.load(Ordering::Acquire)
+    }
+
+    /// How long position writes have been failing without one landing; zero when the last write
+    /// landed or nothing has needed writing since. Read by the host's stall check.
+    pub(crate) fn failing_for(&self) -> Duration {
+        lock(&self.inner.failing_since).map_or(Duration::ZERO, |since| since.elapsed())
     }
 
     /// Partitions this instance stood down.
@@ -683,6 +692,8 @@ impl<S: PositionStore> Inner<S> {
             self.warn_reset_failure(&e);
         }
         if self.dirty_count.load(Ordering::Acquire) == 0 {
+            // Nothing waiting, so nothing failing: a failed write re-queues what it drained.
+            *lock(&self.failing_since) = None;
             return Ok(());
         }
         let mut drained = Drained {
@@ -692,12 +703,14 @@ impl<S: PositionStore> Inner<S> {
         };
         if drained.items.is_empty() {
             drained.done = true;
+            *lock(&self.failing_since) = None;
             return Ok(());
         }
         match self.write(&drained.items).await {
             Ok(before) => {
                 drained.done = true;
                 self.flushes.fetch_add(1, Ordering::AcqRel);
+                *lock(&self.failing_since) = None;
                 if let Some(before) = before {
                     self.inspect(&drained.items, &before).await;
                 }
@@ -707,6 +720,7 @@ impl<S: PositionStore> Inner<S> {
                 let count = drained.items.len();
                 drop(drained);
                 self.failures.fetch_add(1, Ordering::AcqRel);
+                lock(&self.failing_since).get_or_insert_with(tokio::time::Instant::now);
                 instruments::record_position_flush_failure(&self.topic, &self.consumer);
                 tracing::warn!(
                     topic = %self.topic,

@@ -50,7 +50,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use super::fetch::{Fetch, StreamBatch};
+use super::fetch::{Fetch, StreamBatch, is_unreadable_reply};
 use super::shared::{PartitionStop, PositionSink, ResetSignal};
 use super::{BLOCK_BACKOFF, BatchHandler, HandleError, PartitionContext};
 use crate::config::{ConsumerOptions, ErrorPolicy, PersistMode};
@@ -507,8 +507,17 @@ impl<H: BatchHandler> Processor<H> {
         kept
     }
 
-    /// Runs one batch through the handler and applies the position and error rules.
+    /// Runs one batch through the handler and applies the position and error rules. The batch
+    /// is reported busy for its whole run, so a handler that never returns stalls the partition
+    /// even while the reader, running ahead of it, keeps completing reads.
     async fn process(&self, part: &Part, batch: StreamBatch) -> Outcome {
+        self.positions.busy(part.partition, true);
+        let outcome = self.process_batch(part, batch).await;
+        self.positions.busy(part.partition, false);
+        outcome
+    }
+
+    async fn process_batch(&self, part: &Part, batch: StreamBatch) -> Outcome {
         let StreamBatch { msgs, last, .. } = batch;
         let msgs = self.filter(msgs);
         if part.stop.is_revoked() {
@@ -866,7 +875,15 @@ fn transient_redis(e: &redis::RedisError) -> bool {
 /// Whether a fetch failure is an outage to wait out rather than a fault (C#
 /// `IsTransientTransportFailure`): a dropped/refused/timed-out connection or a "not right now"
 /// server error, including a failed reconnect (C1 wraps it in `Transport` with the Redis source).
+///
+/// A reply this client could not read ([`is_unreadable_reply`]) is transient too (C# #52): the
+/// corruption is in the connection, not in the stream, so the loop backs off and reads again (the
+/// blocking fetch has already dropped the socket) instead of ending, and if it never recovers the
+/// stall rule hands the partition on.
 pub(crate) fn is_transient(error: &Error) -> bool {
+    if is_unreadable_reply(error) {
+        return true;
+    }
     match error {
         Error::Redis(e) => transient_redis(e),
         Error::Transport {
@@ -1082,7 +1099,7 @@ impl<H: BatchHandler, F: FetchSource> Worker<H, F> {
                         // blocked (Degraded now, Unhealthy past `unhealthy_block_seconds`).
                         for (i, part) in parts.iter().enumerate() {
                             if !retired[i] {
-                                processor.positions.blocked(part.partition, true);
+                                processor.positions.read_failing(part.partition);
                             }
                         }
                         count_error(&topic, &consumer, "transport", error_type(&e));
@@ -1105,6 +1122,12 @@ impl<H: BatchHandler, F: FetchSource> Worker<H, F> {
                 }
                 Err(e) => break 'read Err(WorkerError::Fetch(e)),
             };
+            // Progress for the stall clock: Redis answered and the read side is alive.
+            for (i, part) in parts.iter().enumerate() {
+                if !retired[i] {
+                    processor.positions.fetched(part.partition);
+                }
+            }
             if outage != 0 {
                 outage = 0;
                 for part in &parts {

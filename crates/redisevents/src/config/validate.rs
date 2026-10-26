@@ -354,6 +354,7 @@ mod tests {
             "unhealthy_lag_ms": 45000,
             "unhealthy_behind_seconds": 240,
             "degraded_silence_seconds": 900,
+            "unhealthy_stalled_seconds": 120,
             "start_from_when_missing": "now"
           }
         ],
@@ -481,6 +482,7 @@ mod tests {
         assert_eq!(consumer.unhealthy_lag_ms, 45_000);
         assert_eq!(consumer.unhealthy_behind_seconds, 240);
         assert_eq!(consumer.degraded_silence_seconds, 900);
+        assert_eq!(consumer.unhealthy_stalled_seconds, 120);
         assert_eq!(consumer.start_from_when_missing, StartFrom::Now);
         let instances = consumer.instances.as_ref().expect("instances");
         assert_eq!(instances.count, Some(3));

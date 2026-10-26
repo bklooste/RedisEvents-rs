@@ -423,6 +423,12 @@ Owners:
       fn record(&self, partition: u32, id: StreamId);   // after handling only; never blocks
       fn rewind(&self, partition: u32);                  // read loop, at take time, BEFORE Fetch::seek
       fn flush(&self) -> BoxFuture<'_, Result<()>>;      // Sync* modes: resolves when the write landed
+      // Health hooks, default no-ops (C4's MonitoredSink forwards them to the partition monitor):
+      fn blocked(&self, partition: u32, blocked: bool);  // handler Block back-off entered / left
+      fn read_failing(&self, partition: u32);            // transport outage: blocked, stall clock keeps running
+      fn fetched(&self, partition: u32);                 // a read covering it returned (stall-clock progress)
+      fn busy(&self, partition: u32, busy: bool);        // a batch handed to / finished by the handler
+      fn stopped(&self, partition: u32, reason: &str);
   }
   struct NoPositions;                                    // PersistMode::None, work queue, tests
 
@@ -439,6 +445,9 @@ Owners:
   before the next fetch; the flusher deletes `__reset:<p>` only after `try_clear_taken` returns it.
   (4) The flusher only `request`s markers for partitions this instance owns. (5) After `revoke` the
   worker stops reporting that partition; the flusher keeps its own stood-down guard as well.
+  (6) A fetch error carrying `fetch::UnreadableReply` (an `XREAD` reply that does not answer the read
+  sent: bad shape, an id not after the cursor) is transient like an outage; the blocking fetch has
+  already dropped that reader socket. Decode and other errors still end the loop.
 - **C4** owns `host.rs` (`Streams::builder(conn)…spawn() -> StreamsHost`), new public API reviewed by
   the lead; C4b and C4t start from its first-commit skeleton.
 - **C4 API** (`consumer::host`, re-exported from `consumer`; new public API, lead review):
@@ -791,6 +800,11 @@ pub struct NullPositionStore;                     // complete
     `any_degraded()` / `snapshot(topic, consumer)` (C# `Observed`, for D2 health), helpers
     `presence_field(id)` (`i:<id>`, for C3's liveness cross-check), `read_owners`, `count_members`,
     `hgetall`, `describe_map`.
+  - **Quarantine** (C4's stall stand-down): `quarantine(&[u32], Duration)` and `quarantined()`.
+    Until it ends (tokio clock), every lease cycle passes the quarantined partitions as the lease
+    script's trailing `ARGV` (WIRE.md §8): held ones are released, none are claimed, and the
+    presence field is deleted, so the instance leaves the fair share. It ends on its own. Static
+    mode ignores it. C4 never starts a read side on a quarantined partition, even one still held.
 - **B1**: `admin/meta.rs` (`ensure_topic_meta`), used by `StreamPublisher::new` and C4 startup.
 - **D1** / **D2**: `admin/stream_admin.rs` / `admin/health.rs`, new public API reviewed by the lead;
   D3 consumes it.
@@ -817,6 +831,14 @@ pub struct NullPositionStore;                     // complete
     `StreamAdmin::reset_marker_field(p)`; consts `RESET_MARKER_PREFIX`, `DEFAULT_MAX_COUNT_SCAN`.
   - A2's `ResetOnStart` refusal names `StreamAdmin::reset_position`; that is this method.
   **D2 public API (`admin/health.rs`, added by D2, lead review):**
+  - Rule `Stalled` (Unhealthy, graded first): `stalled_ms >= unhealthy_stalled_seconds` or
+    `stood_down_stalled`. The stall clock runs on this process's own clock: no read returned, no
+    batch completed, a batch held too long, or position writes failing. A handler `Block` and a
+    policy stop suspend it; a transport block does not. In Lease mode C4 checks it every second and
+    stands the partition down: monitor marked stalled-out and kept registered until the partition
+    is read again or the host stops, stop revoked, `quarantine(max(2 x TTL, threshold))`, reader
+    sockets recycled, a lease cycle run at once, read side rebuilt. A non-fatal read-loop failure
+    (or panic) is stood down the same way at once. Static mode only logs (once) and grades.
   - `health::check(connection: Option<&Connection>, consumers: u32, consumers_started: u32) -> StreamHealthReport`
     (async): the readiness answer. Reads `health::partitions()`, a `PING` (1 s bound) when a
     connection is given, and `OwnershipRegistry::any_degraded()`. `consumers` / `consumers_started`
@@ -835,7 +857,9 @@ pub struct NullPositionStore;                     // complete
     `health::estimate_entries_behind(length, first, last, processed) -> i64`.
   - Crate-private (C2/C4 wire these, `admin/health/monitor.rs`): `PartitionMonitor` (created with
     `monitor::track(..)`, fed by `observe`, `set_tail`, `mark_blocked/unblocked/stopped/running`,
-    `set_lag_entries`), `StreamLagSampler::start(conn, sample, push)` (publishes `streams.lag.ms`,
+    `set_lag_entries`, and the stall clock: `mark_fetched`, `mark_busy/idle`,
+    `mark_transport_blocked`, `set_persist_failing`, `mark_stalled_out`; `monitor::forget` removes
+    only that monitor, never a newer one registered under the same key), `StreamLagSampler::start(conn, sample, push)` (publishes `streams.lag.ms`,
     samples `XINFO STREAM` into `streams.lag.entries` and `streams.stream.length`).
   - Gauges: `streams.lag.entries`, `streams.lag.ms`, `streams.stream.length` (existing B6 helpers),
     plus `streams.blocked` / block duration from the monitor.

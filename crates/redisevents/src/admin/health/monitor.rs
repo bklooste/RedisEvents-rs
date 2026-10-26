@@ -50,6 +50,8 @@ pub(crate) struct Thresholds {
     pub(crate) unhealthy_stopped_seconds: u32,
     pub(crate) unhealthy_behind_seconds: u32,
     pub(crate) degraded_silence_seconds: u32,
+    /// No progress for this long (s) is stalled; `0` = off.
+    pub(crate) unhealthy_stalled_seconds: u32,
 }
 
 /// Progress against the stream's tail.
@@ -87,6 +89,23 @@ struct Inner {
     escalates: bool,
     stop_reason: Option<String>,
     progress: Progress,
+    stall: Stall,
+}
+
+/// The stall clock (C# #52): measured on this process's own clock, independent of any tail sample.
+struct Stall {
+    /// The last time the partition showed progress: a read that returned (empty or not), a batch
+    /// that finished, a block that ended.
+    progress_at: Instant,
+    /// When the handler was handed the batch it still holds, if any. The reader runs ahead of the
+    /// handler, so its reads alone would hide a handler that never returns.
+    busy_since: Option<Instant>,
+    /// Blocked because reads fail (not because a handler asked to block): the clock keeps running.
+    transport_blocked: bool,
+    /// Stood down by the host for stalling (or for a faulted read loop).
+    stalled_out: bool,
+    /// How long position writes have been failing, pushed by the host.
+    persist_failing: Duration,
 }
 
 /// Tracks one partition this process reads.
@@ -138,6 +157,14 @@ impl PartitionMonitor {
                 stopped_since: None,
                 escalates: false,
                 stop_reason: None,
+                stall: Stall {
+                    // A partition that never manages its first read is stalled from acquisition.
+                    progress_at: now,
+                    busy_since: None,
+                    transport_blocked: false,
+                    stalled_out: false,
+                    persist_failing: Duration::ZERO,
+                },
                 progress: Progress {
                     noted: start_position,
                     position_changed_at: now,
@@ -180,14 +207,81 @@ impl PartitionMonitor {
 
     /// Records a processed entry.
     pub(crate) fn observe(&self, id: StreamId) {
+        let now = self.clock.now();
         let mut inner = self.lock();
         inner.last_processed = Some(id);
         inner.caught_up = false;
+        inner.stall.progress_at = now;
     }
 
     /// Marks the partition as at the tail.
     pub(crate) fn mark_caught_up(&self) {
-        self.lock().caught_up = true;
+        let now = self.clock.now();
+        let mut inner = self.lock();
+        inner.caught_up = true;
+        inner.stall.progress_at = now;
+    }
+
+    /// A read covering this partition returned (with entries or without): progress for the stall
+    /// clock.
+    pub(crate) fn mark_fetched(&self) {
+        let now = self.clock.now();
+        self.lock().stall.progress_at = now;
+    }
+
+    /// A batch was handed to the handler: starts the in-flight clock.
+    pub(crate) fn mark_busy(&self) {
+        let now = self.clock.now();
+        self.lock().stall.busy_since = Some(now);
+    }
+
+    /// The batch is finished with (handled, skipped or abandoned): progress, and the end of the
+    /// in-flight clock.
+    pub(crate) fn mark_idle(&self) {
+        let now = self.clock.now();
+        let mut inner = self.lock();
+        inner.stall.busy_since = None;
+        inner.stall.progress_at = now;
+    }
+
+    /// How long position writes have been failing (zero once one lands). Pushed by the host.
+    pub(crate) fn set_persist_failing(&self, failing: Duration) {
+        self.lock().stall.persist_failing = failing;
+    }
+
+    /// Milliseconds without progress, or `0` when the stall rule does not apply to the current
+    /// state: stopped (unless stood down for stalling) or blocked on a handler's `Block` error.
+    pub(crate) fn stalled_ms(&self) -> f64 {
+        let inner = self.lock();
+        Self::stalled_ms_of(&inner, self.clock.now())
+    }
+
+    fn stalled_ms_of(inner: &Inner, now: Instant) -> f64 {
+        match inner.state {
+            StreamPartitionRunState::Stopped if !inner.stall.stalled_out => return 0.0,
+            StreamPartitionRunState::Blocked if !inner.stall.transport_blocked => return 0.0,
+            _ => {}
+        }
+        let idle = elapsed_ms(inner.stall.progress_at, now);
+        let busy = inner
+            .stall
+            .busy_since
+            .map_or(0.0, |since| elapsed_ms(since, now));
+        let unpersisted = inner.stall.persist_failing.as_secs_f64() * 1000.0;
+        idle.max(busy).max(unpersisted)
+    }
+
+    /// Whether the host stood this partition down for stalling.
+    pub(crate) fn is_stalled_out(&self) -> bool {
+        self.lock().stall.stalled_out
+    }
+
+    /// The host stood the partition down because it stalled (and in Lease mode gave its lease
+    /// up). The monitor stays registered after its read side is gone, so health keeps reporting
+    /// the stall until this instance reads the partition again or restarts.
+    pub(crate) fn mark_stalled_out(&self, reason: &str) {
+        self.lock().stall.stalled_out = true;
+        self.mark_stopped(reason, true);
     }
 
     /// Records the entries-behind estimate from the last sample.
@@ -272,7 +366,10 @@ impl PartitionMonitor {
 
     /// The partition is being read.
     pub(crate) fn mark_running(&self) {
+        let now = self.clock.now();
         let mut inner = self.lock();
+        inner.stall.stalled_out = false;
+        inner.stall.progress_at = now;
         inner.stop_reason = None;
         inner.state = StreamPartitionRunState::Running;
         inner.stopped_since = None;
@@ -283,13 +380,26 @@ impl PartitionMonitor {
     /// The partition is retrying a blocking failure.
     pub(crate) fn mark_blocked(&self) {
         let mut inner = self.lock();
+        inner.stall.transport_blocked = false;
+        Self::block(&self.metric_key, &mut inner, self.clock.as_ref());
+    }
+
+    /// Reads are failing on the transport and the read loop is retrying. Blocked like a handler
+    /// block, except the stall clock keeps running: nothing the handler asked for explains it.
+    pub(crate) fn mark_transport_blocked(&self) {
+        let mut inner = self.lock();
+        Self::block(&self.metric_key, &mut inner, self.clock.as_ref());
+        inner.stall.transport_blocked = true;
+    }
+
+    fn block(metric_key: &str, inner: &mut Inner, clock: &dyn HealthClock) {
         inner.state = StreamPartitionRunState::Blocked;
         if inner.blocked_since.is_none() {
-            inner.blocked_since = Some(self.clock.now());
-            instruments::set_blocked(&self.metric_key, 1);
+            inner.blocked_since = Some(clock.now());
+            instruments::set_blocked(metric_key, 1);
         }
-        let blocked = Self::blocked_ms(&inner, self.clock.as_ref());
-        instruments::set_block_duration_ms(&self.metric_key, blocked);
+        let blocked = Self::blocked_ms(inner, clock);
+        instruments::set_block_duration_ms(metric_key, blocked);
     }
 
     /// Whether the partition is in the blocked state.
@@ -304,7 +414,10 @@ impl PartitionMonitor {
 
     /// The blocking failure cleared.
     pub(crate) fn mark_unblocked(&self) {
+        let now = self.clock.now();
         let mut inner = self.lock();
+        inner.stall.progress_at = now;
+        inner.stall.transport_blocked = false;
         self.clear_block(&mut inner);
         inner.state = StreamPartitionRunState::Running;
     }
@@ -359,6 +472,7 @@ impl PartitionMonitor {
         let inner = self.lock();
         let state = inner.state;
         let blocked_ms = Self::blocked_ms(&inner, self.clock.as_ref());
+        let stalled_ms = Self::stalled_ms_of(&inner, self.clock.now());
         let stopped_ms = inner
             .stopped_since
             .map_or(0.0, |since| elapsed_ms(since, self.clock.now()));
@@ -387,6 +501,9 @@ impl PartitionMonitor {
             tail_unchanged_ms: progress.tail_unchanged_ms,
             is_behind_tail: progress.is_behind,
             behind_ms: progress.behind_ms,
+            stalled_ms,
+            unhealthy_stalled_seconds: self.thresholds.unhealthy_stalled_seconds,
+            stood_down_stalled: inner.stall.stalled_out,
         }
     }
 
@@ -467,8 +584,19 @@ pub(crate) fn all() -> Vec<Arc<PartitionMonitor>> {
 }
 
 /// Unregisters a monitor and clears its gauge series.
+///
+/// Only this monitor, never whatever is registered under its key now: a stalled-out monitor
+/// outlives its read side, and the partition can be read again (and re-registered) meanwhile.
 pub(crate) fn forget(monitor: &Arc<PartitionMonitor>) {
-    monitors().remove(&monitor.metric_key);
+    {
+        let mut registry = monitors();
+        match registry.get(&monitor.metric_key) {
+            Some(current) if Arc::ptr_eq(current, monitor) => {
+                registry.remove(&monitor.metric_key);
+            }
+            _ => return,
+        }
+    }
     instruments::clear_partition(&monitor.metric_key);
     instruments::clear_stream_length(&monitor.stream_metric_key);
 }

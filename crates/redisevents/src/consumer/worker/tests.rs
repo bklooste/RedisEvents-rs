@@ -1053,6 +1053,41 @@ async fn a_transient_read_failure_is_waited_out_and_a_permanent_one_faults() {
     assert_eq!(rig.sink.records(), [(0, id(1))]);
 }
 
+/// C# #52 `The_read_loop_waits_out_an_unreadable_reply_instead_of_ending`: a reply the client
+/// could not read is a garbled connection, not a fault in the stream. The loop backs off and reads
+/// again instead of ending the partition while its lease stays renewed.
+#[tokio::test(start_paused = true)]
+async fn the_read_loop_waits_out_an_unreadable_reply_instead_of_ending() {
+    let unreadable = || {
+        Error::transport_with(
+            "garbled XREAD reply",
+            crate::consumer::fetch::UnreadableReply,
+        )
+    };
+    assert!(is_transient(&unreadable()));
+    assert!(crate::consumer::fetch::is_unreadable_reply(&unreadable()));
+    assert!(!crate::consumer::fetch::is_unreadable_reply(&dropped()));
+    assert!(!crate::consumer::fetch::is_unreadable_reply(
+        &Error::transport("decode failed")
+    ));
+
+    let fetch = ScriptedFetch::new([
+        Step::Fail(unreadable()),
+        Step::Batches(vec![batch(0, vec![msg(0, 1, "A")])]),
+    ]);
+    let (rig, task) = start(
+        cfg("x"),
+        &[0],
+        fetch,
+        Scripted::ok(),
+        RecordingSink::default(),
+        None,
+    );
+    wait_for(|| rig.sink.records() == [(0, id(1))]).await;
+    rig.shutdown();
+    task.await.unwrap().unwrap();
+}
+
 // ------------------------------------------------------------------ Typed
 
 #[derive(serde::Deserialize, Debug, PartialEq)]
