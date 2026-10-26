@@ -3,7 +3,9 @@
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/),
 and the crates follow [Semantic Versioning](https://semver.org/).
 
-## [0.1.0] - Unreleased
+## [0.2] - Unreleased
+
+First release. Versions follow the C# repo's scheme (`version.json` holds `0.2`; CI appends the git height, see `docs/PUBLISHING.md`).
 
 First release: a wire-compatible Rust port of the C# RedisEvents library.
 
@@ -11,7 +13,7 @@ First release: a wire-compatible Rust port of the C# RedisEvents library.
 
 | Rust | C# | Wire |
 | --- | --- | --- |
-| `redisevents` 0.1 | RedisEvents NuGet >= 0.2.37 | codec v1 |
+| `redisevents` 0.2 | RedisEvents NuGet >= 0.2.37 | codec v1 |
 
 A Rust publisher can feed a C# consumer and the reverse, on the same Redis, topics and consumer
 positions. CI runs the interop matrix against the NuGet pinned in `interop/dotnet/Versions.props`
@@ -49,4 +51,4 @@ positions. CI runs the interop matrix against the NuGet pinned in `interop/dotne
 - `Delivery: WorkQueue` (deferred; refused at startup), cluster and sentinel connections, and the
   outbox `conditions` parameter.
 
-[0.1.0]: https://github.com/bklooste/RedisEvents-rs/releases/tag/v0.1.0
+[0.2]: https://github.com/bklooste/RedisEvents-rs/releases

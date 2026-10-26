@@ -25,7 +25,7 @@ The public surface of the `redisevents` core crate, frozen by W0.2, and which wo
 8. **Partitions are `u32`, everywhere.** Partition counts are `u32`. Stream ids are `StreamId`, never
    strings, inside the library.
 
-> **F3 (0.1.0 release) API hygiene.** Report/status/health/preview/metadata structs and the enums and
+> **F3 (first release, 0.2) API hygiene.** Report/status/health/preview/metadata structs and the enums and
 > error types likely to grow are `#[non_exhaustive]` (external code matches with `_` and builds them
 > through constructors, e.g. `StreamHealthReport::new(..).with_data(..)`). Option structs stay
 > literal-constructible (`..Default::default()`). The `tls-rustls` cargo feature enables `rediss://`.
