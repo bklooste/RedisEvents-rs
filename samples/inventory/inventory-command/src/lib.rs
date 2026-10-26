@@ -135,7 +135,7 @@ async fn add(State(repo): State<Arc<Repository>>, Query(q): Query<AddQuery>) -> 
         Ok(item) => item,
         Err(e) => return failure(&e),
     };
-    item.raise(event);
+    item.emit(event);
     // A fresh root at version 0: an id that already has history is a lost check.
     save(&repo, &mut item, 0).await
 }
@@ -152,7 +152,7 @@ async fn change_name(
         Ok(event) => event,
         Err(e) => return refused(&e),
     };
-    item.raise(event);
+    item.emit(event);
     save(&repo, &mut item, expected(q.version)).await
 }
 
@@ -165,7 +165,7 @@ async fn deactivate(State(repo): State<Arc<Repository>>, Query(q): Query<ItemQue
         Ok(event) => event,
         Err(e) => return refused(&e),
     };
-    item.raise(event);
+    item.emit(event);
     save(&repo, &mut item, expected(q.version)).await
 }
 
@@ -178,7 +178,7 @@ async fn check_in(State(repo): State<Arc<Repository>>, Query(q): Query<CountQuer
         Ok(event) => event,
         Err(e) => return refused(&e),
     };
-    item.raise(event);
+    item.emit(event);
     save(&repo, &mut item, expected(q.version)).await
 }
 
@@ -191,7 +191,7 @@ async fn remove(State(repo): State<Arc<Repository>>, Query(q): Query<CountQuery>
         Ok(event) => event,
         Err(e) => return refused(&e),
     };
-    item.raise(event);
+    item.emit(event);
     save(&repo, &mut item, expected(q.version)).await
 }
 

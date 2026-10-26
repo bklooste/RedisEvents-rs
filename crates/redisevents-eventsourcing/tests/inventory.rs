@@ -145,7 +145,7 @@ async fn the_pure_inventory_domain_runs_through_execute() {
         &ExecuteOptions::default(),
         async move |item: &mut AggregateRoot<Inventory>| {
             let event = InventoryItem::create(id, "widget")?;
-            item.raise(event);
+            item.emit(event);
             Ok::<_, DomainError>(AggregateDecision::Done(()))
         },
     )
@@ -159,7 +159,7 @@ async fn the_pure_inventory_domain_runs_through_execute() {
         &ExecuteOptions::default(),
         async |item: &mut AggregateRoot<Inventory>| {
             let event = item.check_in(5, 1.5)?;
-            item.raise(event);
+            item.emit(event);
             Ok::<_, DomainError>(AggregateDecision::Done(()))
         },
     )
@@ -174,7 +174,7 @@ async fn the_pure_inventory_domain_runs_through_execute() {
         &ExecuteOptions::default(),
         async |item: &mut AggregateRoot<Inventory>| {
             let event = item.remove(0)?;
-            item.raise(event);
+            item.emit(event);
             Ok::<_, DomainError>(AggregateDecision::Done(()))
         },
     )
@@ -199,21 +199,21 @@ async fn a_cached_inventory_item_saves_through_the_domain() {
     let repo = repo(redis, &topic).await;
     let id = Uuid::new_v4();
     let key = id.to_string();
-    let mut cache = CachedAggregate::<Inventory>::new();
+    let cache = CachedAggregate::<Inventory>::new();
 
     for i in 0..3 {
         cache
             .run(
                 &repo,
                 &key,
-                &ExecuteOptions::default().max_attempts(2),
+                &ExecuteOptions::default().max_attempts(std::num::NonZeroU32::new(2).unwrap()),
                 async |item, _| {
                     let event = if item.version() == 0 {
                         InventoryItem::create(id, "widget")?
                     } else {
                         item.check_in(1, 1.0)?
                     };
-                    item.raise(event);
+                    item.emit(event);
                     Ok::<_, DomainError>(AggregateDecision::Done(()))
                 },
             )
@@ -257,7 +257,7 @@ async fn an_aggregate_written_by_csharp_loads_in_rust_at_the_right_version() {
 
     // And a Rust save on top of the C# history carries the right expected version.
     let event = item.check_in(2, 1.0).unwrap();
-    item.raise(event);
+    item.emit(event);
     let version = repo
         .save(&mut item, None, &PublishOptions::default())
         .await
@@ -273,15 +273,15 @@ async fn an_aggregate_saved_from_rust_has_the_raw_entries_csharp_writes() {
     let repo = repo(redis, &topic).await;
     let key = ID.to_string();
     let mut item = AggregateRoot::<Inventory>::new(&key).unwrap();
-    item.raise(InventoryEvent::Created(InventoryItemCreated {
+    item.emit(InventoryEvent::Created(InventoryItemCreated {
         id: ID,
         name: "Widget".into(),
     }));
-    item.raise(InventoryEvent::Renamed(InventoryItemRenamed {
+    item.emit(InventoryEvent::Renamed(InventoryItemRenamed {
         id: ID,
         new_name: "Gadget".into(),
     }));
-    item.raise(InventoryEvent::CheckedIn(ItemsCheckedInToInventory {
+    item.emit(InventoryEvent::CheckedIn(ItemsCheckedInToInventory {
         id: ID,
         count: 7,
     }));
@@ -367,7 +367,7 @@ async fn start_projector(
     let mut options = StreamOptions::default();
     options.topics.insert(topic.to_owned(), topic_options());
     let projector = Projector::builder(topic, registry())
-        .projection::<InventoryEvent, _>(views)
+        .shared_projection::<InventoryEvent, _>(views)
         .build()
         .unwrap();
     Streams::builder(redis.connect().await)
@@ -397,19 +397,19 @@ async fn save_flows_through_the_real_projector_into_the_view() {
     let key = ID.to_string();
 
     let mut item = AggregateRoot::<Inventory>::new(&key).unwrap();
-    item.raise(InventoryItem::create(ID, "Widget").unwrap());
+    item.emit(InventoryItem::create(ID, "Widget").unwrap());
     repo.save(&mut item, None, &PublishOptions::default())
         .await
         .unwrap();
     let rename = item.change_name("Widget v2").unwrap();
-    item.raise(rename);
+    item.emit(rename);
     let check_in = item.check_in(5, 1.0).unwrap();
-    item.raise(check_in);
+    item.emit(check_in);
     repo.save(&mut item, None, &PublishOptions::default())
         .await
         .unwrap();
     let remove = item.remove(2).unwrap();
-    item.raise(remove);
+    item.emit(remove);
     repo.save(&mut item, None, &PublishOptions::default())
         .await
         .unwrap();
@@ -441,7 +441,7 @@ async fn two_racing_saves_leave_one_winner_and_the_view_matches() {
     let key = ID.to_string();
 
     let mut seed = AggregateRoot::<Inventory>::new(&key).unwrap();
-    seed.raise(InventoryItem::create(ID, "Original").unwrap());
+    seed.emit(InventoryItem::create(ID, "Original").unwrap());
     repo.save(&mut seed, None, &PublishOptions::default())
         .await
         .unwrap();
@@ -450,9 +450,9 @@ async fn two_racing_saves_leave_one_winner_and_the_view_matches() {
     let mut second = repo.load::<Inventory>(&key).await.unwrap().unwrap();
     assert_eq!((first.version(), second.version()), (1, 1));
     let a = first.change_name("From first").unwrap();
-    first.raise(a);
+    first.emit(a);
     let b = second.change_name("From second").unwrap();
-    second.raise(b);
+    second.emit(b);
 
     assert_eq!(
         repo.save(&mut first, None, &PublishOptions::default())

@@ -5,6 +5,35 @@ and the crates follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed (breaking): idiomatic Rust in the package crates (0.3)
+
+The port was done too literally. Every byte in Redis and on the Restate wire is unchanged (wire
+type strings, JSON/MessagePack bodies, LZ4 framing, view key `{topic}:view:<owner>:<view>`, state
+stream `es:<Aggregate>:<id>`, version = `XLEN`, ingress request shape and status handling, metric
+and span names); only the Rust API changed. Versions are now 0.3.
+
+- `redisevents-projections`: `ProjectionBatch`, `BatchError` and `EventMeta::batch` are gone. A batch
+  projection implements `BatchFlush` (an associated `Pending: Default` buffer and `flush(pending)`)
+  and `BatchProjection<T>::buffer(event, &mut pending, ..)`; the projector owns the buffer, so there
+  is no address-keyed state, lock or "closed" error. `ProjectorBuilder::projection` /
+  `batch_projection` take the projection by value; `shared_projection` / `shared_batch_projection`
+  take an `Arc`. `default_owner()` and `RedisViewStore::with_owner` are gone:
+  `RedisViewStore::new(conn, keys, topic, owner, view_name)` takes the owner explicitly.
+- `redisevents-eventsourcing`: `AggregateRoot::raise` -> `emit`, `uncommitted_changes` -> `pending`,
+  `mark_changes_as_committed` -> `commit`, `load_from_history` -> `AggregateRoot::from_history(id, events)`.
+  `CachedAggregate::run` takes `&self` (it owns its lock; no external `tokio::sync::Mutex`), and
+  `evict` / `is_cached` are `async`. `ExecuteOptions::max_attempts` takes `NonZeroU32`.
+  `Error::InvalidOperation` / `InvalidArgument` became `Error::RefusedAfterEmitting { .. }` /
+  `Error::BlankId`. `AggregateDecision::done/refused/redo` helper fns are removed (use the variants).
+- `redisevents-restate`: `RestateStartOptions { ingress }` is a required `Url` (no `Option`, no
+  `Default`), `max_parallelism` / `max_attempts` are `NonZero*`, and `name` is removed.
+  `RestateStats` and `RestateStartHandler::stats()` are removed. `RestateStart::with_input` returns
+  `Result<Self, serde_json::Error>` (use `?` in `map`); a serialization failure now reads
+  `Map failed: ..` and is labelled by stream id.
+- `redisevents-msgpack`: `MessagePackMsgExt::decode_msgpack` is removed; use
+  `redisevents_msgpack::decode::<T>(msg.body())`.
+- Docs and log text no longer cite C# type names; "EventProjector:" log prefixes read "Projector:".
+
 ### Changed (behaviour)
 
 - **Key prefix resolution (Rust only; C# unchanged).** `Keys::from_env` now resolves

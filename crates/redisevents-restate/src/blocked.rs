@@ -1,7 +1,6 @@
 use std::fmt;
 
-/// At least one kept message was not started, so the batch must not be acked
-/// (C# `RestateStartBlockedException`). Returned inside `HandleError::Block`; recover it with
+/// At least one kept message was not started, so the batch must not be acked. Returned inside `HandleError::Block`; recover it with
 /// `err.into_error().downcast::<RestateStartBlocked>()`.
 #[derive(Debug, Clone)]
 pub struct RestateStartBlocked {
@@ -90,7 +89,7 @@ mod tests {
     use super::RestateStartBlocked;
 
     #[test]
-    fn the_blocked_exception_names_at_most_twenty_keys_then_counts_the_rest() {
+    fn the_blocked_error_names_at_most_twenty_keys_then_counts_the_rest() {
         let keys: Vec<String> = (0..25).map(|i| format!("W/k{i}")).collect();
         let reasons = vec!["HTTP 503".to_owned(); 25];
 

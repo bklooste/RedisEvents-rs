@@ -1,6 +1,7 @@
-//! The load, decide, save runner with retry (C# `EventRepositoryExtensions.ExecuteAsync`).
+//! The load, decide, save runner with retry.
 
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -19,7 +20,7 @@ pub type ConflictHook =
 /// How [`execute`] and [`CachedAggregate::run`](crate::CachedAggregate::run) save and retry.
 #[derive(Clone)]
 pub struct ExecuteOptions {
-    pub(crate) max_attempts: u32,
+    pub(crate) max_attempts: NonZeroU32,
     pub(crate) concurrency_check: bool,
     pub(crate) publish: PublishOptions,
     pub(crate) on_conflict: Option<ConflictHook>,
@@ -28,7 +29,7 @@ pub struct ExecuteOptions {
 impl Default for ExecuteOptions {
     fn default() -> Self {
         Self {
-            max_attempts: 1,
+            max_attempts: NonZeroU32::MIN,
             concurrency_check: true,
             publish: PublishOptions::default(),
             on_conflict: None,
@@ -48,10 +49,9 @@ impl std::fmt::Debug for ExecuteOptions {
 }
 
 impl ExecuteOptions {
-    /// Total tries (load, decide, save) when the version check is lost. Default 1 (no retry);
-    /// 0 is rejected when the runner starts.
+    /// Total tries (load, decide, save) when the version check is lost. Default 1 (no retry).
     #[must_use]
-    pub fn max_attempts(mut self, attempts: u32) -> Self {
+    pub fn max_attempts(mut self, attempts: NonZeroU32) -> Self {
         self.max_attempts = attempts;
         self
     }
@@ -83,15 +83,6 @@ impl ExecuteOptions {
         }));
         self
     }
-
-    pub(crate) fn validate(&self) -> Result<()> {
-        if self.max_attempts < 1 {
-            return Err(Error::InvalidArgument(
-                "At least one attempt is required (max_attempts).".to_owned(),
-            ));
-        }
-        Ok(())
-    }
 }
 
 /// A command's value and the aggregate's version after it.
@@ -100,15 +91,14 @@ impl ExecuteOptions {
 pub struct CommandResult<T> {
     /// What the decide closure returned.
     pub value: T,
-    /// The aggregate's version after the command (unchanged when nothing was raised).
+    /// The aggregate's version after the command (unchanged when nothing was emitted).
     pub version: u64,
 }
 
-/// Loads `id`, or a new empty aggregate at version 0 when it has no history (C#
-/// `LoadOrCreateAsync`).
+/// Loads `id`, or a new empty aggregate at version 0 when it has no history.
 ///
 /// # Errors
-/// As [`EventRepository::load`]; a blank id is [`Error::InvalidArgument`].
+/// As [`EventRepository::load`]; a blank id is [`Error::BlankId`].
 pub async fn load_or_create<R: EventRepository, A: Aggregate>(
     repository: &R,
     id: &str,
@@ -119,17 +109,17 @@ pub async fn load_or_create<R: EventRepository, A: Aggregate>(
     }
 }
 
-/// Load, decide, save (C# `ExecuteAsync`), loading fresh on every call.
+/// Load, decide, save, loading fresh on every call.
 ///
-/// `decide` gets the aggregate, raises events on it and returns an [`AggregateDecision`]. When it
-/// raised nothing, nothing is saved. A lost version check reloads and decides again until
+/// `decide` gets the aggregate, emits events on it and returns an [`AggregateDecision`]. When it
+/// emitted nothing, nothing is saved. A lost version check reloads and decides again until
 /// `max_attempts`; any other save error propagates (the outcome of a connection lost around the
 /// write is unknown, and a caller's retry reloads and decides against whichever happened).
 ///
 /// # Errors
 /// [`ExecuteError::Decide`] with `decide`'s error; [`ExecuteError::Repository`] otherwise, with
-/// [`Error::Concurrency`] once attempts are exhausted and [`Error::InvalidOperation`] for a
-/// refusal after raising.
+/// [`Error::Concurrency`] once attempts are exhausted and [`Error::RefusedAfterEmitting`] for a
+/// refusal after emitting.
 pub async fn execute<R, A, T, E, F>(
     repository: &R,
     id: &str,
@@ -141,7 +131,6 @@ where
     A: Aggregate,
     F: AsyncFnMut(&mut AggregateRoot<A>) -> Result<AggregateDecision<T>, E>,
 {
-    options.validate()?;
     let mut attempt = 1_u32;
     loop {
         let mut root = load_or_create::<R, A>(repository, id).await?;
@@ -149,7 +138,7 @@ where
         let Some(value) = decision.settle(&root)? else {
             continue;
         };
-        if root.uncommitted_changes().is_empty() {
+        if root.pending().is_empty() {
             return Ok(CommandResult {
                 value,
                 version: root.version(),
@@ -163,7 +152,7 @@ where
         }
         match repository.save(&mut root, None, &options.publish).await {
             Ok(version) => return Ok(CommandResult { value, version }),
-            Err(Error::Concurrency(conflict)) if attempt < options.max_attempts => {
+            Err(Error::Concurrency(conflict)) if attempt < options.max_attempts.get() => {
                 if let Some(hook) = &options.on_conflict {
                     hook(attempt, conflict).await;
                 }

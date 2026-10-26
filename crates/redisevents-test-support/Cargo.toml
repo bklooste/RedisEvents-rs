@@ -14,7 +14,7 @@ workspace = true
 [dependencies]
 bytes = "1.12.1"
 redis = { version = "1.8.0", features = ["tokio-comp", "connection-manager"] }
-redisevents = { path = "../redisevents", version = "0.2.0" }
+redisevents = { path = "../redisevents", version = "0.3.0" }
 testcontainers = { version = "0.28.0", default-features = false, features = ["reusable-containers"] }
 tokio = { version = "1.54.1", features = ["sync", "time", "macros", "rt-multi-thread"] }
 uuid = { version = "1.29.0", features = ["v4"] }

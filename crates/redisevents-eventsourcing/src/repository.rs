@@ -1,4 +1,4 @@
-//! [`EventRepository`] and its Redis implementation (C# `IEventRepository`, `RedisEventRepository`).
+//! [`EventRepository`] and its Redis implementation.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -21,13 +21,13 @@ pub trait EventRepository: Send + Sync {
         id: &str,
     ) -> impl Future<Output = Result<Option<AggregateRoot<A>>>> + Send;
 
-    /// Saves the uncommitted changes if the stored version is still `expected_version` (default:
+    /// Saves the pending events if the stored version is still `expected_version` (default:
     /// the aggregate's own [`version`](AggregateRoot::version)), then marks them committed and
-    /// returns the new version. Nothing uncommitted: no round trip, returns the current version.
+    /// returns the new version. Nothing pending: no round trip, returns the current version.
     ///
     /// # Errors
     /// [`Error::Concurrency`] when the version check failed; nothing was written and the
-    /// aggregate keeps its uncommitted changes.
+    /// aggregate keeps its pending events.
     fn save<A: Aggregate>(
         &self,
         root: &mut AggregateRoot<A>,
@@ -118,9 +118,7 @@ impl<S: EventStore> RedisEventRepository<S> {
         if history.is_empty() {
             return Ok(None);
         }
-        let mut root = AggregateRoot::<A>::new(id)?;
-        root.load_from_history(history);
-        Ok(Some(root))
+        AggregateRoot::<A>::from_history(id, history).map(Some)
     }
 
     fn encode_all<A: Aggregate>(
@@ -128,7 +126,7 @@ impl<S: EventStore> RedisEventRepository<S> {
         root: &AggregateRoot<A>,
         options: &PublishOptions,
     ) -> Result<Vec<StateEvent>> {
-        root.uncommitted_changes()
+        root.pending()
             .iter()
             .map(|event| {
                 let (wire, body) = A::encode(&self.registry, event)?;
@@ -152,7 +150,7 @@ impl<S: EventStore> RedisEventRepository<S> {
             .await?;
         if ids.is_none() {
             // Nothing was written, neither the history nor the topic, so the aggregate keeps its
-            // uncommitted changes and the caller can reload, decide again and retry.
+            // pending events and the caller can reload, decide again and retry.
             tracing::debug!(
                 aggregate = A::NAME,
                 id = root.id(),
@@ -162,7 +160,7 @@ impl<S: EventStore> RedisEventRepository<S> {
             diagnostics::concurrency_conflict(span);
             return Err(ConcurrencyError::new(A::NAME, root.id(), expected).into());
         }
-        root.mark_changes_as_committed();
+        root.commit();
         let new_version = expected + events.len() as u64;
         diagnostics::saved(span, new_version, events.len());
         Ok(new_version)
@@ -180,7 +178,7 @@ impl<S: EventStore> RedisEventRepository<S> {
         self.store
             .append_and_publish_unchecked(&name, root.id(), &events)
             .await?;
-        root.mark_changes_as_committed();
+        root.commit();
         let new_version = expected + events.len() as u64;
         diagnostics::saved(span, new_version, events.len());
         Ok(new_version)
@@ -190,9 +188,7 @@ impl<S: EventStore> RedisEventRepository<S> {
 impl<S: EventStore> EventRepository for RedisEventRepository<S> {
     async fn load<A: Aggregate>(&self, id: &str) -> Result<Option<AggregateRoot<A>>> {
         if id.trim().is_empty() {
-            return Err(Error::InvalidArgument(
-                "An aggregate id must not be blank.".to_owned(),
-            ));
+            return Err(Error::BlankId);
         }
         let span = diagnostics::load_span(A::NAME, id);
         let result = self.load_inner::<A>(id).instrument(span.clone()).await;
@@ -209,7 +205,7 @@ impl<S: EventStore> EventRepository for RedisEventRepository<S> {
         expected_version: Option<u64>,
         options: &PublishOptions,
     ) -> Result<u64> {
-        if root.uncommitted_changes().is_empty() {
+        if root.pending().is_empty() {
             // A transaction that appends no events is not an append.
             return Ok(root.version());
         }
@@ -232,7 +228,7 @@ impl<S: EventStore> EventRepository for RedisEventRepository<S> {
         root: &mut AggregateRoot<A>,
         options: &PublishOptions,
     ) -> Result<u64> {
-        if root.uncommitted_changes().is_empty() {
+        if root.pending().is_empty() {
             return Ok(root.version());
         }
         let expected = root.version();

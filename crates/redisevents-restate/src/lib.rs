@@ -1,4 +1,4 @@
-//! Batched Restate workflow starts from a redisevents stream (port of `RedisEvents.Restate`).
+//! Batched Restate workflow starts from a redisevents stream.
 //!
 //! [`RestateStartHandler`] is a [`TypedBatchHandler`](redisevents::consumer::TypedBatchHandler): wrap it in
 //! [`Typed`](redisevents::consumer::Typed) to use it as a batch handler. It starts one Restate
@@ -7,9 +7,8 @@
 //!
 //! # Why a typed batch handler
 //!
-//! The C# class is `IBatchHandler<T>`. The core `Typed` adapter already decodes bodies (dropping
-//! and logging malformed ones, exactly the C# behaviour), so the handler stays codec-agnostic and
-//! works with any `PayloadCodec`.
+//! The core `Typed` adapter already decodes bodies (dropping and logging malformed ones), so the
+//! handler stays codec-agnostic and works with any `PayloadCodec`.
 //!
 //! # The submit
 //!
@@ -35,5 +34,5 @@ mod handler;
 mod options;
 
 pub use blocked::RestateStartBlocked;
-pub use handler::{RestateStart, RestateStartHandler, RestateStats};
+pub use handler::{RestateStart, RestateStartHandler};
 pub use options::{RestateConfigError, RestateStartOptions};

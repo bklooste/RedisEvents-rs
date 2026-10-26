@@ -1,17 +1,17 @@
-//! MessagePack typed publish/consume for redisevents, with `MessagePack-CSharp` compatible
-//! size-gated LZ4.
+//! MessagePack typed publish/consume for redisevents, with size-gated LZ4 in the framing
+//! `MessagePack-CSharp` reads and writes.
 //!
-//! This is the pure layer (work package A3): [`encode_with`] / [`decode`] and the [`MessagePack`]
-//! and [`MessagePackMap`] [`PayloadCodec`] markers. The typed glue (work package E1) is:
+//! The pure layer is [`encode_with`] / [`decode`] and the [`MessagePack`] and [`MessagePackMap`]
+//! [`PayloadCodec`] markers. The typed glue is:
 //!
-//! - **Publish**: [`MessagePackPublisherExt`] on any [`Publisher`] (the B1 `StreamPublisher`, the
-//!   B2 buffered publisher, an `Arc` of either, or a test double). `publish_msgpack` takes the
+//! - **Publish**: [`MessagePackPublisherExt`] on any [`Publisher`] (the stream publisher, the
+//!   buffered publisher, an `Arc` of either, or a test double). `publish_msgpack` takes the
 //!   [`Options`] explicitly (layout, compression threshold, or disabling compression). For the
 //!   defaults, core's `PublisherExt::publish_message::<MessagePack, _>` does the same thing.
 //! - **Consume**: [`MessagePackTyped`] / [`MessagePackMapTyped`] wrap a `TypedHandler` or
 //!   `TypedBatchHandler` as `Typed<H, T, MessagePack>`. Decoding detects LZ4 from the bytes, so the
-//!   consumer needs no compression setting. [`MessagePackMsgExt::decode_msgpack`] decodes one
-//!   `StreamMsg` by hand.
+//!   consumer needs no compression setting. To decode one `StreamMsg` by hand, call
+//!   [`decode`]`(msg.body())`.
 //!
 //! ```no_run
 //! use redisevents::{Message, PublishOptions, Publisher};
@@ -28,8 +28,8 @@
 //! ```
 //!
 //! Wire rules (`wire-spec/WIRE.md` section 11):
-//! - Structs are MessagePack arrays by default (C# `[Key(int)]`); [`Layout::Map`] gives the
-//!   `[Key("name")]` map form.
+//! - Structs are MessagePack arrays by default (what .NET `[Key(int)]` types write);
+//!   [`Layout::Map`] gives the map form (`[Key("name")]`).
 //! - A body whose uncompressed encoding exceeds the threshold (default 1024 bytes) is written as
 //!   `Lz4BlockArray`: an array whose first element is ext 98 holding the uncompressed chunk
 //!   lengths, then one `bin` of raw LZ4 *block* data per chunk.
@@ -41,7 +41,7 @@ use bytes::Bytes;
 use redisevents::consumer::Typed;
 use redisevents::message::CodecError;
 use redisevents::producer::PublishOptions;
-use redisevents::{Message, PayloadCodec, Publisher, Result, StreamId, StreamMsg};
+use redisevents::{Message, PayloadCodec, Publisher, Result, StreamId};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -57,14 +57,14 @@ const MAX_DECOMPRESSED: usize = 256 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Layout {
-    /// Positional arrays, as C# `[Key(int)]` types.
+    /// Positional arrays, as .NET `[Key(int)]` types.
     #[default]
     Array,
-    /// Field-name maps, as C# `[Key("name")]` types.
+    /// Field-name maps, as .NET `[Key("name")]` types.
     Map,
 }
 
-/// Size-gated LZ4 settings (C# `MessagePackCompressionOptions`).
+/// Size-gated LZ4 settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Compression {
     /// Whether to compress bodies over [`Compression::threshold`]. Default: `true`.
@@ -365,7 +365,7 @@ pub fn decode<T: DeserializeOwned>(body: &[u8]) -> Result<T, CodecError> {
     rmp_serde::from_slice(&plain).map_err(err)
 }
 
-/// MessagePack with structs as arrays (C# `[Key(int)]`) and default size-gated LZ4.
+/// MessagePack with structs as arrays (.NET `[Key(int)]`) and default size-gated LZ4.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MessagePack;
 
@@ -381,7 +381,7 @@ impl PayloadCodec for MessagePack {
     }
 }
 
-/// MessagePack with structs as maps (C# `[Key("name")]`) and default size-gated LZ4.
+/// MessagePack with structs as maps (.NET `[Key("name")]`) and default size-gated LZ4.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MessagePackMap;
 
@@ -403,8 +403,7 @@ impl PayloadCodec for MessagePackMap {
     }
 }
 
-/// A `TypedHandler` or `TypedBatchHandler` consuming [`MessagePack`] bodies (C# `AddStream` with a
-/// `MessagePackSerializerOptions`). Bodies are read as array-layout or map-layout, with or without
+/// A `TypedHandler` or `TypedBatchHandler` consuming [`MessagePack`] bodies. Bodies are read as array-layout or map-layout, with or without
 /// LZ4.
 pub type MessagePackTyped<H, T> = Typed<H, T, MessagePack>;
 
@@ -412,7 +411,7 @@ pub type MessagePackTyped<H, T> = Typed<H, T, MessagePack>;
 /// alias only documents the producer's choice.
 pub type MessagePackMapTyped<H, T> = Typed<H, T, MessagePackMap>;
 
-/// Typed MessagePack publishing over any [`Publisher`] (C# `MessagePackPublishExtensions`). The
+/// Typed MessagePack publishing over any [`Publisher`]. The
 /// type string is [`Message::TYPE`]. Blanket-implemented, so it is in scope wherever it is imported.
 pub trait MessagePackPublisherExt: Publisher {
     /// Serializes `message` with `options` and publishes it under `M::TYPE`. A body over the
@@ -454,19 +453,3 @@ pub trait MessagePackPublisherExt: Publisher {
 }
 
 impl<P: Publisher + ?Sized> MessagePackPublisherExt for P {}
-
-/// Decodes a received message's MessagePack body by hand (C# `MessagePackConsumeExtensions`).
-/// Handlers normally get this through [`MessagePackTyped`]; use this for ad-hoc reads.
-pub trait MessagePackMsgExt {
-    /// Decodes the body as `T`, detecting LZ4 framing from the bytes.
-    ///
-    /// # Errors
-    /// [`CodecError`] when the framing or the content is not a valid `T`.
-    fn decode_msgpack<T: DeserializeOwned>(&self) -> std::result::Result<T, CodecError>;
-}
-
-impl MessagePackMsgExt for StreamMsg {
-    fn decode_msgpack<T: DeserializeOwned>(&self) -> std::result::Result<T, CodecError> {
-        decode(self.body())
-    }
-}

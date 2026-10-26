@@ -1,6 +1,5 @@
 use std::fmt::Write as _;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures_util::FutureExt;
 use futures_util::stream::{self, StreamExt};
@@ -17,7 +16,7 @@ use crate::options::{RestateConfigError, RestateStartOptions};
 const MAX_REASON_BODY_CHARS: usize = 300;
 const PREVIOUSLY_ACCEPTED: &str = "PreviouslyAccepted";
 
-/// The workflow to start for a kept message: what `map` returns (C# `(Workflow, Key, Input)`).
+/// The workflow to start for a kept message: what `map` returns.
 #[derive(Debug, Clone)]
 pub struct RestateStart {
     workflow: String,
@@ -29,7 +28,6 @@ pub struct RestateStart {
 enum Input {
     None,
     Body(Vec<u8>),
-    Failed(String),
 }
 
 impl RestateStart {
@@ -43,51 +41,22 @@ impl RestateStart {
         }
     }
 
-    /// Sends `input` serialized as the JSON body. A value that cannot be serialized fails this item,
-    /// which blocks the batch (C#: an input type the resolver does not know).
-    #[must_use]
-    pub fn with_input<T: Serialize>(mut self, input: &T) -> Self {
-        self.input = match serde_json::to_vec(input) {
-            Ok(body) => Input::Body(body),
-            Err(e) => Input::Failed(format!(
-                "serializing the {} input failed: {e}",
-                std::any::type_name::<T>()
-            )),
-        };
-        self
+    /// Sends `input` serialized as the JSON body.
+    ///
+    /// # Errors
+    /// The serialization error, so a `map` closure can propagate it with `?` (the message then
+    /// fails and blocks the batch).
+    pub fn with_input<T: Serialize + ?Sized>(
+        mut self,
+        input: &T,
+    ) -> Result<Self, serde_json::Error> {
+        self.input = Input::Body(serde_json::to_vec(input)?);
+        Ok(self)
     }
 }
 
-/// A snapshot of a handler's counters (C# `restate.start.*` instruments, per handler instance).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct RestateStats {
-    /// `restate.start.kept`.
-    pub kept: u64,
-    /// `restate.start.filtered`.
-    pub filtered: u64,
-    /// `restate.start.accepted`.
-    pub accepted: u64,
-    /// `restate.start.already_started`.
-    pub already_started: u64,
-    /// `restate.start.retried`.
-    pub retried: u64,
-    /// `restate.start.blocked`: batches blocked by an outage (not by shutdown).
-    pub blocked: u64,
-}
-
-#[derive(Default)]
-struct Counters {
-    kept: AtomicU64,
-    filtered: AtomicU64,
-    accepted: AtomicU64,
-    already_started: AtomicU64,
-    retried: AtomicU64,
-    blocked: AtomicU64,
-}
-
 /// A [`TypedBatchHandler`] that starts one Restate workflow per kept message and acks the batch only
-/// once every start is accepted (C# `RestateStartHandler<T>`). See the [crate docs](crate).
+/// once every start is accepted. See the [crate docs](crate).
 ///
 /// One instance is shared by every partition, keeps no per-call state and takes no lock.
 pub struct RestateStartHandler<T, K, M> {
@@ -97,8 +66,6 @@ pub struct RestateStartHandler<T, K, M> {
     map: M,
     ingress_base: String,
     handler_segment: String,
-    name: String,
-    counters: Counters,
     _marker: std::marker::PhantomData<fn(&T)>,
 }
 
@@ -114,7 +81,7 @@ where
     /// workflow or key, fails that message and blocks the batch. `http` is long-lived and shared.
     ///
     /// # Errors
-    /// [`RestateConfigError`] for an invalid option or a missing / non-http(s) ingress.
+    /// [`RestateConfigError`] for an invalid option or a non-http(s) ingress.
     pub fn new(
         http: Client,
         options: RestateStartOptions,
@@ -122,50 +89,20 @@ where
         map: M,
     ) -> Result<Self, RestateConfigError> {
         options.validate()?;
-        let ingress = options.ingress.as_ref().ok_or_else(|| {
-            RestateConfigError(
-                "Restate: no ingress address. Set RestateStartOptions::ingress.".to_owned(),
-            )
-        })?;
-        if !matches!(ingress.scheme(), "http" | "https") {
-            return Err(RestateConfigError(format!(
-                "Restate: the ingress address '{ingress}' must be an absolute http or https URI."
-            )));
-        }
         Ok(Self {
             http,
-            ingress_base: ingress.as_str().trim_end_matches('/').to_owned(),
+            ingress_base: options.ingress.as_str().trim_end_matches('/').to_owned(),
             handler_segment: escape(&options.handler),
-            name: options
-                .name
-                .clone()
-                .unwrap_or_else(|| "RestateStartHandler".to_owned()),
             options,
             keep,
             map,
-            counters: Counters::default(),
             _marker: std::marker::PhantomData,
         })
-    }
-
-    /// The counters so far.
-    #[must_use]
-    pub fn stats(&self) -> RestateStats {
-        let c = &self.counters;
-        RestateStats {
-            kept: c.kept.load(Ordering::Relaxed),
-            filtered: c.filtered.load(Ordering::Relaxed),
-            accepted: c.accepted.load(Ordering::Relaxed),
-            already_started: c.already_started.load(Ordering::Relaxed),
-            retried: c.retried.load(Ordering::Relaxed),
-            blocked: c.blocked.load(Ordering::Relaxed),
-        }
     }
 
     /// Filters and maps the batch synchronously, copying everything the submits need.
     fn prepare(&self, batch: &[TypedMsg<T>]) -> Vec<Item> {
         let mut items = Vec::new();
-        let (mut filtered, mut kept) = (0_u64, 0_u64);
         for msg in batch {
             let id = msg.envelope.id().to_string();
             match std::panic::catch_unwind(AssertUnwindSafe(|| (self.keep)(msg))) {
@@ -175,17 +112,12 @@ where
                         format!("Keep panicked: {}", panic_text(p.as_ref())),
                     ));
                 }
-                Ok(false) => filtered += 1,
+                Ok(false) => {}
                 Ok(true) => {
-                    kept += 1;
                     items.push(self.map_one(msg, id));
                 }
             }
         }
-        self.counters
-            .filtered
-            .fetch_add(filtered, Ordering::Relaxed);
-        self.counters.kept.fetch_add(kept, Ordering::Relaxed);
         items
     }
 
@@ -218,10 +150,6 @@ where
         match start.input {
             Input::None => {}
             Input::Body(b) => item.body = Some(b),
-            Input::Failed(reason) => {
-                item.fail(reason);
-                return item;
-            }
         }
         item.url = format!(
             "{}/{}/{}/{}/send",
@@ -260,15 +188,8 @@ where
                     return item;
                 }
                 Attempt::Accepted | Attempt::AlreadyStarted => {
-                    self.counters.accepted.fetch_add(1, Ordering::Relaxed);
-                    let already = matches!(result, Attempt::AlreadyStarted);
-                    if already {
-                        self.counters
-                            .already_started
-                            .fetch_add(1, Ordering::Relaxed);
-                    }
                     item.outcome = Outcome::Accepted;
-                    item.already_started = already;
+                    item.already_started = matches!(result, Attempt::AlreadyStarted);
                     return item;
                 }
                 Attempt::Permanent => {
@@ -280,7 +201,7 @@ where
                     return item;
                 }
                 Attempt::Transient => {
-                    if attempt >= self.options.max_attempts {
+                    if attempt >= self.options.max_attempts.get() {
                         let r = item
                             .last_reason
                             .take()
@@ -290,11 +211,10 @@ where
                     }
                 }
             }
-            self.counters.retried.fetch_add(1, Ordering::Relaxed);
             tracing::debug!(
-                handler = %self.name,
+                handler = "RestateStartHandler",
                 attempt,
-                max_attempts = self.options.max_attempts,
+                max_attempts = self.options.max_attempts.get(),
                 reason = item.last_reason.as_deref().unwrap_or(""),
                 delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
                 "Restate: start of {} (stream id {}) failed, retrying",
@@ -387,7 +307,7 @@ where
         // ends Accepted or Failed and none is abandoned mid-flight with no outcome.
         let done: Vec<Item> = stream::iter(items)
             .map(|item| self.submit(item, ctx))
-            .buffered(self.options.max_parallelism)
+            .buffered(self.options.max_parallelism.get())
             .collect()
             .await;
         let mut keys = Vec::new();
@@ -405,21 +325,21 @@ where
         if keys.is_empty() {
             return Ok(());
         }
-        Err(self.blocked(keys, total, &reasons, ctx))
+        Err(Self::blocked(keys, total, &reasons, ctx))
     }
 
     fn blocked(
-        &self,
         keys: Vec<String>,
         kept: usize,
         reasons: &[String],
         ctx: &PartitionContext,
     ) -> HandleError {
-        let shutting_down = ctx.is_cancelled();
-        if !shutting_down {
-            self.counters.blocked.fetch_add(1, Ordering::Relaxed);
-        }
-        HandleError::block(RestateStartBlocked::new(keys, kept, reasons, shutting_down))
+        HandleError::block(RestateStartBlocked::new(
+            keys,
+            kept,
+            reasons,
+            ctx.is_cancelled(),
+        ))
     }
 }
 
@@ -436,7 +356,7 @@ where
         // bug. It must not reach the worker as a panic (treated as Skip, losing starts).
         match AssertUnwindSafe(self.run(batch, ctx)).catch_unwind().await {
             Ok(result) => result,
-            Err(p) => Err(self.blocked(
+            Err(p) => Err(Self::blocked(
                 vec!["(batch)".to_owned()],
                 batch.len(),
                 &[format!("panic: {}", panic_text(p.as_ref()))],
@@ -521,7 +441,7 @@ fn snippet(body: &[u8]) -> String {
     }
 }
 
-/// `Uri.EscapeDataString`: everything but the RFC 3986 unreserved characters is percent-encoded.
+/// Percent-encodes a path segment: everything but the RFC 3986 unreserved characters is percent-encoded.
 fn escape(segment: &str) -> String {
     let mut out = String::with_capacity(segment.len());
     for b in segment.bytes() {

@@ -107,19 +107,19 @@ type Root = AggregateRoot<Widget>;
 
 fn create(id: &str, name: &str) -> Root {
     let mut w = Root::new(id).unwrap();
-    w.raise(WidgetEvent::Created(Created {
+    w.emit(WidgetEvent::Created(Created {
         id: id.into(),
         name: name.into(),
     }));
     w
 }
 fn rename(w: &mut Root, name: &str) {
-    w.raise(WidgetEvent::Renamed(Renamed {
+    w.emit(WidgetEvent::Renamed(Renamed {
         new_name: name.into(),
     }));
 }
 fn tick(w: &mut Root, sequence: i32) {
-    w.raise(WidgetEvent::Ticked(Ticked { sequence }));
+    w.emit(WidgetEvent::Ticked(Ticked { sequence }));
 }
 
 fn topic_options() -> TopicOptions {
@@ -190,15 +190,15 @@ async fn save_then_load_round_trips_state_and_version() {
         .unwrap();
 
     assert_eq!(version, 1);
-    assert_eq!(widget.version(), 1, "mark_changes_as_committed advances it");
-    assert!(widget.uncommitted_changes().is_empty());
+    assert_eq!(widget.version(), 1, "commit advances it");
+    assert!(widget.pending().is_empty());
 
     let loaded = repo.load::<Widget>("w-1").await.unwrap().unwrap();
     assert_eq!(loaded.id(), "w-1");
     assert_eq!(loaded.name, "First");
     assert_eq!(loaded.version(), 1);
     assert!(
-        loaded.uncommitted_changes().is_empty(),
+        loaded.pending().is_empty(),
         "replayed history is not new activity"
     );
 }
@@ -266,7 +266,7 @@ async fn stale_expected_version_fails_and_writes_nothing() {
     assert_eq!(conflict.id, "w-4");
     assert_eq!(conflict.expected_version, 5);
     assert_eq!(
-        widget.uncommitted_changes().len(),
+        widget.pending().len(),
         1,
         "nothing was committed, so nothing was cleared"
     );
@@ -511,7 +511,7 @@ async fn execute_retries_a_real_conflict_and_reaches_the_expected_total() {
                 execute(
                     &*repo,
                     "w-9",
-                    &ExecuteOptions::default().max_attempts(50),
+                    &ExecuteOptions::default().max_attempts(std::num::NonZeroU32::new(50).unwrap()),
                     async move |w: &mut Root| {
                         tick(w, n);
                         Ok::<_, std::convert::Infallible>(AggregateDecision::Done(()))
@@ -543,6 +543,6 @@ async fn a_blank_id_is_refused() {
     let (repo, _) = repository(redis, "blank").await;
     assert!(matches!(
         repo.load::<Widget>(" ").await,
-        Err(Error::InvalidArgument(_))
+        Err(Error::BlankId)
     ));
 }

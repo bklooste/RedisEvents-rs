@@ -1,4 +1,4 @@
-//! View stores (C# `IViewStore<T>`, `RedisViewStore<T>`, `InMemoryViewStore<T>`).
+//! View stores.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -81,23 +81,13 @@ fn require_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// The default view owner: the running executable's name (C# `KeyNamespace.DefaultServiceName`,
-/// the entry assembly name), or `"unknown"`.
-#[must_use]
-pub fn default_owner() -> String {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| "unknown".to_owned())
-}
-
-/// A [`ViewStore`] on one Redis hash, one JSON value per id (C# `RedisViewStore<T>`).
+/// A [`ViewStore`] on one Redis hash, one JSON value per id.
 ///
 /// The hash is `<prefix>{<topic>}:view:<owner>:<view_name>` ([`Keys::view`]). The `owner` is the
-/// service that owns the read model (default [`default_owner`]), so two services can keep
-/// views of the same name over one topic without colliding. A reader sees a writer's views only
-/// with the same owner.
+/// service that owns the read model, so two services can keep views of the same name over one
+/// topic without colliding. It is part of the key, so a reader sees a writer's views only with the
+/// same owner string; a Rust service reading a .NET service's views passes that service's name
+/// (its entry assembly name, unless it configured another).
 ///
 /// JSON casing is serde's: add `rename_all` when other services or HTTP clients read the same
 /// documents.
@@ -117,24 +107,16 @@ impl<T> std::fmt::Debug for RedisViewStore<T> {
 }
 
 impl<T> RedisViewStore<T> {
-    /// A store for `view_name` over `topic`, owned by [`default_owner`].
+    /// A store for `view_name` over `topic`, owned by `owner`.
     ///
     /// # Errors
-    /// [`Error::InvalidArgument`] when `topic` or `view_name` is blank.
-    pub fn new(conn: &Connection, keys: &Keys, topic: &str, view_name: &str) -> Result<Self> {
-        Self::with_owner(conn, keys, topic, view_name, &default_owner())
-    }
-
-    /// As [`new`](Self::new) with an explicit `owner`.
-    ///
-    /// # Errors
-    /// [`Error::InvalidArgument`] when `topic`, `view_name` or `owner` is blank.
-    pub fn with_owner(
+    /// [`Error::InvalidArgument`] when `topic`, `owner` or `view_name` is blank.
+    pub fn new(
         conn: &Connection,
         keys: &Keys,
         topic: &str,
-        view_name: &str,
         owner: &str,
+        view_name: &str,
     ) -> Result<Self> {
         for (name, value) in [("topic", topic), ("view_name", view_name), ("owner", owner)] {
             if value.trim().is_empty() {

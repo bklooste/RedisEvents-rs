@@ -71,7 +71,7 @@ async fn run(projector: &Projector, batch: &[StreamMsg]) -> HandleResult {
 async fn a_single_bound_projection_receives_the_event_with_correct_meta() {
     let spy = Arc::new(Spy::default());
     let projector = Projector::builder("orders", registry())
-        .projection::<EventA, _>(spy.clone())
+        .shared_projection::<EventA, _>(spy.clone())
         .build()
         .unwrap();
     let m = msg(
@@ -89,14 +89,13 @@ async fn a_single_bound_projection_receives_the_event_with_correct_meta() {
     assert_eq!(meta.partition_key, "agg-1");
     assert_eq!(meta.correlation_id, "corr-1");
     assert_eq!(meta.id, m.id());
-    assert!(meta.batch.is_some());
 }
 
 #[tokio::test]
 async fn a_message_with_no_headers_at_all_projects_without_error() {
     let spy = Arc::new(Spy::default());
     let projector = Projector::builder("orders", registry())
-        .projection::<EventA, _>(spy.clone())
+        .shared_projection::<EventA, _>(spy.clone())
         .build()
         .unwrap();
     let m = msg_a("event.a", &SAMPLE_A(), "agg-1", StreamId::new(1, 0))
@@ -111,8 +110,8 @@ async fn a_message_with_no_headers_at_all_projects_without_error() {
 async fn a_projection_handling_two_event_types_is_dispatched_for_both() {
     let spy = Arc::new(Spy::default());
     let projector = Projector::builder("orders", registry())
-        .projection::<EventA, _>(spy.clone())
-        .projection::<EventB, _>(spy.clone())
+        .shared_projection::<EventA, _>(spy.clone())
+        .shared_projection::<EventB, _>(spy.clone())
         .build()
         .unwrap();
     let a = msg_a("event.a", &SAMPLE_A(), "agg-1", StreamId::new(1, 0));
@@ -134,8 +133,8 @@ async fn a_projection_handling_two_event_types_is_dispatched_for_both() {
 async fn two_projection_instances_bound_to_the_same_event_both_receive_it() {
     let (first, second) = (Arc::new(Spy::default()), Arc::new(Spy::default()));
     let projector = Projector::builder("orders", registry())
-        .projection::<EventA, _>(first.clone())
-        .projection::<EventA, _>(second.clone())
+        .shared_projection::<EventA, _>(first.clone())
+        .shared_projection::<EventA, _>(second.clone())
         .build()
         .unwrap();
 
@@ -154,7 +153,7 @@ async fn two_projection_instances_bound_to_the_same_event_both_receive_it() {
 async fn an_unregistered_wire_type_is_skipped_with_no_error_and_no_dispatch() {
     let spy = Arc::new(Spy::default());
     let projector = Projector::builder("orders", registry())
-        .projection::<EventA, _>(spy.clone())
+        .shared_projection::<EventA, _>(spy.clone())
         .build()
         .unwrap();
 
@@ -178,7 +177,7 @@ async fn a_registered_event_with_no_bound_projection_is_skipped_with_no_error() 
     // Only EventB is bound, so an EventA message binds to nothing.
     let spy = Arc::new(Spy::default());
     let projector = Projector::builder("orders", registry())
-        .projection::<EventB, _>(spy.clone())
+        .shared_projection::<EventB, _>(spy.clone())
         .build()
         .unwrap();
 
@@ -196,8 +195,8 @@ async fn a_registered_event_with_no_bound_projection_is_skipped_with_no_error() 
 async fn an_ordinary_error_propagates_unchanged_and_stops_the_rest_of_the_batch() {
     let spy = Arc::new(Spy::default());
     let projector = Projector::builder("orders", registry())
-        .projection::<EventA, _>(Arc::new(Thrower(|| HandleError::skip("boom"))))
-        .projection::<EventA, _>(spy.clone())
+        .projection::<EventA, _>(Thrower(|| HandleError::skip("boom")))
+        .shared_projection::<EventA, _>(spy.clone())
         .build()
         .unwrap();
     let batch = [
@@ -215,7 +214,7 @@ async fn an_ordinary_error_propagates_unchanged_and_stops_the_rest_of_the_batch(
 #[tokio::test]
 async fn a_block_error_from_a_projection_propagates_unchanged() {
     let projector = Projector::builder("orders", registry())
-        .projection::<EventA, _>(Arc::new(Thrower(|| HandleError::block("blocked"))))
+        .projection::<EventA, _>(Thrower(|| HandleError::block("blocked")))
         .build()
         .unwrap();
 
@@ -235,7 +234,7 @@ async fn an_unregistered_wire_type_is_warned_once_with_topic_and_id_then_debug()
     let rig = Rig::default();
     let _guard = rig.install();
     let projector = Projector::builder("orders", registry())
-        .projection::<EventA, _>(Arc::new(Spy::default()))
+        .projection::<EventA, _>(Spy::default())
         .build()
         .unwrap();
     let batch = [
@@ -273,7 +272,7 @@ fn binding_a_type_no_wire_type_decodes_to_is_a_config_error() {
         .register_json::<EventA>("event.a")
         .unwrap();
     let error = Projector::builder("orders", registry)
-        .projection::<EventB, _>(Arc::new(Spy::default()))
+        .projection::<EventB, _>(Spy::default())
         .build()
         .unwrap_err();
     assert!(matches!(error, Error::Config(_)));
