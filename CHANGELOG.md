@@ -103,7 +103,7 @@ Redis (golden vectors, interop and the sample matrix are unchanged).
   `STREAMS_ENVIRONMENT` on Rust equal to the C# environment name). No API change.
 - Startup logs the resolved prefix at info, and says when it fell back to `local:re:`.
 
-## [0.2] - Unreleased
+## [0.2] - 2026-10-26
 
 First release. Versions follow the C# repo's scheme (`version.json` holds `0.2`; CI appends the git height, see `docs/PUBLISHING.md`).
 

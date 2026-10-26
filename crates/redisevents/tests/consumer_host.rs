@@ -281,13 +281,29 @@ async fn a_reset_taken_just_before_shutdown_is_not_applied_again_on_restart() {
     // The read loop takes the reset and replays; the host stops before the flusher's next tick
     // deletes `__reset:<p>`. The final flush must delete it, or the next start rewinds again and
     // replays everything a second time.
+    //
+    // Stopping "before the next tick" is a race the test cannot win every time: the marker is
+    // noticed on one tick and deleted on the next, and on a loaded machine the replay can finish
+    // after that. A run that misses the window cannot exercise the path, so it is retried with a
+    // fresh topic rather than failed; the property itself (no second rewind) is always asserted.
     let redis = require_redis!();
-    let topic = redis.new_topic("host-reset-stop");
+    for attempt in 1..=3 {
+        if reset_before_shutdown_scenario(redis, attempt).await {
+            return;
+        }
+    }
+    panic!("never stopped the host before a tick cleared the marker in 3 attempts");
+}
+
+/// One run of the reset-before-shutdown scenario. Returns `false` when a flush tick cleared the
+/// marker before the host stopped (the scenario could not be set up), `true` once it was exercised.
+async fn reset_before_shutdown_scenario(redis: &RedisFixture, attempt: u32) -> bool {
+    let topic = redis.new_topic(&format!("host-reset-stop-{attempt}"));
     let consumer = redis.new_consumer("c");
     publish(redis, &topic, 1, &["k"], 5).await;
     // A long tick: the reset is noticed on one tick and the host is gone before the next.
     let mut opts = consumer_options(&topic, &consumer);
-    opts.persist_interval_ms = 3_000;
+    opts.persist_interval_ms = 5_000;
     let handler = Arc::new(RecordingHandler::new());
     let host = spawn(redis, &topic, 1, opts.clone(), handler.clone())
         .await
@@ -305,13 +321,14 @@ async fn a_reset_taken_just_before_shutdown_is_not_applied_again_on_restart() {
         .expect("reset");
     handler.wait_for(10, WAIT).await;
     let key = redis.keys().positions(&topic, &consumer);
-    assert!(
-        hgetall(redis, &key)
-            .await
-            .keys()
-            .any(|k| k.starts_with("__reset")),
-        "the test must stop the host before a tick cleared the marker"
-    );
+    if !hgetall(redis, &key)
+        .await
+        .keys()
+        .any(|k| k.starts_with("__reset"))
+    {
+        host.shutdown().await.expect("shutdown");
+        return false;
+    }
     host.shutdown().await.expect("shutdown");
 
     let stored = hgetall(redis, &key).await;
@@ -335,6 +352,7 @@ async fn a_reset_taken_just_before_shutdown_is_not_applied_again_on_restart() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(second.bodies(), vec!["a|0".to_owned()], "no second rewind");
     host.shutdown().await.expect("shutdown");
+    true
 }
 
 async fn wait_until_positions(redis: &RedisFixture, topic: &str, consumer: &str, n: usize) {

@@ -73,7 +73,7 @@
 //!     let projector = Projector::builder("orders", registry)
 //!         .projection::<OrderPlaced, _>(PrintOrders)
 //!         .build()?;
-//!     let conn = Connection::connect("redis://redis-db.infra:6379").await?;
+//!     let conn = Connection::connect("redis://127.0.0.1:6379").await?;
 //!     let host = Streams::builder(conn)
 //!         .topic("orders")
 //!         .handler(projector)
