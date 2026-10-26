@@ -69,12 +69,18 @@ jobs:
       - name: Is there a published baseline?
         id: baseline
         run: |
-          if curl -fsS -A "RedisEvents-rs CI (github.com/bklooste/RedisEvents-rs)" \
-              https://crates.io/api/v1/crates/redisevents >/dev/null; then
+          # Every crate the check compares needs a published baseline; one missing crate fails the
+          # whole run (as on the first publish, before the dependents had landed).
+          missing=""
+          for c in redisevents redisevents-msgpack redisevents-projections redisevents-restate redisevents-axum redisevents-eventsourcing; do
+            curl -fsS -A "RedisEvents-rs CI (github.com/bklooste/RedisEvents-rs)" \
+              "https://crates.io/api/v1/crates/$c" >/dev/null || missing="$missing $c"
+          done
+          if [ -z "$missing" ]; then
             echo "published=true" >> "$GITHUB_OUTPUT"
           else
             echo "published=false" >> "$GITHUB_OUTPUT"
-            echo "No version of redisevents on crates.io yet: semver check skipped." >> "$GITHUB_STEP_SUMMARY"
+            echo "Not on crates.io yet:$missing. Semver check skipped." >> "$GITHUB_STEP_SUMMARY"
           fi
       - uses: dtolnay/rust-toolchain@stable
         if: steps.baseline.outputs.published == 'true'
