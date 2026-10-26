@@ -792,7 +792,7 @@ async fn the_health_check_reports_what_the_core_grading_decided() {
 }
 
 fn owned(index: u32, count: u32) -> Vec<u32> {
-    crate::config::instance::InstanceResolver::owned(8, count, index)
+    crate::config::instance::owned(8, count, index)
         .iter()
         .collect()
 }

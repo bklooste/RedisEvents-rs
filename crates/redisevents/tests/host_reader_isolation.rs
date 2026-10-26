@@ -114,7 +114,7 @@ async fn s21_a_parked_blocking_read_does_not_delay_the_shared_multiplexer() {
     let host_conn = redis.connect().await;
     let host = Streams::builder(host_conn)
         .keys(redis.keys())
-        .environment("Development")
+        .allow_untrimmed(true)
         .topic_options(&topic, volume(2))
         .topic(&topic)
         .consumer(&consumer)
@@ -226,7 +226,7 @@ async fn s21_reader_connection_survives_a_long_idle_and_resumes_immediately() {
     let recorder = Arc::new(RecordingHandler::new());
     let host = Streams::builder(redis.connect().await)
         .keys(redis.keys())
-        .environment("Development")
+        .allow_untrimmed(true)
         .topic_options(&topic, volume(1))
         .topic(&topic)
         .consumer(&consumer)

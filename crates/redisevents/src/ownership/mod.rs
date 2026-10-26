@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::config::instance::InstanceResolver;
+use crate::config::instance;
 
 /// The owner of one partition, as stored in the ownership hash.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -132,10 +132,10 @@ pub(crate) fn process_instance_id() -> Uuid {
 /// C# `ResolveInstanceId`: `POD_NAME`, else `<MachineName>#<STREAMS_INSTANCE_INDEX>`, else the
 /// process id. Like C#, the variables are tested for being non-empty, not trimmed.
 pub(crate) fn resolve_instance_id(environment: impl Fn(&str) -> Option<String>) -> Uuid {
-    if let Some(pod) = environment(InstanceResolver::POD_NAME_VARIABLE).filter(|v| !v.is_empty()) {
+    if let Some(pod) = environment(instance::POD_NAME_VARIABLE).filter(|v| !v.is_empty()) {
         return derive_instance_id(&pod);
     }
-    if let Some(index) = environment(InstanceResolver::INDEX_VARIABLE).filter(|v| !v.is_empty()) {
+    if let Some(index) = environment(instance::INDEX_VARIABLE).filter(|v| !v.is_empty()) {
         return derive_instance_id(&format!("{}#{index}", machine_name()));
     }
     process_instance_id()

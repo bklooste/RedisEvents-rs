@@ -1,8 +1,16 @@
-//! Instance identity and partition ownership (port of `Config/InstanceResolver.cs`). **Owner: A2.**
+//! Instance identity and partition ownership for Static mode.
 //!
-//! Precedence is strict: explicit [`InstanceOptions`] config, then the `STREAMS_INSTANCE_COUNT` /
-//! `STREAMS_INSTANCE_INDEX` environment variables, then the `StatefulSet` ordinal of `POD_NAME` (the
-//! count still comes from the environment), and finally `Count = 1, Index = 0`.
+//! [`InstanceIdentity::resolve`] takes each value from explicit [`InstanceOptions`] first, and only
+//! falls back to the environment for what is not configured:
+//!
+//! - `count`: [`InstanceOptions::count`], else `STREAMS_INSTANCE_COUNT`, else 1.
+//! - `index`: [`InstanceOptions::index`], else `STREAMS_INSTANCE_INDEX`, else the `StatefulSet`
+//!   ordinal of the pod name, else 0.
+//! - pod name: [`InstanceOptions::pod_name`], else `POD_NAME` (set it from the Kubernetes downward
+//!   API).
+//!
+//! These variable names are shared with the C# library, so a mixed deployment configures both
+//! the same way.
 //!
 //! Ambient inputs are never fatal: a malformed variable falls through to the next level and logs.
 //! Only explicit configuration throws.
@@ -33,7 +41,7 @@ pub enum InstanceSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct InstanceIdentity {
-    /// Total instances in the pool (always `>= 1` from [`InstanceResolver::resolve`]).
+    /// Total instances in the pool (always `>= 1` from [`InstanceIdentity::resolve`]).
     pub count: u32,
     /// This instance's zero-based index.
     pub index: u32,
@@ -41,7 +49,7 @@ pub struct InstanceIdentity {
     pub count_source: InstanceSource,
     /// Where `index` came from.
     pub index_source: InstanceSource,
-    /// The observed `POD_NAME`, or `None` when unset.
+    /// The pod name ([`InstanceOptions::pod_name`], else `POD_NAME`), or `None` when neither is set.
     pub pod_name: Option<String>,
 }
 
@@ -94,39 +102,37 @@ impl fmt::Display for PartitionRange {
     }
 }
 
-/// Resolves instance identity and the partition range this instance owns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InstanceResolver;
+/// Environment variable naming the total number of instances (shared with the C# library).
+pub const COUNT_VARIABLE: &str = "STREAMS_INSTANCE_COUNT";
+/// Environment variable naming this instance's index (shared with the C# library).
+pub const INDEX_VARIABLE: &str = "STREAMS_INSTANCE_INDEX";
+/// Environment variable carrying the Kubernetes pod name, via the downward API.
+pub const POD_NAME_VARIABLE: &str = "POD_NAME";
 
-impl InstanceResolver {
-    /// Environment variable naming the total number of instances.
-    pub const COUNT_VARIABLE: &'static str = "STREAMS_INSTANCE_COUNT";
-    /// Environment variable naming this instance's index.
-    pub const INDEX_VARIABLE: &'static str = "STREAMS_INSTANCE_INDEX";
-    /// Environment variable carrying the Kubernetes pod name (via the downward API).
-    pub const POD_NAME_VARIABLE: &'static str = "POD_NAME";
-
-    /// Resolves identity from `options` and the process environment.
+impl InstanceIdentity {
+    /// Resolves identity from `options`, falling back to the process environment for what they do
+    /// not set (see the [module docs](self)).
     ///
     /// # Errors
     ///
     /// [`Error::Config`] when explicit configuration is self-contradictory.
-    pub fn resolve_from_env(options: Option<&InstanceOptions>) -> Result<InstanceIdentity> {
+    pub fn from_env(options: Option<&InstanceOptions>) -> Result<Self> {
         Self::resolve(options, |name| std::env::var(name).ok())
     }
 
-    /// Resolves identity against a caller-supplied environment lookup, so tests need not mutate the
-    /// process environment. The lookup returns `None` for unset names.
+    /// [`InstanceIdentity::from_env`] against a caller-supplied environment lookup, so tests need
+    /// not mutate the process environment. The lookup returns `None` for unset names.
     ///
     /// # Errors
     ///
-    /// [`Error::Config`] when explicit configuration is self-contradictory (`Count` of zero, or an
-    /// `Index` not less than the configured `Count`).
+    /// [`Error::Config`] when explicit configuration is self-contradictory (`count` of zero, or an
+    /// `index` not less than the configured `count`).
     pub fn resolve(
         options: Option<&InstanceOptions>,
         environment: impl Fn(&str) -> Option<String>,
-    ) -> Result<InstanceIdentity> {
-        let pod_name = trimmed(environment(Self::POD_NAME_VARIABLE));
+    ) -> Result<Self> {
+        let pod_name = trimmed(options.and_then(|o| o.pod_name.clone()))
+            .or_else(|| trimmed(environment(POD_NAME_VARIABLE)));
 
         let (count, count_source) = resolve_count(options, &environment)?;
         let (index, index_source) = resolve_index(options, &environment, pod_name.as_deref());
@@ -137,12 +143,12 @@ impl InstanceResolver {
             && index >= count
         {
             return Err(Error::config(format!(
-                "Streams:Instances is invalid: Index {index} must be less than Count {count}. \
-                 Indexes are zero-based, so a Count of 2 permits indexes 0 and 1."
+                "instances is invalid: index {index} must be less than count {count}. \
+                 Indexes are zero-based, so a count of 2 permits indexes 0 and 1."
             )));
         }
 
-        Ok(InstanceIdentity {
+        Ok(Self {
             count,
             index,
             count_source,
@@ -151,132 +157,131 @@ impl InstanceResolver {
         })
     }
 
-    /// The contiguous balanced range of partitions owned by `index` out of `count`. Remainder
-    /// partitions go to the earlier instances, so the ranges tile `[0, partitions)` with no gap and
-    /// no overlap. An index at or beyond `count` owns nothing (a drifted pool).
-    ///
-    /// # Panics
-    ///
-    /// Panics when `count` is zero.
+    /// [`owned`] for this identity. Logs when this instance is beyond the declared count (its
+    /// partitions are consumed by nobody) or when partitions are fewer than instances (surplus
+    /// instances idle).
     #[must_use]
-    pub fn owned(partitions: u32, count: u32, index: u32) -> PartitionRange {
-        assert!(count >= 1, "instance count must be at least 1");
+    pub fn owned(&self, partitions: u32) -> PartitionRange {
+        let range = owned(partitions, self.count.max(1), self.index);
 
-        // A pod ordinal past the declared count owns nothing. Its partitions belong to nobody, which
-        // is the scale-up drift the ownership registry exists to surface.
-        if index >= count {
-            return PartitionRange {
-                start: partitions,
-                len: 0,
-            };
-        }
-
-        let per = partitions / count;
-        let rem = partitions % count;
-        PartitionRange {
-            start: (index * per) + index.min(rem),
-            len: per + u32::from(index < rem),
-        }
-    }
-
-    /// [`InstanceResolver::owned`] for a resolved identity. Logs when this instance is beyond the
-    /// declared count (its partitions are consumed by nobody) or when partitions are fewer than
-    /// instances (surplus instances idle).
-    #[must_use]
-    pub fn owned_for(partitions: u32, identity: &InstanceIdentity) -> PartitionRange {
-        let range = Self::owned(partitions, identity.count.max(1), identity.index);
-
-        if identity.index >= identity.count {
+        if self.index >= self.count {
             tracing::error!(
-                index = identity.index,
-                count = identity.count,
-                pod = identity.pod_name.as_deref().unwrap_or("(unset)"),
+                index = self.index,
+                count = self.count,
+                pod = self.pod_name.as_deref().unwrap_or("(unset)"),
                 "Streams: instance index {} is beyond instance count {} (pod {}); this instance owns no partitions and \
                  partitions assigned to it are consumed by nobody. Check that {} matches spec.replicas.",
-                identity.index,
-                identity.count,
-                identity.pod_name.as_deref().unwrap_or("(unset)"),
-                Self::COUNT_VARIABLE
+                self.index,
+                self.count,
+                self.pod_name.as_deref().unwrap_or("(unset)"),
+                COUNT_VARIABLE
             );
-        } else if partitions < identity.count {
+        } else if partitions < self.count {
             tracing::warn!(
                 partitions,
-                count = identity.count,
+                count = self.count,
                 "Streams: {partitions} partitions across {} instances leaves instances {partitions}..{} idle; surplus \
-                 instances own nothing. Reduce replicas or raise Partitions.",
-                identity.count,
-                identity.count - 1
+                 instances own nothing. Reduce replicas or raise partitions.",
+                self.count,
+                self.count - 1
             );
         }
 
         range
     }
 
-    /// Parses the `StatefulSet` ordinal from a pod name: the digits after the final `-`. Never fails.
-    /// A missing, empty or non-ordinal name (a Deployment's `svc-7d4f8b-x2k9p`, say) returns `None`,
-    /// so the caller falls through to the next precedence level.
-    #[must_use]
-    pub fn try_parse_pod_ordinal(pod_name: Option<&str>) -> Option<u32> {
-        let name = pod_name?.trim();
-        let dash = name.rfind('-')?;
-
-        // Require something before the dash and something after it.
-        if dash == 0 || dash == name.len() - 1 {
-            return None;
-        }
-
-        // Only digits: rejects signs, separators and whitespace (`svc-+3`, `svc- 3`). Overflow is
-        // a parse failure, not a wrap.
-        let suffix = &name[dash + 1..];
-        if !suffix.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        suffix.parse().ok()
-    }
-
-    /// The instance index that owns `partition` under the contiguous balanced rule.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `partition >= partitions` or `count` is zero.
-    #[must_use]
-    pub fn owner_of(partition: u32, partitions: u32, count: u32) -> u32 {
-        assert!(
-            partition < partitions,
-            "partition {partition} is outside 0..{partitions}"
-        );
-        assert!(count >= 1, "instance count must be at least 1");
-
-        let per = partitions / count;
-        let rem = partitions % count;
-
-        // The first `rem` instances hold `per + 1` partitions each; the rest hold `per`.
-        let fat = (per + 1) * rem;
-        if partition < fat {
-            partition / (per + 1)
-        } else {
-            rem + ((partition - fat) / per)
-        }
-    }
-
     /// The startup ownership line, e.g.
     /// `instance 0/2 (pod svc-0) owns partitions [0,1] of 4 | full map: 0->svc-0 1->svc-0 2->svc-1 3->svc-1`.
     #[must_use]
-    pub fn describe_ownership(partitions: u32, identity: &InstanceIdentity) -> String {
-        let count = identity.count.max(1);
-        let range = Self::owned(partitions, count, identity.index);
+    pub fn describe_ownership(&self, partitions: u32) -> String {
+        let count = self.count.max(1);
+        let range = owned(partitions, count, self.index);
 
         let mut line = format!(
             "instance {}/{} (pod {}) owns partitions {range} of {partitions} | full map:",
-            identity.index,
-            identity.count,
-            identity.pod_name.as_deref().unwrap_or("unknown"),
+            self.index,
+            self.count,
+            self.pod_name.as_deref().unwrap_or("unknown"),
         );
         for partition in 0..partitions {
-            let owner = Self::owner_of(partition, partitions, count);
-            let _ = write!(line, " {partition}->{}", pod_label(identity, owner));
+            let owner = owner_of(partition, partitions, count);
+            let _ = write!(line, " {partition}->{}", pod_label(self, owner));
         }
         line
+    }
+}
+
+/// The contiguous balanced range of partitions owned by `index` out of `count`. Remainder
+/// partitions go to the earlier instances, so the ranges tile `[0, partitions)` with no gap and
+/// no overlap. An index at or beyond `count` owns nothing (a drifted pool).
+///
+/// # Panics
+///
+/// Panics when `count` is zero.
+#[must_use]
+pub fn owned(partitions: u32, count: u32, index: u32) -> PartitionRange {
+    assert!(count >= 1, "instance count must be at least 1");
+
+    // A pod ordinal past the declared count owns nothing. Its partitions belong to nobody, which
+    // is the scale-up drift the ownership registry exists to surface.
+    if index >= count {
+        return PartitionRange {
+            start: partitions,
+            len: 0,
+        };
+    }
+
+    let per = partitions / count;
+    let rem = partitions % count;
+    PartitionRange {
+        start: (index * per) + index.min(rem),
+        len: per + u32::from(index < rem),
+    }
+}
+
+/// The `StatefulSet` ordinal of a pod name: the digits after the final `-`. An empty or
+/// non-ordinal name (a Deployment's `svc-7d4f8b-x2k9p`, say) returns `None`.
+#[must_use]
+pub fn pod_ordinal(pod_name: &str) -> Option<u32> {
+    let name = pod_name.trim();
+    let dash = name.rfind('-')?;
+
+    // Require something before the dash and something after it.
+    if dash == 0 || dash == name.len() - 1 {
+        return None;
+    }
+
+    // Only digits: rejects signs, separators and whitespace (`svc-+3`, `svc- 3`). Overflow is
+    // a parse failure, not a wrap.
+    let suffix = &name[dash + 1..];
+    if !suffix.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    suffix.parse().ok()
+}
+
+/// The instance index that owns `partition` under the contiguous balanced rule of [`owned`].
+///
+/// # Panics
+///
+/// Panics when `partition >= partitions` or `count` is zero.
+#[must_use]
+pub fn owner_of(partition: u32, partitions: u32, count: u32) -> u32 {
+    assert!(
+        partition < partitions,
+        "partition {partition} is outside 0..{partitions}"
+    );
+    assert!(count >= 1, "instance count must be at least 1");
+
+    let per = partitions / count;
+    let rem = partitions % count;
+
+    // The first `rem` instances hold `per + 1` partitions each; the rest hold `per`.
+    let fat = (per + 1) * rem;
+    if partition < fat {
+        partition / (per + 1)
+    } else {
+        rem + ((partition - fat) / per)
     }
 }
 
@@ -287,18 +292,18 @@ fn resolve_count(
     if let Some(configured) = options.and_then(|o| o.count) {
         if configured < 1 {
             return Err(Error::config(format!(
-                "Streams:Instances:Count is {configured}; it must be at least 1."
+                "instances.count is {configured}; it must be at least 1."
             )));
         }
         return Ok((configured, InstanceSource::Config));
     }
 
-    if let Some(raw) = trimmed(environment(InstanceResolver::COUNT_VARIABLE)) {
+    if let Some(raw) = trimmed(environment(COUNT_VARIABLE)) {
         match raw.parse::<u32>() {
             Ok(parsed) if parsed >= 1 => return Ok((parsed, InstanceSource::Environment)),
             _ => tracing::warn!(
                 "Streams: {} is {raw}, which is not a positive integer; falling back to a single instance owning every partition.",
-                InstanceResolver::COUNT_VARIABLE
+                COUNT_VARIABLE
             ),
         }
     }
@@ -315,17 +320,17 @@ fn resolve_index(
         return (configured, InstanceSource::Config);
     }
 
-    if let Some(raw) = trimmed(environment(InstanceResolver::INDEX_VARIABLE)) {
+    if let Some(raw) = trimmed(environment(INDEX_VARIABLE)) {
         if let Ok(parsed) = raw.parse::<u32>() {
             return (parsed, InstanceSource::Environment);
         }
         tracing::warn!(
             "Streams: {} is {raw}, which is not a non-negative integer; falling back to the pod ordinal.",
-            InstanceResolver::INDEX_VARIABLE
+            INDEX_VARIABLE
         );
     }
 
-    if let Some(ordinal) = InstanceResolver::try_parse_pod_ordinal(pod_name) {
+    if let Some(ordinal) = pod_name.and_then(pod_ordinal) {
         return (ordinal, InstanceSource::PodOrdinal);
     }
 
@@ -346,7 +351,7 @@ fn pod_label(identity: &InstanceIdentity, index: u32) -> String {
         if index == identity.index {
             return pod.to_owned();
         }
-        if InstanceResolver::try_parse_pod_ordinal(Some(pod)).is_some()
+        if pod_ordinal(pod).is_some()
             && let Some(dash) = pod.rfind('-')
         {
             return format!("{}{index}", &pod[..=dash]);
@@ -397,7 +402,7 @@ mod tests {
             let mut owner: Vec<Option<u32>> = vec![None; partitions as usize];
 
             for index in 0..count {
-                let range = InstanceResolver::owned(partitions, count, index);
+                let range = owned(partitions, count, index);
                 assert_eq!(range.iter().count(), range.len as usize);
 
                 for partition in range.iter() {
@@ -423,7 +428,7 @@ mod tests {
     fn owned_is_balanced_to_within_one_partition() {
         for (partitions, count) in TOPOLOGIES {
             let lengths: Vec<u32> = (0..count)
-                .map(|i| InstanceResolver::owned(partitions, count, i).len)
+                .map(|i| owned(partitions, count, i).len)
                 .collect();
 
             assert_eq!(lengths.iter().sum::<u32>(), partitions);
@@ -435,69 +440,45 @@ mod tests {
     fn owner_of_agrees_with_owned() {
         for (partitions, count) in TOPOLOGIES {
             for partition in 0..partitions {
-                let owner = InstanceResolver::owner_of(partition, partitions, count);
+                let owner = owner_of(partition, partitions, count);
 
                 assert!(owner < count);
-                assert!(InstanceResolver::owned(partitions, count, owner).contains(partition));
+                assert!(owned(partitions, count, owner).contains(partition));
             }
         }
     }
 
     #[test]
     fn owned_four_partitions_two_instances_splits_in_half() {
-        assert_eq!(
-            InstanceResolver::owned(4, 2, 0),
-            PartitionRange { start: 0, len: 2 }
-        );
-        assert_eq!(
-            InstanceResolver::owned(4, 2, 1),
-            PartitionRange { start: 2, len: 2 }
-        );
+        assert_eq!(owned(4, 2, 0), PartitionRange { start: 0, len: 2 });
+        assert_eq!(owned(4, 2, 1), PartitionRange { start: 2, len: 2 });
 
-        assert_eq!(
-            InstanceResolver::owned(4, 2, 0).iter().collect::<Vec<_>>(),
-            vec![0, 1]
-        );
-        assert_eq!(
-            InstanceResolver::owned(4, 2, 1).iter().collect::<Vec<_>>(),
-            vec![2, 3]
-        );
+        assert_eq!(owned(4, 2, 0).iter().collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(owned(4, 2, 1).iter().collect::<Vec<_>>(), vec![2, 3]);
     }
 
     #[test]
     fn owned_five_partitions_two_instances_remainder_goes_to_the_earlier_instance() {
-        assert_eq!(
-            InstanceResolver::owned(5, 2, 0),
-            PartitionRange { start: 0, len: 3 }
-        );
-        assert_eq!(
-            InstanceResolver::owned(5, 2, 1),
-            PartitionRange { start: 3, len: 2 }
-        );
+        assert_eq!(owned(5, 2, 0), PartitionRange { start: 0, len: 3 });
+        assert_eq!(owned(5, 2, 1), PartitionRange { start: 3, len: 2 });
 
-        assert_eq!(
-            InstanceResolver::owned(5, 2, 0).iter().collect::<Vec<_>>(),
-            vec![0, 1, 2]
-        );
-        assert_eq!(
-            InstanceResolver::owned(5, 2, 1).iter().collect::<Vec<_>>(),
-            vec![3, 4]
-        );
+        assert_eq!(owned(5, 2, 0).iter().collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(owned(5, 2, 1).iter().collect::<Vec<_>>(), vec![3, 4]);
     }
 
     #[test]
     fn owned_surplus_instances_own_nothing() {
-        assert!(InstanceResolver::owned(2, 4, 2).is_empty());
-        assert!(InstanceResolver::owned(2, 4, 3).is_empty());
-        assert_eq!(InstanceResolver::owned(2, 4, 3).iter().count(), 0);
-        assert_eq!(InstanceResolver::owned(2, 4, 3).to_string(), "[]");
+        assert!(owned(2, 4, 2).is_empty());
+        assert!(owned(2, 4, 3).is_empty());
+        assert_eq!(owned(2, 4, 3).iter().count(), 0);
+        assert_eq!(owned(2, 4, 3).to_string(), "[]");
     }
 
     #[test]
     fn owned_index_beyond_count_owns_nothing() {
         let identity = identity(2, 5, "svc-5");
 
-        assert!(InstanceResolver::owned_for(8, &identity).is_empty());
+        assert!(identity.owned(8).is_empty());
     }
 
     /// C# `Owned_RejectsInvalidArguments`. Negative partitions and indexes are unrepresentable
@@ -505,14 +486,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "at least 1")]
     fn owned_rejects_zero_count() {
-        let _ = InstanceResolver::owned(4, 0, 0);
+        let _ = owned(4, 0, 0);
     }
 
     #[test]
     fn describe_ownership_names_every_partitions_pod() {
         let identity = identity(2, 0, "svc-0");
 
-        let line = InstanceResolver::describe_ownership(4, &identity);
+        let line = identity.describe_ownership(4);
 
         assert_eq!(
             line,
@@ -523,23 +504,19 @@ mod tests {
     // ---------------------------------------------------------------- pod ordinal parsing
 
     #[test]
-    fn try_parse_pod_ordinal_parses_statefulset_names() {
+    fn pod_ordinal_parses_statefulset_names() {
         for (pod, expected) in [
             ("svc-0", 0),
             ("svc-12", 12),
             ("bet-processing-3", 3),
             ("svc--3", 3),
         ] {
-            assert_eq!(
-                InstanceResolver::try_parse_pod_ordinal(Some(pod)),
-                Some(expected),
-                "{pod}"
-            );
+            assert_eq!(pod_ordinal(pod), Some(expected), "{pod}");
         }
     }
 
     #[test]
-    fn try_parse_pod_ordinal_falls_through_on_non_ordinal_names() {
+    fn pod_ordinal_falls_through_on_non_ordinal_names() {
         for pod in [
             Some("svc-abc"),
             None,
@@ -553,11 +530,7 @@ mod tests {
             Some("svc-+3"),
             Some("svc-99999999999999999999"),
         ] {
-            assert_eq!(
-                InstanceResolver::try_parse_pod_ordinal(pod),
-                None,
-                "{pod:?}"
-            );
+            assert_eq!(pod.and_then(pod_ordinal), None, "{pod:?}");
         }
     }
 
@@ -570,7 +543,7 @@ mod tests {
             index: Some(2),
             ..InstanceOptions::default()
         };
-        let identity = InstanceResolver::resolve(
+        let identity = InstanceIdentity::resolve(
             Some(&options),
             env(&[
                 ("STREAMS_INSTANCE_COUNT", "8"),
@@ -589,7 +562,7 @@ mod tests {
 
     #[test]
     fn resolve_environment_beats_pod_ordinal() {
-        let identity = InstanceResolver::resolve(
+        let identity = InstanceIdentity::resolve(
             None,
             env(&[
                 ("STREAMS_INSTANCE_COUNT", "8"),
@@ -607,7 +580,7 @@ mod tests {
 
     #[test]
     fn resolve_pod_ordinal_beats_fallback() {
-        let identity = InstanceResolver::resolve(
+        let identity = InstanceIdentity::resolve(
             None,
             env(&[("STREAMS_INSTANCE_COUNT", "4"), ("POD_NAME", "svc-2")]),
         )
@@ -622,7 +595,7 @@ mod tests {
 
     #[test]
     fn resolve_nothing_configured_falls_back_to_single_instance_owning_everything() {
-        let identity = InstanceResolver::resolve(None, no_env).unwrap();
+        let identity = InstanceIdentity::resolve(None, no_env).unwrap();
 
         assert_eq!(identity.count, 1);
         assert_eq!(identity.index, 0);
@@ -631,9 +604,7 @@ mod tests {
         assert_eq!(identity.pod_name, None);
 
         assert_eq!(
-            InstanceResolver::owned_for(8, &identity)
-                .iter()
-                .collect::<Vec<_>>(),
+            identity.owned(8).iter().collect::<Vec<_>>(),
             (0..8).collect::<Vec<_>>()
         );
     }
@@ -641,7 +612,7 @@ mod tests {
     #[test]
     fn resolve_null_pod_name_falls_through_to_index_zero() {
         let identity =
-            InstanceResolver::resolve(None, env(&[("STREAMS_INSTANCE_COUNT", "3")])).unwrap();
+            InstanceIdentity::resolve(None, env(&[("STREAMS_INSTANCE_COUNT", "3")])).unwrap();
 
         assert_eq!(identity.index, 0);
         assert_eq!(identity.index_source, InstanceSource::Fallback);
@@ -650,7 +621,7 @@ mod tests {
 
     #[test]
     fn resolve_non_ordinal_pod_name_falls_through_to_index_zero() {
-        let identity = InstanceResolver::resolve(None, env(&[("POD_NAME", "svc-abc")])).unwrap();
+        let identity = InstanceIdentity::resolve(None, env(&[("POD_NAME", "svc-abc")])).unwrap();
 
         assert_eq!(identity.index, 0);
         assert_eq!(identity.index_source, InstanceSource::Fallback);
@@ -661,7 +632,7 @@ mod tests {
     fn resolve_malformed_count_variable_is_not_fatal() {
         for raw in ["nonsense", "0", "-2"] {
             let identity =
-                InstanceResolver::resolve(None, env(&[("STREAMS_INSTANCE_COUNT", raw)])).unwrap();
+                InstanceIdentity::resolve(None, env(&[("STREAMS_INSTANCE_COUNT", raw)])).unwrap();
 
             assert_eq!(identity.count, 1, "{raw}");
             assert_eq!(identity.count_source, InstanceSource::Fallback, "{raw}");
@@ -670,7 +641,7 @@ mod tests {
 
     #[test]
     fn resolve_malformed_index_variable_falls_through_to_pod_ordinal() {
-        let identity = InstanceResolver::resolve(
+        let identity = InstanceIdentity::resolve(
             None,
             env(&[
                 ("STREAMS_INSTANCE_COUNT", "4"),
@@ -690,7 +661,7 @@ mod tests {
             count: Some(2),
             ..InstanceOptions::default()
         };
-        let identity = InstanceResolver::resolve(
+        let identity = InstanceIdentity::resolve(
             Some(&options),
             env(&[("STREAMS_INSTANCE_INDEX", "1"), ("POD_NAME", "svc-0")]),
         )
@@ -709,10 +680,10 @@ mod tests {
             index: Some(2),
             ..InstanceOptions::default()
         };
-        let err = InstanceResolver::resolve(Some(&options), no_env)
+        let err = InstanceIdentity::resolve(Some(&options), no_env)
             .expect_err("index must be below count");
 
-        assert!(err.to_string().contains("Streams:Instances"), "{err}");
+        assert!(err.to_string().contains("instances"), "{err}");
     }
 
     #[test]
@@ -721,26 +692,34 @@ mod tests {
             count: Some(0),
             ..InstanceOptions::default()
         };
-        let err = InstanceResolver::resolve(Some(&options), no_env).expect_err("count of zero");
+        let err = InstanceIdentity::resolve(Some(&options), no_env).expect_err("count of zero");
 
-        assert!(err.to_string().contains("Streams:Instances:Count"), "{err}");
+        assert!(err.to_string().contains("instances.count"), "{err}");
     }
 
-    /// C# `Resolve_NegativeConfigValues_Throw`, Index half. A negative index is unrepresentable
-    /// (`u32`); the equivalent is a deserialize error in the binder.
     #[test]
-    fn resolve_negative_config_index_is_a_deserialize_error() {
-        let err = crate::config::binder::bind_json(
-            r#"{ "Streams": { "Consumers": [ { "Topic": "orders", "Instances": { "Index": -1 } } ] } }"#,
-        );
-        assert!(matches!(err, Err(Error::Config(_))));
+    fn explicit_pod_name_beats_the_environment() {
+        let options = InstanceOptions {
+            mode: crate::config::InstanceMode::Static,
+            pod_name: Some("svc-3".to_owned()),
+            ..InstanceOptions::default()
+        };
+        let identity = InstanceIdentity::resolve(
+            Some(&options),
+            env(&[("STREAMS_INSTANCE_COUNT", "4"), ("POD_NAME", "svc-1")]),
+        )
+        .unwrap();
+
+        assert_eq!(identity.pod_name.as_deref(), Some("svc-3"));
+        assert_eq!(identity.index, 3);
+        assert_eq!(identity.index_source, InstanceSource::PodOrdinal);
     }
 
     #[test]
     fn resolve_drifted_pool_from_ambient_sources_does_not_throw() {
         // Scale-down drift: pod ordinal 5 survives while the declared count is 2. This must be
         // reported by the ownership registry, not crash the process at startup.
-        let identity = InstanceResolver::resolve(
+        let identity = InstanceIdentity::resolve(
             None,
             env(&[("STREAMS_INSTANCE_COUNT", "2"), ("POD_NAME", "svc-5")]),
         )
@@ -748,12 +727,12 @@ mod tests {
 
         assert_eq!(identity.count, 2);
         assert_eq!(identity.index, 5);
-        assert!(InstanceResolver::owned_for(8, &identity).is_empty());
+        assert!(identity.owned(8).is_empty());
     }
 
     #[test]
     fn resolve_trims_whitespace_around_ambient_values() {
-        let identity = InstanceResolver::resolve(
+        let identity = InstanceIdentity::resolve(
             None,
             env(&[("STREAMS_INSTANCE_COUNT", " 4 "), ("POD_NAME", " svc-1 ")]),
         )

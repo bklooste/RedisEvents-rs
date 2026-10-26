@@ -1,4 +1,4 @@
-//! The Inventory write-side service. Reads `REDIS_URL` (else `Streams__ConnectionString`, else `redis://127.0.0.1:6379`) and
+//! The Inventory write-side service. Reads `REDIS_URL` (else `redis://127.0.0.1:6379/0`) and
 //! `PORT` (default 8080). Exits on SIGTERM or Ctrl+C after finishing in-flight requests.
 
 use std::error::Error;
@@ -16,7 +16,7 @@ const CONNECT_ATTEMPTS: u32 = 30;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let url = redis_url()?;
+    let url = redis_url();
     let port = match std::env::var("PORT") {
         Ok(port) => port.parse()?,
         Err(_) => DEFAULT_PORT,
@@ -36,21 +36,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// The Redis URL: `REDIS_URL` wins; else the C#-style `Streams__ConnectionString` (the same
-/// setting the C# runtime binds, translated by `Connection::url_from_options`); else localhost.
-fn redis_url() -> Result<String, redisevents::Error> {
-    if let Ok(url) = std::env::var("REDIS_URL") {
-        return Ok(url);
-    }
-    match std::env::var("Streams__ConnectionString") {
-        Ok(connection_string) => {
-            Connection::url_from_options(&redisevents::config::StreamOptions {
-                connection_string: Some(connection_string),
-                ..Default::default()
-            })
-        }
-        Err(_) => Ok("redis://127.0.0.1:6379".to_owned()),
-    }
+/// The Redis URL: `REDIS_URL`, else `redis://127.0.0.1:6379/0`.
+fn redis_url() -> String {
+    std::env::var("REDIS_URL")
+        .unwrap_or_else(|_| redisevents::config::StreamOptions::DEFAULT_REDIS_URL.to_owned())
 }
 
 /// Connects, retrying so the service can start before Redis is up (compose has no health gate).

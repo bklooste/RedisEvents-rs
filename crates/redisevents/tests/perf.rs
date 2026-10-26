@@ -263,8 +263,8 @@ async fn end_to_end_consume(
     let host = Streams::builder(redis.connect().await)
         .keys(redis.keys())
         .options(root)
-        // Trim=None (the C# benchmark's NoTrim) is only allowed in Development.
-        .environment("Development")
+        // trim = none (the C# benchmark's NoTrim) needs an explicit opt-in.
+        .allow_untrimmed(true)
         .topic(&topic)
         .options(consumer)
         .handler(Count(Arc::clone(&consumed)))

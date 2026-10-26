@@ -55,7 +55,7 @@ fn consumer_options(topic: &str, consumer: &str) -> ConsumerOptions {
 
 fn lease(ttl: u32, renew: u32) -> Option<InstanceOptions> {
     Some(InstanceOptions {
-        mode: Some(InstanceMode::Lease),
+        mode: InstanceMode::Lease,
         lease_ttl_seconds: ttl,
         lease_renew_seconds: renew,
         ..InstanceOptions::default()

@@ -62,7 +62,6 @@ impl Streams {
             conn,
             keys: None,
             options: StreamOptions::default(),
-            environment: None,
             registrations: Vec::new(),
         }
     }
@@ -73,7 +72,6 @@ pub struct StreamsBuilder {
     conn: Connection,
     keys: Option<Keys>,
     options: StreamOptions,
-    environment: Option<String>,
     registrations: Vec<Registration>,
 }
 
@@ -93,7 +91,7 @@ impl StreamsBuilder {
         self
     }
 
-    /// Replaces the whole configuration (the `Streams` section): topics, consumer defaults, the
+    /// Replaces the whole configuration ([`StreamOptions`]): topics, consumer defaults, the
     /// root consumer name. Call it before [`StreamsBuilder::topic`], which reads consumer entries
     /// from it.
     #[must_use]
@@ -108,15 +106,15 @@ impl StreamsBuilder {
         &self.options
     }
 
-    /// The host environment name used by validation (`Development` relaxes `Trim = None`).
-    /// Default: `STREAMS_ENVIRONMENT`, else `local`.
+    /// Permits topics with `trim = none` ([`StreamOptions::allow_untrimmed`]); validation refuses
+    /// them otherwise, because an untrimmed stream grows until Redis runs out of memory.
     #[must_use]
-    pub fn environment(mut self, name: impl Into<String>) -> Self {
-        self.environment = Some(name.into());
+    pub fn allow_untrimmed(mut self, allow: bool) -> Self {
+        self.options.allow_untrimmed = allow;
         self
     }
 
-    /// Sets (replaces) the options of one topic.
+    /// Sets (replaces) the options of one topic (`topics.<topic>`).
     #[must_use]
     pub fn topic_options(mut self, topic: impl Into<String>, options: TopicOptions) -> Self {
         self.options.topics.insert(topic.into(), options);
@@ -124,7 +122,7 @@ impl StreamsBuilder {
     }
 
     /// Starts a consumer registration on `topic`. Its options start from the first
-    /// `Streams:Consumers` entry for that topic, else the defaults.
+    /// `consumers` entry for that topic, else the defaults.
     #[must_use]
     pub fn topic(self, topic: impl Into<String>) -> ConsumerBuilder {
         let topic = topic.into();
@@ -155,17 +153,7 @@ impl StreamsBuilder {
     /// Redis fails during startup.
     pub async fn spawn(self) -> Result<StreamsHost> {
         let keys = self.keys.unwrap_or_else(Keys::from_env);
-        let environment = self
-            .environment
-            .unwrap_or_else(runtime::environment_from_env);
-        runtime::spawn(
-            self.conn,
-            keys,
-            self.options,
-            &environment,
-            self.registrations,
-        )
-        .await
+        runtime::spawn(self.conn, keys, self.options, self.registrations).await
     }
 }
 
@@ -178,8 +166,8 @@ pub struct ConsumerBuilder {
 }
 
 impl ConsumerBuilder {
-    /// The consumer name (owner of the position hash). Default: the options' `Consumer`, the root
-    /// `Streams:Consumer`, then the executable name.
+    /// The consumer name (owner of the position hash). Default: the options' `consumer`, the
+    /// root `consumer`, then the executable name.
     #[must_use]
     pub fn consumer(mut self, name: impl Into<String>) -> Self {
         self.options.consumer = Some(name.into());

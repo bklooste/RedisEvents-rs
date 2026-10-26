@@ -7,8 +7,7 @@ and the crates follow [Semantic Versioning](https://semver.org/).
 
 ### Changed (breaking): idiomatic Rust in the core, axum and test-support crates (0.3)
 
-The port was done too literally; Nothing written to or read from
-Redis changes; metric and span names are unchanged.
+The port was done too literally. Nothing written to or read from Redis changes; metric and span names are unchanged.
 
 - `Error::is_dont_ignore` is now `Error::is_blocking`. Descriptions and docs no longer say
   `DontIgnoreException` (the health description reads "blocked retrying a blocking error").
@@ -56,6 +55,40 @@ and span names); only the Rust API changed. Versions are now 0.3.
 - `redisevents-msgpack`: `MessagePackMsgExt::decode_msgpack` is removed; use
   `redisevents_msgpack::decode::<T>(msg.body())`.
 - Docs and log text no longer cite C# type names; "EventProjector:" log prefixes read "Projector:".
+
+### Changed (breaking): configuration and connection (0.3)
+
+Configuration is not part of the wire; these changes make it idiomatic Rust and change no byte in
+Redis (golden vectors, interop and the sample matrix are unchanged).
+
+- **Option structs are plain serde.** `StreamOptions` and everything under it deserialize with
+  `snake_case` field names and `snake_case` enum values (`async_batch`, `work_queue`, `lease`), from
+  any serde source. The PascalCase keys, case-insensitive key/enum matching and the `Streams`
+  section wrapper are gone, and so is `config::binder` (`bind_json`, `SECTION_NAME`,
+  `resolve_topic`, `resolve_consumer_name`, `validate`, `advise`). Use
+  `StreamOptions::{validate, advisories, topic, consumer_name}`. Error messages name fields by path
+  (`consumers[0].batch_size`, not `Streams:Consumers[0]:BatchSize`).
+- **`StreamsConfigurationAdvisor` is removed.** `options.advisories()` returns the lines;
+  `Advisory::log` emits one.
+- **Connection by URL.** `StreamOptions::connection_string` is replaced by `redis_url`
+  (`redis://` / `rediss://`), default `redis://127.0.0.1:6379/0` (was the C# `redis-db.infra:6379`).
+  `Connection::url_from_options` and `binder::to_redis_url` are removed; the StackExchange.Redis
+  translator survives as the explicit `connection::stackexchange::to_redis_url`.
+  `DEFAULT_CONNECTION_STRING`, `DEFAULT_SYNC_TIMEOUT_MS`, `resolve_sync_timeout_ms` and the
+  `block_ms < syncTimeout` rule (a StackExchange.Redis client limit) are removed.
+- **No environment names.** `StreamsBuilder::environment` is removed and `Trim = None` no longer
+  depends on `Development`: set `StreamOptions::allow_untrimmed` (or `StreamsBuilder::allow_untrimmed(true)`).
+  `STREAMS_ENVIRONMENT` now only feeds the key prefix.
+- **Legacy C# key dropped.** `ConsumerOptions::use_consumer_group` is removed; `delivery` is a plain
+  `DeliveryMode` (no `delivery()` accessor), and `InstanceOptions::mode` a plain `InstanceMode`
+  (no `mode()` accessor; the "count with no mode" migration message is gone).
+- **Instance identity.** `InstanceResolver` is replaced by `InstanceIdentity::{resolve, from_env,
+  owned, describe_ownership}` and the free functions `config::instance::{owned, owner_of,
+  pod_ordinal}` plus the `*_VARIABLE` constants. New `InstanceOptions::pod_name` is used before the
+  `POD_NAME` variable. The `STREAMS_INSTANCE_COUNT` / `STREAMS_INSTANCE_INDEX` / `POD_NAME`
+  fallbacks and the owner-value format in Redis are unchanged.
+- Samples read `REDIS_URL` only (no `Streams__ConnectionString`).
+- Version 0.3 (`version.json`, workspace `0.3.0`).
 
 ### Changed (behaviour)
 
