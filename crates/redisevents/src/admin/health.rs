@@ -14,6 +14,8 @@
 )]
 pub(crate) mod monitor;
 #[cfg(test)]
+mod stall_tests;
+#[cfg(test)]
 mod tests;
 
 use std::fmt::Write as _;
@@ -74,6 +76,10 @@ pub enum StreamHealthRule {
     OwnershipDegraded,
     /// Degraded: a caught-up consumer has received nothing past `degraded_silence_seconds`.
     Silent,
+    /// Unhealthy: a partition this instance owns has made no progress (no read returned, no batch
+    /// completed, or its position writes kept failing) past `unhealthy_stalled_seconds`, or the
+    /// host already stood it down for that reason (and in Lease mode gave its lease up).
+    Stalled,
 }
 
 /// The run state of a partition worker.
@@ -104,6 +110,10 @@ pub struct StreamPartitionHealth {
 /// A point-in-time snapshot of one partition.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "a flat snapshot: each flag is an independent fact the grading reads"
+)]
 pub struct StreamPartitionStatus {
     /// Topic.
     pub topic: String,
@@ -153,6 +163,12 @@ pub struct StreamPartitionStatus {
     pub is_behind_tail: bool,
     /// Milliseconds the partition has been behind the tail (`0` when not behind).
     pub behind_ms: f64,
+    /// Milliseconds without progress (`0` when the stall rule does not apply to the state).
+    pub stalled_ms: f64,
+    /// Threshold: no progress this long (s) is Unhealthy; `0` = off.
+    pub unhealthy_stalled_seconds: u32,
+    /// Whether the host stood this partition down because it stalled or its read loop faulted.
+    pub stood_down_stalled: bool,
 }
 
 /// Process-level facts a grade depends on, beyond the partitions.
@@ -222,6 +238,12 @@ pub struct StreamHealthDetails {
     /// How long it has been silent, in whole milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub silent_ms: Option<i64>,
+    /// The stalled partition, as `topic[partition]/consumer`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stalled_partition: Option<String>,
+    /// How long it has made no progress, in whole milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stalled_ms: Option<i64>,
 }
 
 /// A consumer that is caught up and receiving nothing.
@@ -414,6 +436,26 @@ pub fn evaluate(
         );
     }
 
+    if let Some(stuck) = tally.stalled {
+        data.stalled_partition = Some(describe(stuck));
+        data.stalled_ms = Some(ms_int(stuck.stalled_ms));
+        let description = if stuck.stood_down_stalled {
+            format!(
+                "Streams: partition {} was stood down by this instance ({}), and in Lease mode its lease handed to another instance. Whatever stopped it is still in this process; a restart rebuilds its Redis connections.",
+                describe(stuck),
+                stuck.stop_reason.as_deref().unwrap_or("stalled")
+            )
+        } else {
+            format!(
+                "Streams: partition {} has made no progress for {}s (no read returned and no batch completed, or its position writes kept failing), past its UnhealthyStalledSeconds of {}. It holds the partition and is not reading it; a restart hands the partition on.",
+                describe(stuck),
+                seconds(stuck.stalled_ms),
+                stuck.unhealthy_stalled_seconds
+            )
+        };
+        return unhealthy(StreamHealthRule::Stalled, description, data, Some(stuck));
+    }
+
     if let Some(wedged) = tally.blocked_too_long {
         return unhealthy(
             StreamHealthRule::BlockedTooLong,
@@ -583,6 +625,17 @@ pub fn evaluate(
 /// Grades one partition.
 #[must_use]
 pub fn grade(partition: &StreamPartitionStatus) -> StreamPartitionHealth {
+    // First: the one rule that needs nothing this process reads from Redis. `stalled_ms` is
+    // already 0 for the states the rule does not apply to.
+    if partition.stood_down_stalled
+        || (partition.unhealthy_stalled_seconds > 0
+            && partition.stalled_ms >= f64::from(partition.unhealthy_stalled_seconds) * 1000.0)
+    {
+        return StreamPartitionHealth {
+            status: StreamHealthStatus::Unhealthy,
+            rule: StreamHealthRule::Stalled,
+        };
+    }
     match partition.state {
         StreamPartitionRunState::Blocked => {
             return if partition.blocked_ms > f64::from(partition.unhealthy_block_seconds) * 1000.0 {
@@ -711,6 +764,7 @@ struct Tally<'a> {
     stopped_too_long: Option<&'a StreamPartitionStatus>,
     blocked_too_long: Option<&'a StreamPartitionStatus>,
     behind_too_long: Option<&'a StreamPartitionStatus>,
+    stalled: Option<&'a StreamPartitionStatus>,
     stop_reason: Option<&'a str>,
 }
 
@@ -735,6 +789,9 @@ impl<'a> Tally<'a> {
                 counts.behind += 1;
             }
             match grade(partition).rule {
+                StreamHealthRule::Stalled => {
+                    counts.stalled = counts.stalled.or(Some(partition));
+                }
                 StreamHealthRule::BlockedTooLong => {
                     counts.blocked_too_long = counts.blocked_too_long.or(Some(partition));
                 }

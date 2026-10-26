@@ -140,6 +140,14 @@ pub struct ConsumerOptions {
     pub unhealthy_behind_seconds: u32,
     /// Health: silent this long is degraded; `0` = off.
     pub degraded_silence_seconds: u32,
+    /// Health and ownership: a partition this instance reads that makes no progress for this
+    /// long is stalled (default 300; `0` = off). Progress is a read that returned (empty reads
+    /// count, so a quiet topic never stalls) or a batch the handler finished; a batch held longer
+    /// than this, or position writes failing for this long, count as no progress. A stalled
+    /// partition grades Unhealthy (rule `Stalled`), and in Lease mode the host also gives its lease
+    /// up so another instance reads it. Set it longer than the slowest batch the handler can
+    /// legitimately take.
+    pub unhealthy_stalled_seconds: u32,
     /// Ownership: how long a contested partition is tolerated.
     pub contested_grace_seconds: u32,
     /// Ownership: how often a contested partition is rechecked.
@@ -180,6 +188,7 @@ impl Default for ConsumerOptions {
             unhealthy_stopped_seconds: 300,
             unhealthy_behind_seconds: 0,
             degraded_silence_seconds: 0,
+            unhealthy_stalled_seconds: 300,
             contested_grace_seconds: 60,
             contested_recheck_seconds: 30,
             delivery: DeliveryMode::Ordered,

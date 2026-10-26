@@ -850,6 +850,19 @@ scale up without it and the new pods own nothing; scale down without it and the 
 partitions are read by nobody, silently. Change both together and watch `streams.partitions.unowned`
 return to 0.
 
+**A stuck Lease owner hands its partitions on.** The lease renews from its own timer and knows
+nothing about whether the read side behind it is reading, so a process whose handler never returns,
+or whose reads keep failing, would otherwise hold its partitions for as long as it stays up. When a
+partition stalls (`unhealthy_stalled_seconds`, see [Health](#health)), or its read loop fails with
+an error no back-off fixes, the host gives the lease up at once, keeps the partition in quarantine
+for `max(2 x lease_ttl_seconds, unhealthy_stalled_seconds)` (it neither renews nor claims it, and
+its presence field leaves the fair share, so another instance takes the whole topic if need be),
+and rebuilds its read side on fresh reader connections. Another instance claims the partition within
+a renew interval. When the quarantine ends the instance counts again and takes its fair share back,
+which on a lone instance is the partition itself. Health reports the partition Unhealthy (rule
+`Stalled`) until this instance reads it again or restarts. Under `Static` there is no lease to hand
+on: the partition is only graded Unhealthy, and the orchestrator's restart moves it.
+
 `Delivery: WorkQueue` (competing consumers over `XREADGROUP`) is refused at startup in this version.
 The default, `Ordered`, is one owner per partition, in order.
 
@@ -893,7 +906,7 @@ fn any_unhealthy() -> bool {
 assert!(!any_unhealthy());
 ```
 
-The rules, in short. **Unhealthy**: the connection is down, a partition has been blocked past
+The rules, in short. **Unhealthy**: the connection is down, a partition is **stalled** (below), a partition has been blocked past
 `UnhealthyBlockSeconds`, or it has been stopped past `UnhealthyStoppedSeconds` with entries waiting,
 or it is **behind the tail with a frozen position** for `UnhealthyBehindSeconds` (off by default).
 **Degraded**: a partition is blocked or stopped inside its threshold, lag is over
@@ -904,6 +917,21 @@ processed entry, so it is largest exactly when an idle consumer is caught up. A 
 drop in-flight batches and fix nothing. `UnhealthyBehindSeconds` is the one rule that is safe to
 restart on: there is provably an entry the consumer has not read, and its position has not moved for
 N seconds. Set N longer than the slowest batch.
+
+**Stalled** (`unhealthy_stalled_seconds`, default 300, `0` turns it off) is measured on the
+process's own clock and needs nothing from Redis, which is the point: behind-the-tail compares against
+a tail sampled over the same connection, so a consumer whose connection is timing out or garbled is
+never failed by it. Progress is a read that returned (an idle `Block` consumer completes an empty
+one every `block_ms`, so a quiet topic never stalls) or a batch the handler finished. A batch the
+handler has held longer than the threshold, reads failing on the transport for that long, or
+position writes failing for that long all count as no progress. A handler's `Block` retry is graded
+by `unhealthy_block_seconds` instead, and an `ErrorPolicy` stop as stopped. Set it longer than the
+slowest batch the handler can legitimately take: a batch that outlasts it looks exactly like a
+wedge. In Lease mode a stall also hands the partition on (see [Ownership](#ownership-lease-and-static)).
+
+An `XREAD` reply the client cannot read (the wrong shape, or ids that are not after the cursor sent)
+is treated as a garbled connection: the read loop drops that reader socket and backs off as for an
+outage, and the stall rule bounds the episode.
 
 Poll it from a health check or a watchdog, never from a message path: it allocates per partition.
 

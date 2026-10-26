@@ -223,8 +223,16 @@ impl ReaderConnection {
         }
     }
 
-    /// Sends one `XREAD` (the only command this type can send) and returns the raw reply.
-    async fn xread(&self, cmd: &redis::Cmd) -> Result<Value> {
+    /// Drops the live socket, so the next read opens a fresh one. Used when the host stands a
+    /// stalled partition down: whatever wedged may be the connection. Reads in flight on the old
+    /// socket finish normally.
+    pub(crate) fn recycle(&self) {
+        self.lock_slot().socket = None;
+    }
+
+    /// Sends one `XREAD` (the only command this type can send) and returns the raw reply with the
+    /// generation of the socket it came over.
+    async fn xread(&self, cmd: &redis::Cmd) -> Result<(Value, u64)> {
         let (mut socket, generation) = self.socket().await?;
         // Discards the socket if this future is dropped before the reply arrives (see the module
         // docs, "Cancellation").
@@ -236,7 +244,7 @@ impl ReaderConnection {
         let reply = cmd.query_async::<Value>(&mut socket).await;
         guard.armed = false;
         match reply {
-            Ok(v) => Ok(v),
+            Ok(v) => Ok((v, generation)),
             Err(e) => {
                 if e.is_io_error() || e.is_connection_dropped() || e.is_unrecoverable_error() {
                     self.discard(generation);
@@ -472,19 +480,33 @@ impl Fetch {
         {
             self.reads_issued += 1;
         }
-        let reply = match &self.source {
+        let (reply, socket) = match &self.source {
             Source::Block(reader) => {
                 let reader = reader.clone();
                 let cmd = self.command(Some(reader.block_ms()));
-                reader.xread(&cmd).await?
+                let (reply, generation) = reader.xread(&cmd).await?;
+                (reply, Some((reader, generation)))
             }
             Source::Poll { shared, .. } => {
                 let mut shared = shared.clone();
                 let cmd = self.command(None);
-                cmd.query_async::<Value>(&mut shared).await?
+                (cmd.query_async::<Value>(&mut shared).await?, None)
             }
         };
-        let batches = self.accept(reply)?;
+        let batches = match self.accept(reply) {
+            Ok(batches) => batches,
+            Err(e) => {
+                // A reply that does not answer the read sent is evidence the connection's replies
+                // have slipped against its requests: retrying on the same socket would only fetch
+                // more replies meant for other reads, so the next read opens a fresh one.
+                if is_unreadable_reply(&e)
+                    && let Some((reader, generation)) = socket
+                {
+                    reader.discard(generation);
+                }
+                return Err(e);
+            }
+        };
         if let Source::Poll {
             max_idle_delay_ms,
             idle_delay_ms,
@@ -506,10 +528,27 @@ impl Fetch {
         Ok(batches)
     }
 
-    /// Parses and decodes `reply`, then advances the cursors. Nothing moves on an error.
+    /// Parses, validates and decodes `reply`, then advances the cursors. Nothing moves on an
+    /// error. Every slice's ids must be strictly after the cursor sent and ascending, or the reply
+    /// is not the answer to this read.
     fn accept(&mut self, reply: Value) -> Result<Vec<StreamBatch>> {
         let keys: Vec<&[u8]> = self.cursors.iter().map(|c| c.key.as_bytes()).collect();
         let slices = parse_all(reply, &keys)?;
+        for slice in &slices {
+            let SliceKey::Requested(slot) = slice.key else {
+                continue;
+            };
+            let mut previous = self.cursors[slot].after;
+            for entry in &slice.entries {
+                if entry.id <= previous {
+                    return Err(malformed(&format!(
+                        "entry {} of stream '{}' is not after {previous}, the read's cursor or the entry before it",
+                        entry.id, self.cursors[slot].key
+                    )));
+                }
+                previous = entry.id;
+            }
+        }
         let mut batches = Vec::with_capacity(slices.len());
         let mut foreign = 0usize;
         for slice in slices {
@@ -600,10 +639,32 @@ pub(crate) struct Slice {
     pub(crate) entries: Vec<RawEntry>,
 }
 
+/// The marker an [`Error::Transport`] carries when an `XREAD` reply could not be read: the
+/// signature of a garbled or desynchronised connection, not of anything in the stream. The read
+/// loop waits it out like an outage (C# #52), and a blocking fetch opens a fresh socket.
+#[derive(Debug)]
+pub(crate) struct UnreadableReply;
+
+impl std::fmt::Display for UnreadableReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the XREAD reply did not answer the read that was sent")
+    }
+}
+
+impl std::error::Error for UnreadableReply {}
+
+/// Whether `error` is a reply this client could not read (see [`UnreadableReply`]).
+pub(crate) fn is_unreadable_reply(error: &Error) -> bool {
+    matches!(error, Error::Transport { source: Some(source), .. } if source.is::<UnreadableReply>())
+}
+
 fn malformed(detail: &str) -> Error {
-    Error::transport(format!(
-        "Streams: the XREAD reply was not in the expected shape — {detail}. Expected '[[streamKey, [[id, [field, value, ...]], ...]], ...]' (RESP2) or the equivalent map (RESP3). Refusing to guess, because a mis-parsed reply would leave the read cursor unmoved and spin the reader."
-    ))
+    Error::transport_with(
+        format!(
+            "Streams: the XREAD reply was not in the expected shape — {detail}. Expected '[[streamKey, [[id, [field, value, ...]], ...]], ...]' (RESP2) or the equivalent map (RESP3). Nothing is skipped: the cursor stays put and the read is retried, on a fresh reader connection in block mode."
+        ),
+        UnreadableReply,
+    )
 }
 
 /// Strips a RESP3 attribute wrapper.

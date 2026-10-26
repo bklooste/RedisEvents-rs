@@ -211,6 +211,21 @@ pub(crate) trait PositionSink: Send + Sync + 'static {
     /// `partition`. Health hook: the host forwards it to the partition's monitor. Nothing by default.
     fn blocked(&self, _partition: u32, _blocked: bool) {}
 
+    /// Reads covering `partition` are failing on the transport and the read loop is retrying.
+    /// Health hook: blocked, but unlike a handler's block the stall clock keeps running. Defaults
+    /// to [`blocked`](Self::blocked).
+    fn read_failing(&self, partition: u32) {
+        self.blocked(partition, true);
+    }
+
+    /// A read covering `partition` returned (with or without entries). Health hook: progress for
+    /// the stall clock. Nothing by default.
+    fn fetched(&self, _partition: u32) {}
+
+    /// The handler was handed a batch of `partition` (`true`) or is done with it (`false`).
+    /// Health hook: the stall clock's in-flight timer. Nothing by default.
+    fn busy(&self, _partition: u32, _busy: bool) {}
+
     /// `partition` stood down on a handler failure (`StopPartition` / `Fail`). Health hook, called at the failure so the state is visible before the worker
     /// exits. Nothing by default.
     fn stopped(&self, _partition: u32, _reason: &str) {}

@@ -18,6 +18,7 @@ publish --topic T --partitions N --key K [--key K2 ...] --type TYPE --body-b64 B
         [--header k=v ...] [--correlation C] [--traceparent TP] [--count N] [--seq]
         [--batch | --buffered] [--no-warmup]
 consume --topic T --consumer C --partitions N --expect N --timeout SECONDS
+        [--lease-ttl S [--lease-renew S]] [--stall-seconds N] [--wedge]
 positions --topic T --consumer C
 admin-reset --topic T --consumer C [--partition P] --to-id ID
 meta --topic T
@@ -47,6 +48,7 @@ and same-language pairs are the `baseline`. A pair is SKIPPED when a host return
 | --- | --- | --- |
 | G1/G2 | `keyed_publish_{1,4,7,16}_partitions`, `headers_correlation_traceparent`, `optional_fields_omitted`, `unicode_empty_long_keys`, `batch_publish`, `buffered_publish`, `positions_resume`, `partition_grow_refuse_shrink`, `codec_version_guard` | publish (B1..), consume (C4), positions, meta |
 | G3 | `admin_reset` (pair = admin language x consumer language) | admin-reset (D1, Rust side implemented), positions, consume |
+| ownership | `stalled_owner_handover` (pair = stalled owner's language x rival's language): a Lease owner whose handler never returns (`--wedge`) gives its leases up after `--stall-seconds` and leaves the fair share, so the rival reads both partitions | consume with the stall flags. A C# host whose RedisEvents predates the stall rule exits 3 and the pair is skipped |
 | G4, G5 | not yet: JSON/MessagePack/LZ4 payloads, outbox/ES (E1, E3); the CQRS-ES sample matrix runs separately (E5d) | later WPs add verbs/scenarios |
 
 `buffered_publish_cold_order` is an expected failure (XFAIL): a cold C# `BufferedStreamPublisher` reorders

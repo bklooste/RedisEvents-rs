@@ -19,7 +19,9 @@ use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use redisevents::Connection;
 use redisevents::admin::stream_admin::{ResetOptions, ResetTarget, StreamAdmin};
-use redisevents::config::{ConsumerOptions, ProducerOptions, StreamOptions, TopicOptions};
+use redisevents::config::{
+    ConsumerOptions, InstanceMode, InstanceOptions, ProducerOptions, StreamOptions, TopicOptions,
+};
 use redisevents::consumer::Streams;
 use redisevents::producer::{
     BufferedPublisher, BufferedStreamPublisher, PublishOptions, Publisher, StreamPublisher,
@@ -80,6 +82,23 @@ struct PublishArgs {
     no_warmup: bool,
 }
 
+/// The stalled-owner scenario's knobs on `consume`.
+#[derive(clap::Args, Clone, Copy, Default)]
+struct StallArgs {
+    /// Lease mode with this lease TTL (seconds).
+    #[arg(long)]
+    lease_ttl: Option<u32>,
+    /// The lease renew interval (seconds), with `--lease-ttl`.
+    #[arg(long, default_value_t = 1)]
+    lease_renew: u32,
+    /// `unhealthy_stalled_seconds`; also shortens the shutdown budget to 1 s.
+    #[arg(long)]
+    stall_seconds: Option<u32>,
+    /// The handler never returns (and ignores its token). Prints `{"event":"wedged"}` per batch.
+    #[arg(long)]
+    wedge: bool,
+}
+
 #[derive(Subcommand)]
 enum Verb {
     /// Publish messages to a topic.
@@ -97,6 +116,8 @@ enum Verb {
         /// Seconds to wait for `--expect` messages.
         #[arg(long, default_value_t = 30)]
         timeout: u32,
+        #[command(flatten)]
+        stall: StallArgs,
     },
     /// Print the stored positions of a consumer.
     Positions {
@@ -148,7 +169,16 @@ fn main() -> ExitCode {
             partitions,
             expect,
             timeout,
-        } => run_consume(redis, topic, consumer, *partitions, *expect, *timeout),
+            stall,
+        } => run_consume(
+            redis,
+            topic,
+            consumer,
+            *partitions,
+            *expect,
+            *timeout,
+            *stall,
+        ),
         Verb::Positions { topic, consumer } => run_positions(redis, topic, consumer),
     }
 }
@@ -379,6 +409,7 @@ fn run_admin_reset(
 
 /// Prints one JSON line per delivered message, and signals when `expect` were seen.
 struct Emitter {
+    wedge: bool,
     seen: AtomicU32,
     expect: u32,
     reached: Notify,
@@ -387,6 +418,15 @@ struct Emitter {
 impl BatchHandler for Emitter {
     #[allow(clippy::unused_async_trait_impl)] // the trait's shape
     async fn handle_batch(&self, batch: &[StreamMsg], _ctx: &PartitionContext) -> HandleResult {
+        if self.wedge {
+            if let Some(first) = batch.first() {
+                println!(
+                    "{}",
+                    serde_json::json!({"event": "wedged", "partition": first.partition()})
+                );
+            }
+            std::future::pending::<()>().await;
+        }
         let mut out = std::io::stdout().lock();
         for m in batch {
             let headers: Vec<[String; 2]> = m
@@ -427,9 +467,11 @@ fn run_consume(
     partitions: u32,
     expect: u32,
     timeout: u32,
+    stall: StallArgs,
 ) -> ExitCode {
     let url = redis_url(redis);
     let emitter = Arc::new(Emitter {
+        wedge: stall.wedge,
         seen: AtomicU32::new(0),
         expect,
         reached: Notify::new(),
@@ -446,12 +488,25 @@ fn run_consume(
                 ..TopicOptions::default()
             },
         );
-        options.consumers.push(ConsumerOptions {
+        let mut consumer_options = ConsumerOptions {
             topic: topic.to_owned(),
             consumer: Some(consumer.to_owned()),
             persist_interval_ms: 100,
             ..ConsumerOptions::default()
-        });
+        };
+        if let Some(ttl) = stall.lease_ttl {
+            consumer_options.instances = Some(InstanceOptions {
+                mode: InstanceMode::Lease,
+                lease_ttl_seconds: ttl,
+                lease_renew_seconds: stall.lease_renew,
+                ..InstanceOptions::default()
+            });
+        }
+        if let Some(seconds) = stall.stall_seconds {
+            consumer_options.unhealthy_stalled_seconds = seconds;
+            consumer_options.shutdown_timeout_seconds = 1;
+        }
+        options.consumers.push(consumer_options);
         let host = Streams::builder(conn)
             .options(options)
             .topic(topic)

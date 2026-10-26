@@ -65,6 +65,7 @@ fn thresholds(
         unhealthy_stopped_seconds,
         unhealthy_behind_seconds,
         degraded_silence_seconds: 0,
+        unhealthy_stalled_seconds: 0,
     }
 }
 
@@ -663,6 +664,9 @@ fn a_hand_built_snapshot_grades_without_the_new_members_and_is_never_behind() {
         tail_unchanged_ms: -1.0,
         is_behind_tail: false,
         behind_ms: 0.0,
+        stalled_ms: 0.0,
+        unhealthy_stalled_seconds: 0,
+        stood_down_stalled: false,
     };
 
     assert_eq!(
@@ -745,7 +749,7 @@ fn process_level_facts_come_through_the_context() {
 // ------------------------------------------------------------------ process registry
 
 /// Serialises the tests that touch the process-wide monitor registry and ownership registry.
-async fn registry_guard() -> tokio::sync::MutexGuard<'static, ()> {
+pub(super) async fn registry_guard() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     LOCK.lock().await
 }
