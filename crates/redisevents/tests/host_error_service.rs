@@ -6,7 +6,7 @@
 //! The Rust worker uses the built-in [`BLOCK_BACKOFF`] ladder (no test override), so the block test
 //! waits through real back-off steps.
 //!
-//! Not ported here, see the PR: S18 (both) need `Delivery = WorkQueue`, which the host refuses; S20
+//! S18 (both, `Delivery = WorkQueue`) is in `host_work_queue.rs`. Not ported here, see the PR: S20
 //! needs to pause the container, which the fixture does not expose. Skips without Redis. Needs the C4
 //! host: ignored until it lands.
 

@@ -230,9 +230,10 @@ impl ReaderConnection {
         self.lock_slot().socket = None;
     }
 
-    /// Sends one `XREAD` (the only command this type can send) and returns the raw reply with the
-    /// generation of the socket it came over.
-    async fn xread(&self, cmd: &redis::Cmd) -> Result<(Value, u64)> {
+    /// Sends one read — the `XREAD` that [`Fetch`] builds, or the `XREADGROUP` of the work-queue
+    /// fetch (`consumer::work_queue`), the only two commands sent here — and returns the raw reply
+    /// with the generation of the socket it came over.
+    pub(crate) async fn xread(&self, cmd: &redis::Cmd) -> Result<(Value, u64)> {
         let (mut socket, generation) = self.socket().await?;
         // Discards the socket if this future is dropped before the reply arrives (see the module
         // docs, "Cancellation").
@@ -658,7 +659,7 @@ pub(crate) fn is_unreadable_reply(error: &Error) -> bool {
     matches!(error, Error::Transport { source: Some(source), .. } if source.is::<UnreadableReply>())
 }
 
-fn malformed(detail: &str) -> Error {
+pub(crate) fn malformed(detail: &str) -> Error {
     Error::transport_with(
         format!(
             "Streams: the XREAD reply was not in the expected shape — {detail}. Expected '[[streamKey, [[id, [field, value, ...]], ...]], ...]' (RESP2) or the equivalent map (RESP3). Nothing is skipped: the cursor stays put and the read is retried, on a fresh reader connection in block mode."
@@ -668,7 +669,7 @@ fn malformed(detail: &str) -> Error {
 }
 
 /// Strips a RESP3 attribute wrapper.
-fn unwrap(v: Value) -> Value {
+pub(crate) fn unwrap(v: Value) -> Value {
     match v {
         Value::Attribute { data, .. } => unwrap(*data),
         other => other,
@@ -730,7 +731,7 @@ fn key_bytes(v: &Value) -> Option<&[u8]> {
     }
 }
 
-fn into_bytes(v: Value) -> Option<Bytes> {
+pub(crate) fn into_bytes(v: Value) -> Option<Bytes> {
     match unwrap(v) {
         Value::BulkString(b) => Some(Bytes::from(b)),
         Value::SimpleString(s) => Some(Bytes::from(s.into_bytes())),
@@ -741,6 +742,12 @@ fn into_bytes(v: Value) -> Option<Bytes> {
 
 /// Parses one stream's entries array `[[id, [field, value, …]], …]`.
 fn parse_entries(entries: Value) -> Result<Vec<RawEntry>> {
+    parse_entry_list(entries, false)
+}
+
+/// [`parse_entries`], optionally accepting a list whose entries are all nil (an `XAUTOCLAIM`
+/// reply on a server that reports deleted entries as nil, where nothing being left is legitimate).
+pub(crate) fn parse_entry_list(entries: Value, allow_all_nil: bool) -> Result<Vec<RawEntry>> {
     let Value::Array(items) = unwrap(entries) else {
         return Ok(Vec::new());
     };
@@ -788,7 +795,7 @@ fn parse_entries(entries: Value) -> Result<Vec<RawEntry>> {
             fields: parse_fields(fields)?,
         });
     }
-    if out.is_empty() {
+    if out.is_empty() && !allow_all_nil {
         return Err(malformed(&format!(
             "all {total} entries in the reply were nil, leaving the read cursor with nowhere to advance to"
         )));

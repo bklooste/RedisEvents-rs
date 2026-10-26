@@ -410,6 +410,136 @@ def stalled_owner_handover(ctx: Ctx):
         stuck.wait()
 
 
+def _xinfo_rows(rows) -> list[dict[str, object]]:
+    out = []
+    for r in rows or []:
+        out.append({r[i].decode(): r[i + 1] for i in range(0, len(r), 2)})
+    return out
+
+
+def _wq_members(ctx: Ctx, key: str, group: str) -> set[str]:
+    try:
+        rows = ctx.redis.call("XINFO", "CONSUMERS", key, group)
+    except RuntimeError:  # NOGROUP: nobody has created it yet
+        return set()
+    return {r["name"].decode() for r in _xinfo_rows(rows)}
+
+
+def _wq_pending(ctx: Ctx, key: str, group: str) -> int:
+    try:
+        return int(ctx.redis.call("XPENDING", key, group)[0])
+    except RuntimeError:
+        return 0
+
+
+def _wq_drained(ctx: Ctx, key: str, group: str) -> bool:
+    """Every entry delivered (lag 0) and acknowledged (PEL empty)."""
+    try:
+        [g] = [g for g in _xinfo_rows(ctx.redis.call("XINFO", "GROUPS", key)) if g["name"].decode() == group]
+    except (RuntimeError, ValueError):
+        return False
+    return g.get("lag") == 0 and int(g["pending"]) == 0
+
+
+def _collect(proc: subprocess.Popen) -> list[dict]:
+    proc.kill()
+    out, _ = proc.communicate(timeout=30)
+    return [json.loads(ln) for ln in out.splitlines() if ln.strip().startswith("{")]
+
+
+WQ = ["--delivery", "work_queue"]
+
+
+@scenario("work_queue_competing_consumers", gate="work_queue")
+def work_queue_competing(ctx: Ctx):
+    # Here the pair is (first member's language, second member's language): two members of ONE
+    # consumer group (group = consumer name, member = POD_NAME) compete on the same streams.
+    topic, group, n = ctx.topic("wqsplit"), "g", 4
+    keys = [ctx.stream_key(topic, p) for p in range(n)]
+    pods = {"a": f"wq-a-{ctx.tag}x", "b": f"wq-b-{ctx.tag}x"}
+    args = ["--topic", topic, "--consumer", group, "--partitions", str(n), "--expect", "1000000",
+            "--timeout", "120", "--batch-size", "5", "--delay-ms", "20", *WQ]
+    procs = {"a": ctx.p.spawn("consume", *args, env={"POD_NAME": pods["a"]}),
+             "b": ctx.c.spawn("consume", *args, env={"POD_NAME": pods["b"]})}
+    try:
+        deadline = time.time() + 45
+        while not all(_wq_members(ctx, k, group) >= set(pods.values()) for k in keys):
+            for who, pr in procs.items():
+                if pr.poll() is not None:
+                    if pr.returncode == NOT_IMPLEMENTED:
+                        raise Skip(f"{(ctx.p if who == 'a' else ctx.c).lang} consume --delivery work_queue")
+                    raise AssertionError(f"member {who} exited {pr.returncode} before joining the group")
+            check(time.time() < deadline, "both members never joined every partition's group")
+            time.sleep(0.2)
+        ctx.publish(ctx.p, topic, n, [f"key-{i}" for i in range(20)], "--seq", count=10)
+        deadline = time.time() + 60
+        while not all(_wq_drained(ctx, k, group) for k in keys):
+            check(time.time() < deadline, "the group never drained (undelivered or unacknowledged entries)")
+            time.sleep(0.2)
+        time.sleep(0.5)
+    finally:
+        lines = {who: _collect(pr) for who, pr in procs.items()}
+    got = {who: [m["id"] + "@" + str(m["partition"]) for m in ctx.messages(ls)] for who, ls in lines.items()}
+    every = got["a"] + got["b"]
+    published = {eid + "@" + str(p) for p in range(n) for eid, _ in ctx.redis.xrange(keys[p])}
+    check(len(published) == 200, f"published {len(published)}")
+    check(len(every) == len(set(every)), f"{len(every) - len(set(every))} entries processed twice")
+    check(set(every) == published, f"{len(published - set(every))} entries never processed")
+    check(got["a"] and got["b"], f"one member did all the work: a={len(got['a'])} b={len(got['b'])}")
+    for k in keys:  # the consumer-group wire contract, as Redis sees it
+        groups = [g["name"].decode() for g in _xinfo_rows(ctx.redis.call("XINFO", "GROUPS", k))]
+        check(groups == [group], f"groups on {k}: {groups}")
+        check(_wq_members(ctx, k, group) == set(pods.values()), f"members on {k}: {_wq_members(ctx, k, group)}")
+    check(ctx.redis.hgetall(f"{ctx.prefix}p:{{{topic}}}:{group}") == {}, "a position hash was written")
+
+
+@scenario("work_queue_dead_member_claimed", gate="work_queue")
+def work_queue_dead_member(ctx: Ctx):
+    # Pair = (dying member's language, survivor's language). The first member takes the entries and
+    # dies (SIGKILL, handler wedged) without acknowledging; after the 30 s claim threshold the other
+    # language's member claims them with XAUTOCLAIM and processes each exactly once.
+    topic, group = ctx.topic("wqclaim"), "g"
+    key = ctx.stream_key(topic, 0)
+    common = ["--topic", topic, "--consumer", group, "--partitions", "1", *WQ]
+    ctx.publish(ctx.p, topic, 1, ["k"], "--seq", count=10)
+    doomed = ctx.p.spawn("consume", *common, "--expect", "1000", "--timeout", "120", "--wedge",
+                         env={"POD_NAME": f"wq-doomed-{ctx.tag}x"})
+    try:
+        deadline = time.time() + 45
+        while _wq_pending(ctx, key, group) < 10:
+            if doomed.poll() is not None:
+                if doomed.returncode == NOT_IMPLEMENTED:
+                    raise Skip(f"{ctx.p.lang} consume --delivery work_queue")
+                raise AssertionError(f"the doomed member exited {doomed.returncode}")
+            check(time.time() < deadline, "the doomed member never took the entries")
+            time.sleep(0.2)
+        taken = time.time()
+    finally:
+        _collect(doomed)
+    rows = ctx.redis.call("XPENDING", key, group)
+    check([c[0].decode() for c in rows[3]] == [f"wq-doomed-{ctx.tag}x"], f"PEL owners: {rows[3]}")
+    # The survivor runs until the PEL is empty (it is not stopped on its 10th message: a host
+    # stopping mid-batch may legitimately leave that batch unacknowledged, and redelivered).
+    survivor = ctx.c.spawn("consume", *common, "--expect", "1000", "--timeout", "120",
+                           env={"POD_NAME": f"wq-survivor-{ctx.tag}x"})
+    try:
+        deadline = time.time() + 75
+        while _wq_pending(ctx, key, group) != 0:
+            if survivor.poll() is not None:
+                raise AssertionError(f"the survivor exited {survivor.returncode}")
+            check(time.time() < deadline, "the survivor never claimed and acknowledged the entries")
+            time.sleep(0.2)
+        claimed_after = time.time() - taken
+        time.sleep(0.5)
+    finally:
+        lines = _collect(survivor)
+    ids = [m["id"] for m in ctx.messages(lines)]
+    want = [eid for eid, _ in ctx.redis.xrange(key)]
+    check(sorted(ids) == sorted(want), f"survivor got {len(ids)} of {len(want)} (dupes: {len(ids) - len(set(ids))})")
+    # Claimed no earlier than the threshold after delivery: neither language steals early.
+    check(claimed_after >= 29, f"claimed after {claimed_after:.1f}s, before the 30 s threshold")
+
+
 # --------------------------------------------------------------------------------- main
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

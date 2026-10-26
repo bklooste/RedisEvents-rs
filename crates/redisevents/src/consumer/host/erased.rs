@@ -7,14 +7,38 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::consumer::fetch::Fetch;
+use crate::consumer::fetch::{Fetch, StreamBatch};
 use crate::consumer::handler::BatchHandler;
 use crate::consumer::shared::{BoxFuture, PartitionStop, PositionSink, ResetSignal};
-use crate::consumer::worker::{PartitionSlot, Worker, WorkerConfig, WorkerError};
+use crate::consumer::work_queue::WorkQueueFetch;
+use crate::consumer::worker::{FetchSource, PartitionSlot, Worker, WorkerConfig, WorkerError};
 use crate::error::Result;
 use crate::positions::flusher::{FlusherOptions, PositionFlusher};
 use crate::positions::{NullPositionStore, PositionStore, RedisPositionStore};
 use crate::wire::StreamId;
+
+/// What one worker reads from: the ordered `XREAD` fetch (C1) or the work-queue group fetch (C6).
+pub(crate) enum ReadSource {
+    Stream(Fetch),
+    Group(WorkQueueFetch),
+}
+
+impl FetchSource for ReadSource {
+    async fn fetch(&mut self) -> Result<Vec<StreamBatch>> {
+        match self {
+            Self::Stream(f) => f.fetch().await,
+            Self::Group(g) => g.fetch().await,
+        }
+    }
+
+    fn seek(&mut self, partition: u32, after: StreamId) -> bool {
+        match self {
+            Self::Stream(f) => f.seek(partition, after),
+            // Redis owns a group's cursor; there is no reset marker to apply in this mode.
+            Self::Group(_) => false,
+        }
+    }
+}
 
 /// The run future of one worker.
 pub(crate) type WorkerRun = BoxFuture<'static, std::result::Result<(), WorkerError>>;
@@ -26,7 +50,7 @@ pub(crate) trait RunnerFactory: Send + Sync + 'static {
         &self,
         cfg: WorkerConfig,
         slots: Vec<PartitionSlot>,
-        fetch: Fetch,
+        fetch: ReadSource,
         sink: Arc<dyn PositionSink>,
         resets: Option<Arc<ResetSignal>>,
     ) -> Result<WorkerRun>;
@@ -50,7 +74,7 @@ impl<H: BatchHandler> RunnerFactory for HandlerRunner<H> {
         &self,
         cfg: WorkerConfig,
         slots: Vec<PartitionSlot>,
-        fetch: Fetch,
+        fetch: ReadSource,
         sink: Arc<dyn PositionSink>,
         resets: Option<Arc<ResetSignal>>,
     ) -> Result<WorkerRun> {

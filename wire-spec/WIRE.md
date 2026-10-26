@@ -43,6 +43,7 @@ Every key below starts with a **prefix**, a literal string such as `prod:re:`. I
 | Event-sourced aggregate | state stream with `<name>` = `es:<Aggregate>:<id>` | stream |
 | View | `<prefix>{<topic>}:view:<owner>:<viewName>` | hash |
 | Dedupe claim | `<prefix>dedupe:{<scope>}:<id>` | string, `SET NX PX` |
+| Work-queue consumer group | on the partition stream, group name `<consumer>` (§9) | stream group |
 
 `<p>` is the partition index in invariant decimal, `0`-based. A dedupe `<scope>` MUST NOT contain
 `{` or `}`.
@@ -56,7 +57,7 @@ Every key below starts with a **prefix**, a literal string such as `prod:re:`. I
 | --- | --- |
 | `partitions` | partition count, decimal |
 | `v` | codec version, `1` |
-| `createdUtc` | ISO-8601 round-trip (§9) |
+| `createdUtc` | ISO-8601 round-trip (§10) |
 | `maxLen` | approximate `MAXLEN` used when trimming, decimal |
 
 - A process configured with **more** partitions than recorded MUST overwrite `partitions` and log a
@@ -152,7 +153,7 @@ Fields that do not parse as a non-negative integer are not positions, and reader
   applies every pending marker for the partitions it owns before its first read.
 
 `p:{topic}:<consumer>:meta` is diagnostic only and nothing reads it. Per partition:
-`<p>:updatedUtc` (§9) and `<p>:instanceId`.
+`<p>:updatedUtc` (§10) and `<p>:instanceId`.
 
 ## 8. Ownership
 *Source: `Ownership/OwnershipRegistry.cs`*
@@ -195,7 +196,45 @@ Defaults: TTL 30 s, with the renew interval below the TTL.
 Each instance is assigned its partitions by its own configuration. It writes the same `<p>` and
 `i:<instanceId>` fields for observation only, and the hash never decides ownership.
 
-## 9. Text formats
+## 9. Consumer groups (work-queue delivery)
+*Source: `Consumer/WorkQueueFetch.cs`, `Consumer/StreamConsumerHost.cs` (`InstanceName`, `GroupAcknowledger`)*
+
+A consumer configured for work-queue delivery (C# `Delivery = WorkQueue`, Rust
+`delivery = "work_queue"`) reads with Redis consumer groups instead of positions. C# and Rust
+members of one consumer MUST agree on everything below, because they sit in the same group and
+share its pending-entries list (PEL).
+
+- **Group.** One group per partition stream (§2), named exactly the consumer name. It is created
+  with `XGROUP CREATE <stream> <consumer> <id> MKSTREAM`, where `<id>` is `$` for a consumer that
+  starts from now and otherwise the exclusive id its start position resolves to (`0-0` for the
+  beginning). `BUSYGROUP` is success, and the existing group's last-delivered id MUST NOT be moved
+  by a starting consumer. A read or claim answered with `NOGROUP` re-creates the group the same way.
+- **Member.** Each instance reads as group consumer `<member>`: the pod name (`POD_NAME`) when set,
+  else the host name (.NET `Environment.MachineName`). It MUST be stable across a restart of that
+  instance and unique among live instances. It is free text to other members, which MUST NOT
+  interpret it.
+- **Reads.** `XREADGROUP GROUP <consumer> <member> [BLOCK <ms>] COUNT <n> STREAMS <stream>… >…`.
+  An implementation MAY also re-read its own PEL (`… STREAMS <stream> <id>`); it MUST NOT read
+  another member's.
+- **Acknowledgement.** `XACK <stream> <consumer> <id>…` for every entry of a batch, sent **after**
+  the batch was handled and only where a position-based consumer would advance its position (§7):
+  success, an error policy that skips, and entries a type filter dropped. A batch whose handler
+  blocks, stops the partition or fails the host is not acknowledged, nor is one interrupted by a
+  shutdown or a lost partition. Only whole batches are acknowledged, in fetch order.
+- **Claims.** A member takes over another member's entries only with
+  `XAUTOCLAIM <stream> <consumer> <member> 30000 <cursor> COUNT 100`: **min-idle-time 30 000 ms**
+  (an entry delivered or claimed less than 30 s ago belongs to a live member), the cursor starting
+  at `0-0`, carried from sweep to sweep and restarted at `0-0` when Redis returns it. Members MUST
+  NOT use a shorter min-idle-time in a shared group (the threshold is the only thing that tells a
+  slow sibling from a dead one) and MUST NOT `XCLAIM` with a smaller idle time. Entries a sweep
+  returns that were deleted from the stream carry no fields; a member acknowledges them.
+- **No other state.** There is no delivery-count limit and nothing is dead-lettered: an
+  unacknowledged entry is redelivered until a member acknowledges it. Nothing is written to
+  `p:{topic}:<consumer>` and reset markers are not read in this mode. Ownership (§8) still decides
+  which partitions an instance reads; members compete on a partition only where several instances
+  read it (Static mode, or Lease mode around a hand-over).
+
+## 10. Text formats
 
 | Value | Format |
 | --- | --- |
@@ -204,7 +243,7 @@ Each instance is assigned its partitions by its own configuration. It writes the
 | Timestamp read | any RFC 3339 / ISO-8601 instant, with any number of fractional digits, `Z` or an offset |
 | Integers | invariant decimal, no separators |
 
-## 10. Atomic writes
+## 11. Atomic writes
 *Source: `Producer/Outbox.cs`, `Producer/StreamStore.cs`, `RedisEvents.EventSourcing/RedisEventRepository.cs`*
 
 - **Outbox:** the caller's state commands, then the topic `XADD`, in one `MULTI`/`EXEC`.
@@ -214,7 +253,7 @@ Each instance is assigned its partitions by its own configuration. It writes the
   `MULTI`. Any mechanism that leaves the same data, all-or-nothing, is compatible.
 - Both need the topic's keys co-located in one slot (the default).
 
-## 11. Payload codecs (above the wire)
+## 12. Payload codecs (above the wire)
 These do not affect entry decoding, but both sides must agree on them for typed messages.
 
 - **JSON:** property casing MUST match on both sides. System.Text.Json defaults to PascalCase and
@@ -232,7 +271,7 @@ These do not affect entry decoding, but both sides must agree on them for typed 
   also accept `Lz4Block` (extension type **99**: a MessagePack int32 holding the uncompressed
   length, then one raw LZ4 block). Readers detect compression from the bytes, never from a header.
 
-## 12. Changing this document
+## 13. Changing this document
 A change to anything above is a codec change. It needs a spec PR with updated golden vectors
 (`vectors/`) landed in **both** repositories before either side releases. A change that is not
 additive bumps `v`.

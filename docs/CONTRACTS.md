@@ -64,7 +64,7 @@ crates/redisevents/src/
     host.rs              C4     Streams / StreamsHost
     builder.rs           C4b    registration surface
     trimmer.rs           C5     BackgroundTrimmer
-    work_queue.rs        C6     WorkQueueFetch (deferred)
+    work_queue.rs        C6     WorkQueueFetch, PendingAcks, GroupAcknowledger (crate-private)
   positions/
     mod.rs               W0.2   PositionStore, PositionRecord (B4 bodies), StartPosition, ADMIN_INSTANCE_ID
     redis_store.rs       B4     RedisPositionStore (NullPositionStore complete)
@@ -489,6 +489,34 @@ partition counts as `0-0`; no staleness timeout (as C#). Only the release valve 
 (`XLEN >= ClampReleaseThreshold * MaxLen`): `MINID cutoff`, then `MAXLEN` to a length-derived
 target, one `streams.clamp.released` per transition into the released state. A failed scan or
 command fails the sweep and trims nothing; the loop logs and retries next interval.
+
+### C6 work-queue delivery (`consumer/work_queue.rs`, crate-private; public: `WorkQueueOptions`)
+```rust
+// public (additive): config::WorkQueueOptions { claim_min_idle_ms /* 30_000 */, claim_interval_ms /* 0 = idle cap */,
+//   member_name: Option<String> }, #[non_exhaustive] + builders claim_min_idle(Duration) / claim_interval / member(name);
+//   ConsumerBuilder::work_queue(WorkQueueOptions) -> Self
+GroupSettings::new(group, member, StartPosition, batch_size, codec_version, max_idle_delay_ms, &WorkQueueOptions)
+WorkQueueFetch::block(&Connection, ReaderConnection, Vec<(u32, String)>, GroupSettings) -> Result<Self>  // XREADGROUP BLOCK on the reader
+WorkQueueFetch::poll(&Connection, Vec<(u32, String)>, GroupSettings) -> Result<Self>                    // C# shape, idle back-off
+async fn ensure_groups(&mut self) -> Result<()>          // XGROUP CREATE … MKSTREAM; BUSYGROUP = ok, cursor kept
+async fn fetch(&mut self) -> Result<Vec<StreamBatch>>    // own PEL (startup) → overdue claim → live `>` → idle claim → back-off
+fn acker(&self) -> Arc<GroupAcker>                       // the PositionSink: record(p, id) remembers, flush() XACKs
+PendingAcks { add(ids) -> dropped, take(through) -> Option<ids>, contains(id), clear() }   // C# PendingAcks, MAX 1024
+member_name(explicit, pod_name) -> String                // explicit, else pod name, else host name (C# MachineName)
+set_group_position(&Connection, key, group, StreamId, purge) -> Result<usize>   // C# SetGroupPositionAsync (tests only)
+// host/erased.rs: enum ReadSource { Stream(Fetch), Group(WorkQueueFetch) } : FetchSource; RunnerFactory::worker takes it
+```
+C4 wiring (`runtime.rs::start_group_generation`): no position store, flusher or reset markers
+(`use_positions = false`); the start is `StartPosition::resolve(options, None)`, used only to create
+the group; groups of partitions as in ordered mode (co-located = one multi-stream `XREADGROUP`), one
+worker each with `ReadSource::Group`, a `MonitoredSink` over the fetch's `GroupAcker`, resets `None`
+and `persist` forced to `SyncBatch`, so the worker's existing rule — record after a handled batch, a
+`BestEffort` skip or a filtered batch; never on `Block`, `StopPartition`, `Fail` or after `revoke` —
+is the ack rule. `PendingAcks` matches the recorded id by fetch order and range: an id inside an
+unfinished batch (per-message progress) acks only the batches ahead of it. A failed `XACK` restores
+its batches and returns `Error::Transport` (so the worker blocks and retries). Ownership is
+unchanged (`static` mode makes every instance compete); health zeroes `unhealthy_behind_seconds` and
+`degraded_silence_seconds` (C#). The wire rules are `wire-spec/WIRE.md` §9.
 
 ### D4 testing doubles (`testing.rs`, feature `testing`, public)
 In-memory doubles for code that publishes or handles messages, with no Redis. **E2 and E4 tests

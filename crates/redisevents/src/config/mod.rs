@@ -292,6 +292,75 @@ impl Default for ProducerOptions {
     }
 }
 
+/// Tuning for [`DeliveryMode::WorkQueue`]: the claim rule and this instance's name within the
+/// consumer group. Passed with
+/// [`ConsumerBuilder::work_queue`](crate::consumer::ConsumerBuilder::work_queue); ignored under
+/// [`DeliveryMode::Ordered`].
+///
+/// The defaults are the C# library's, and in a group shared with C# consumers they should stay
+/// that way: `claim_min_idle_ms` is the line between "a sibling is slow" and "a sibling is dead",
+/// and two members that draw it differently steal from each other. See the crate README,
+/// "Work-queue delivery".
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct WorkQueueOptions {
+    /// How long an entry must sit unacknowledged in a member's pending list before another member
+    /// may claim it (`XAUTOCLAIM … <min-idle-time>`). Default 30 000 (C#). Long enough that a
+    /// slow handler is never stolen from; short enough that a dead pod's work is recovered within
+    /// a deploy window.
+    pub claim_min_idle_ms: u64,
+    /// The least time between two idle-path claim sweeps of one partition. `0` (the default) means
+    /// the idle back-off cap ([`ConsumerOptions::max_idle_delay_ms`], at least 1 ms), as in C#.
+    pub claim_interval_ms: u64,
+    /// This instance's consumer name within the group. `None` (the default) is the pod name
+    /// ([`InstanceOptions::pod_name`], else `POD_NAME`), else the machine's host name, which is
+    /// what C# uses. It must be stable across restarts and unique among live instances.
+    pub member_name: Option<String>,
+}
+
+impl WorkQueueOptions {
+    /// The C# claim threshold: 30 seconds.
+    pub const DEFAULT_CLAIM_MIN_IDLE_MS: u64 = 30_000;
+
+    /// The defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets [`claim_min_idle_ms`](Self::claim_min_idle_ms) from a `Duration`.
+    #[must_use]
+    pub fn claim_min_idle(mut self, idle: std::time::Duration) -> Self {
+        self.claim_min_idle_ms = u64::try_from(idle.as_millis()).unwrap_or(u64::MAX);
+        self
+    }
+
+    /// Sets [`claim_interval_ms`](Self::claim_interval_ms) from a `Duration`.
+    #[must_use]
+    pub fn claim_interval(mut self, interval: std::time::Duration) -> Self {
+        self.claim_interval_ms = u64::try_from(interval.as_millis()).unwrap_or(u64::MAX);
+        self
+    }
+
+    /// Sets [`member_name`](Self::member_name).
+    #[must_use]
+    pub fn member(mut self, name: impl Into<String>) -> Self {
+        self.member_name = Some(name.into());
+        self
+    }
+}
+
+impl Default for WorkQueueOptions {
+    fn default() -> Self {
+        Self {
+            claim_min_idle_ms: Self::DEFAULT_CLAIM_MIN_IDLE_MS,
+            claim_interval_ms: 0,
+            member_name: None,
+        }
+    }
+}
+
 /// Where a consumer starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -371,7 +440,8 @@ pub enum DeliveryMode {
     /// Kafka-style: one owner per partition, in order.
     #[default]
     Ordered,
-    /// `XREADGROUP` competing consumers (deferred, C6).
+    /// `XREADGROUP` competing consumers: a work queue. Per-key order is lost; see the crate
+    /// README, "Work-queue delivery".
     WorkQueue,
 }
 
