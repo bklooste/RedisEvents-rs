@@ -46,10 +46,9 @@ crates/redisevents/src/
     codec.rs             W0.2 API / A1 bodies (EntryCodec)
     router.rs            W0.2 API / A1 bodies (PartitionRouter)
   config/
-    mod.rs               W0.2   option structs + enums + defaults (complete)
-    binder.rs            A2     binding, validation, connection-string translation
-    instance.rs          A2     InstanceResolver
-    advisor.rs           A2     StreamsConfigurationAdvisor
+    mod.rs               W0.2   option structs + enums + defaults; StreamOptions::{validate, advisories}
+    validate.rs          A2     validation rules and advisory lines
+    instance.rs          A2     InstanceIdentity, owned / owner_of / pod_ordinal
   producer/
     mod.rs               W0.2   Publisher, BufferedPublisher, PublisherExt, PublishOptions
     publisher.rs         B1     StreamPublisher
@@ -208,8 +207,8 @@ Use after shutdown → `Closed("<component>")`.
 async fn connect(url: &str) -> Result<Self>            // redis-rs URL; bad URL → Config, connect fail → Transport
 async fn from_client(redis::Client) -> Result<Self>
 fn shared(&self) -> redis::aio::ConnectionManager        // cheap clone, auto-reconnect, has a response timeout
-async fn from_options(&StreamOptions) -> Result<Connection>    // F3: Streams:ConnectionString -> URL -> connect
-fn url_from_options(&StreamOptions) -> Result<String>          // F3: the URL, no connect
+async fn from_options(&StreamOptions) -> Result<Connection>    // StreamOptions::redis_url() -> connect
+// connection::stackexchange::to_redis_url(&str) -> Result<String>: opt-in C# connection-string bridge
 async fn dedicated(&self) -> Result<MultiplexedConnection>       // new socket, NO response timeout
 async fn dedicated_with_timeout(&self, Duration) -> Result<MultiplexedConnection>
 async fn dedicated_with(&self, &AsyncConnectionConfig) -> Result<MultiplexedConnection>
@@ -224,16 +223,17 @@ fn client(&self) -> &redis::Client
 ### `config` (W0.2 types and defaults; A2 the rest)
 `StreamOptions`, `TopicOptions`, `ConsumerOptions`, `BackpressureOptions`, `InstanceOptions`,
 `ProducerOptions`, enums `StartFrom`, `PersistMode`, `ErrorPolicy`, `ReadMode`, `InstanceMode`,
-`DeliveryMode`, `TrimMode`. All `serde::Deserialize` with `rename_all = "PascalCase"` and
-`default`, so the C# key names bind. Field = C# property in snake_case, same units (`_ms`,
-`_seconds`), unsigned. "Set explicitly" flags become `Option`: `ConsumerOptions::delivery`
-(accessor `delivery()`), `InstanceOptions::mode` (`mode()`), `TopicOptions::max_len` (`max_len()`,
-`max_len_configured()`). `start_from_date` is RFC 3339.
-A2 owns: the `config`-crate binder, case-insensitive enum values if C# tests need them, validation
-messages, the `UseConsumerGroup` legacy mapping, the default consumer fallback, and
-**translating the C# connection string** (`host:port,abortConnect=false,password=…,ssl=…`, default
-`redis-db.infra:6379,abortConnect=false`) into a redis-rs URL for `Connection::connect`. A C# test
-that asserts a negative-number validation message becomes a deserialize-error assertion.
+`DeliveryMode`, `TrimMode`. Plain `serde::Deserialize` with `snake_case` fields, `#[serde(default)]`
+and `snake_case` enum values, so any serde source works; configuration is not part of the wire
+contract (`wire-spec/WIRE.md` is Redis only). Units in the field name (`_ms`, `_seconds`), counts
+unsigned. `TopicOptions::max_len` stays an `Option` (`max_len()`, `max_len_configured()`) because
+the retention rule needs "set explicitly". `start_from_date` is RFC 3339.
+`StreamOptions::redis_url()` (default `redis://127.0.0.1:6379/0`), `topic(name)`,
+`consumer_name(&ConsumerOptions)`, `validate()` (errors name the field path, e.g.
+`consumers[0].batch_size`) and `advisories()`. `allow_untrimmed` is the explicit opt-in for
+`trim = none`; there is no environment-name semantics. Instance identity:
+`InstanceIdentity::{resolve, from_env}` take explicit `InstanceOptions` first, then
+`STREAMS_INSTANCE_COUNT` / `STREAMS_INSTANCE_INDEX` / `POD_NAME` (shared with C#).
 
 ## 3. Producer
 
@@ -445,9 +445,9 @@ Owners:
 - **C4 API** (`consumer::host`, re-exported from `consumer`; new public API, lead review):
   ```rust
   Streams::builder(conn: Connection) -> StreamsBuilder
-  StreamsBuilder::keys(Keys) / options(StreamOptions) / environment(name) / topic_options(topic, TopicOptions) -> Self
+  StreamsBuilder::keys(Keys) / options(StreamOptions) / allow_untrimmed(bool) / topic_options(topic, TopicOptions) -> Self
   StreamsBuilder::stream_options(&self) -> &StreamOptions
-  StreamsBuilder::topic(topic) -> ConsumerBuilder        // seeded from the first Streams:Consumers entry for it
+  StreamsBuilder::topic(topic) -> ConsumerBuilder        // seeded from the first `consumers` entry for it
   async StreamsBuilder::spawn(self) -> Result<StreamsHost> // startup checks fail here (Config / Redis / Transport)
   ConsumerBuilder::consumer(name) / options(ConsumerOptions) / configure(|&mut ConsumerOptions|) -> Self
   ConsumerBuilder::consumer_options(&self) -> &ConsumerOptions

@@ -121,7 +121,7 @@ async fn s5_eighty_thousand_messages_across_eight_partitions_are_delivered_exact
             o.persist_interval_ms = 100;
             o.start_from = StartFrom::Beginning;
             o.instances = Some(InstanceOptions {
-                mode: Some(InstanceMode::Static),
+                mode: InstanceMode::Static,
                 count: Some(2),
                 index: Some(index),
                 ..InstanceOptions::default()

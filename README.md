@@ -43,8 +43,8 @@ The sample's domain crate (events, aggregate rules, projections, C# wire compati
 cargo test -p inventory-domain
 ```
 
-Both services are implemented (plan WPs E5b and E5c). They read `REDIS_URL`, else the C#-style
-`Streams__ConnectionString`. The [sample README](samples/inventory/README.md) shows the routes and how to run the full stack.
+Both services are implemented (plan WPs E5b and E5c). They read `REDIS_URL` (default
+`redis://127.0.0.1:6379/0`). The [sample README](samples/inventory/README.md) shows the routes and how to run the full stack.
 
 ### Consuming typed messages
 

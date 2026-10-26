@@ -168,7 +168,7 @@ impl MessageHandler for Parking {
 
 ### `ErrorPolicy`: what an ordinary error does
 
-`Streams:Consumers[n]:OnError` (`ConsumerOptions::on_error`) picks what a `Skip` does. A `Block`
+`consumers[n].on_error` (`ConsumerOptions::on_error`) picks what a `Skip` does. A `Block`
 ignores this setting: it always blocks.
 
 | `ErrorPolicy` | Behaviour | When |
@@ -206,7 +206,7 @@ impl BatchHandler for Orders {
 }
 
 async fn run() -> redisevents::Result<()> {
-    let conn = Connection::connect("redis://redis-db.infra:6379").await?;
+    let conn = Connection::connect("redis://127.0.0.1:6379").await?;
     let host = Streams::builder(conn)
         .topic("orders")
         .handler(Orders)
@@ -234,7 +234,7 @@ impl MessageHandler for OneOrder {
 }
 
 async fn run() -> redisevents::Result<()> {
-    let conn = Connection::connect("redis://redis-db.infra:6379").await?;
+    let conn = Connection::connect("redis://127.0.0.1:6379").await?;
     let host = Streams::builder(conn)
         .topic("orders")
         .message_handler(OneOrder)
@@ -252,7 +252,7 @@ use redisevents::consumer::Streams;
 use redisevents::Connection;
 
 async fn run() -> redisevents::Result<()> {
-    let conn = Connection::connect("redis://redis-db.infra:6379").await?;
+    let conn = Connection::connect("redis://127.0.0.1:6379").await?;
     let host = Streams::builder(conn)
         .topic("orders")
         .batch_fn(|batch, _ctx| async move {
@@ -274,39 +274,56 @@ decoding is yours. That keeps this crate free of any dependency on your message 
 
 ## Configuration
 
-The `Streams` section has the same keys in C# and Rust. The Rust binder reads the JSON form of the
-section with `redisevents::config::binder::bind_json`. Key names are case-insensitive, and so are
-enum values (`lease` and `Lease` are the same).
+`redisevents::config::StreamOptions` and the structs under it are plain `#[derive(Deserialize)]`
+types with `snake_case` fields, `#[serde(default)]` on every struct and `snake_case` enum values
+(`async_batch`, `work_queue`, `best_effort`). Load them from whatever your service already uses:
+a TOML or YAML file, the [`config`](https://docs.rs/config) or [`figment`](https://docs.rs/figment)
+crates, or build them in code from `Default` with struct-update syntax. Nothing in the options
+reaches Redis except the values that shape the wire (topic names, partitions, consumer names,
+trimming), so a Rust service does not have to share a config file with a C# one, only those values.
 
 ```rust
-use redisevents::config::binder::bind_json;
-
-fn configured() -> redisevents::Result<redisevents::config::StreamOptions> {
-    bind_json(
-        r#"{
-            "Streams": {
-                "Consumer": "bet-processing",
-                "Topics": {
-                    "orders": { "Partitions": 4, "MaxLen": 100000, "Trim": "Approx" }
-                },
-                "Consumers": [
-                    { "Topic": "orders", "BatchSize": 100, "Persist": "AsyncBatch", "OnError": "BestEffort" }
-                ]
-            }
-        }"#,
-    )
-}
+use redisevents::config::{ConsumerOptions, PersistMode, StreamOptions, TopicOptions};
 
 # fn main() -> redisevents::Result<()> {
-let options = configured()?;
-assert_eq!(options.topics["orders"].partitions, 4);
-assert_eq!(options.consumers[0].batch_size, 100);
+// From any serde source; JSON here, the field names are the same in TOML or YAML.
+let options: StreamOptions = serde_json::from_str(
+    r#"{
+        "redis_url": "redis://127.0.0.1:6379/0",
+        "consumer": "bet-processing",
+        "topics": { "orders": { "partitions": 4, "max_len": 100000, "trim": "approx" } },
+        "consumers": [ { "topic": "orders", "batch_size": 100, "persist": "async_batch", "on_error": "best_effort" } ]
+    }"#,
+)
+.map_err(|e| redisevents::Error::config(e.to_string()))?;
+options.validate()?;
+
+// Or in code.
+let in_code = StreamOptions {
+    topics: [("orders".to_owned(), TopicOptions { partitions: 4, max_len: Some(100_000), ..TopicOptions::default() })].into(),
+    consumers: vec![ConsumerOptions { topic: "orders".to_owned(), persist: PersistMode::AsyncBatch, ..ConsumerOptions::default() }],
+    ..StreamOptions::default()
+};
+assert_eq!(in_code.topics["orders"].partitions, options.topics["orders"].partitions);
 # Ok(())
 # }
 ```
 
+From environment variables, with the `config` crate and a prefix of your choosing (the crate reads
+none itself; `REDISEVENTS` here):
+
+```rust,ignore
+let options: StreamOptions = config::Config::builder()
+    .add_source(config::File::with_name("streams").required(false))
+    .add_source(config::Environment::with_prefix("REDISEVENTS").separator("__"))
+    .build()?
+    .try_deserialize()?;
+// REDISEVENTS__REDIS_URL=rediss://cache:6380/0
+// REDISEVENTS__TOPICS__ORDERS__PARTITIONS=4
+```
+
 Hand the options to the builder with `.options(options)`, then pick the registration by topic or by
-index. `consumer_at(i)` takes `Streams:Consumers[i]`, and `sole_consumer()` takes the only entry:
+index. `consumer_at(i)` takes `consumers[i]`, and `sole_consumer()` takes the only entry:
 
 ```rust
 use redisevents::config::StreamOptions;
@@ -322,7 +339,7 @@ impl BatchHandler for Orders {
 }
 
 async fn run(options: StreamOptions) -> redisevents::Result<()> {
-    let conn = Connection::connect("redis://redis-db.infra:6379").await?;
+    let conn = Connection::from_options(&options).await?;
     let host = Streams::builder(conn)
         .options(options)
         .consumer_at(0)?
@@ -349,7 +366,7 @@ impl BatchHandler for Orders {
 }
 
 async fn run() -> redisevents::Result<()> {
-    let conn = Connection::connect("redis://redis-db.infra:6379").await?;
+    let conn = Connection::connect("redis://127.0.0.1:6379").await?;
     let host = Streams::builder(conn)
         .topic("orders")
         .configure(|c| {
@@ -363,67 +380,71 @@ async fn run() -> redisevents::Result<()> {
 }
 ```
 
-### The keys
+### The fields
 
-| Key | Default | What goes wrong |
+| Field | Default | What goes wrong |
 |---|---|---|
-| `ConnectionString` | `redis-db.infra:6379,abortConnect=false` | Build the connection from it with `Connection::from_options(&options)` (see [Connecting from the config](#connecting-from-the-config)); the host itself takes a `Connection` and only uses the string for the `BlockMs` check. Point it at `redis-cache` and you lose everything on restart |
-| `Consumer` | executable file name | Two services sharing a name share a position hash and each see half the messages |
-| `Topics:<t>:Partitions` | `1` | Can be increased, never decreased. Caps parallelism. See [Interop](#interop-rules) for the C# README's `2` |
-| `Topics:<t>:MaxLen` | `10000` | Below worst-case consumer lag, trimming eats unprocessed messages |
-| `Topics:<t>:Trim` | `Approx` | `None` is refused outside a `Development` environment |
-| `Topics:<t>:StateMetadata` | `false` | State-store entries hold only body and type; `true` also keeps correlation id, trace and headers |
-| `Consumers[n]:BatchSize` | `100` | Bigger batches amortise round trips and widen the redelivery window |
-| `Consumers[n]:Persist` | `AsyncBatch` | `SyncBatch` and `SyncMessage` cost a Redis round trip. `None` never stores a position and is refused with `StartFrom: Stored` |
-| `Consumers[n]:PersistIntervalMs` | `1000` | This is your duplicate window on a crash |
-| `Consumers[n]:OnError` | `BestEffort` | See the table above |
-| `Consumers[n]:BlockMs` | `1000` | Must stay under the connection's sync timeout (`5000` ms default), or it is refused at startup |
-| `Consumers[n]:StartFrom` | `Stored` | `Stored` falls back to `StartFromWhenMissing`, then `Beginning`. `Date` needs `StartFromDate` |
-| `Consumers[n]:ResetOnStart` | `false` | Refused at startup. Use `StreamAdmin::reset_position` instead |
-| `Consumers[n]:Backpressure:Capacity` | `4` | Batches in flight per partition |
-| `Consumers[n]:Delivery` | `Ordered` | `WorkQueue` is refused at startup in this version (see below) |
-| `Consumers[n]:Instances:Mode` | `Lease` | `Static` needs an index and count, see [Ownership](#ownership-lease-and-static) |
-| `Consumers[n]:UnhealthyBehindSeconds` | `0` (off) | Health: the only threshold safe to restart on |
+| `redis_url` | `redis://127.0.0.1:6379/0` | Read by `Connection::from_options(&options)`; the host itself takes a `Connection`. Point it at a Redis without persistence and you lose everything on restart |
+| `allow_untrimmed` | `false` | Must be `true` for any topic with `trim = none` (local development, benchmarks) |
+| `consumer` | executable file name | Two services sharing a name share a position hash and each see half the messages |
+| `topics.<t>.partitions` | `1` | Can be increased, never decreased. Caps parallelism. See [Interop](#interop-rules) for the C# README's `2` |
+| `topics.<t>.max_len` | `10000` | Below worst-case consumer lag, trimming eats unprocessed messages |
+| `topics.<t>.trim` | `approx` | `none` is refused unless `allow_untrimmed` is set |
+| `topics.<t>.state_metadata` | `false` | State-store entries hold only body and type; `true` also keeps correlation id, trace and headers |
+| `consumers[n].batch_size` | `100` | Bigger batches amortise round trips and widen the redelivery window |
+| `consumers[n].persist` | `async_batch` | `sync_batch` and `sync_message` cost a Redis round trip. `none` never stores a position and is refused with `start_from = stored` |
+| `consumers[n].persist_interval_ms` | `1000` | This is your duplicate window on a crash |
+| `consumers[n].on_error` | `best_effort` | See the table above |
+| `consumers[n].block_ms` | `1000` | How long one `XREAD BLOCK` waits; the reader connections have no response timeout |
+| `consumers[n].start_from` | `stored` | `stored` falls back to `start_from_when_missing`, then `beginning`. `date` needs `start_from_date` |
+| `consumers[n].reset_on_start` | `false` | Refused at startup. Use `StreamAdmin::reset_position` instead |
+| `consumers[n].backpressure.capacity` | `4` | Batches in flight per partition |
+| `consumers[n].delivery` | `ordered` | `work_queue` is refused at startup in this version (see below) |
+| `consumers[n].instances.mode` | `lease` | `static` needs an index and count, see [Ownership](#ownership-lease-and-static) |
+| `consumers[n].instances.pod_name` | `POD_NAME` | Only used for the `StatefulSet` ordinal and in logs |
+| `consumers[n].unhealthy_behind_seconds` | `0` (off) | Health: the only threshold safe to restart on |
 
-Misconfiguration returns `Error::Config` naming the offending key. The config errors are returned by
-`bind_json`, and by `spawn()` for the rules that need the whole picture.
+`StreamOptions::validate` returns `Error::Config` naming the offending field by its path
+(`consumers[0].batch_size`); `spawn()` runs it too, then logs `StreamOptions::advisories` (topics
+running on defaults, Block mode without co-located partitions). A wrong type or a negative count is
+a deserialize error from your config source.
+
+Environment variables the library itself reads are the ones shared with the C# library or chosen
+for the cross-language deployment: `STREAMS_KEY_PREFIX` / `STREAMS_ENVIRONMENT` (the key prefix,
+see [Interop](#interop-rules)) and, for Static ownership only when the options leave them unset,
+`STREAMS_INSTANCE_COUNT`, `STREAMS_INSTANCE_INDEX` and `POD_NAME`.
 
 Two things differ from the C# host, and both are easy to miss:
 
-- **The host starts only the consumers you register.** `Streams:Consumers` entries seed the builder
-  (the options for `topic("orders")` come from the first entry for that topic), but an entry with no
+- **The host starts only the consumers you register.** `consumers` entries seed the builder (the
+  options for `topic("orders")` come from the first entry for that topic), but an entry with no
   handler is not started.
-- **The host does not open the connection.** Build a `Connection` yourself (`Connection::connect`
-  takes a redis-rs URL, `Connection::from_options` the bound config) and make sure it points at
-  `redis-db`.
+- **The host does not open the connection.** Build a `Connection` yourself
+  (`Connection::connect(url)` or `Connection::from_options(&options)`).
 
-### Connecting from the config
+### Sharing a C# connection string
 
-`Connection::from_options` reads `Streams:ConnectionString` from the bound `StreamOptions` and
-translates the StackExchange.Redis string (`host:6379,password=...,ssl=true,defaultDatabase=2`)
-into a redis-rs URL, so the same config file serves the C# and the Rust runtime. An unset string
-means the C# default (`redis-db.infra:6379`). `Connection::url_from_options` returns the URL
-without connecting.
+A deployment that already has a StackExchange.Redis connection string for the C# services can
+translate it instead of keeping a second setting. This is opt-in and explicit:
 
-```rust,no_run
-use redisevents::Connection;
-use redisevents::config::binder::bind_json;
+```rust
+use redisevents::connection::stackexchange;
 
-# async fn run() -> redisevents::Result<()> {
-let options = bind_json(r#"{"ConnectionString": "redis-db.infra:6379,password=secret"}"#)?;
-let conn = Connection::from_options(&options).await?;
-# let _ = conn;
+# fn main() -> redisevents::Result<()> {
+let url = stackexchange::to_redis_url("cache:6380,password=secret,ssl=true,defaultDatabase=2")?;
+assert_eq!(url, "rediss://:secret@cache:6380/2");
 # Ok(())
 # }
 ```
 
-A malformed string is an `Error::Config` naming `Streams:ConnectionString`; the message never
-echoes the password.
+It supports a single endpoint with `password`, `user`, `ssl` and `defaultDatabase`, ignores the
+StackExchange.Redis client tuning keys (`abortConnect`, `syncTimeout`, ...), and refuses anything
+else. A malformed string is an `Error::Config` that never echoes the password.
 
 ### TLS
 
-`ssl=true` produces a `rediss://` URL. Enabling TLS needs the `tls-rustls` cargo feature
-(`redisevents = { version = "0.1", features = ["tls-rustls"] }`), which turns on redis-rs's rustls
+A `rediss://` URL needs the `tls-rustls` cargo feature
+(`redisevents = { version = "0.3", features = ["tls-rustls"] }`), which turns on redis-rs's rustls
 support with the bundled webpki root certificates. Without it, connecting to a `rediss://` URL
 fails with a redis error saying TLS is not compiled in.
 
@@ -443,7 +464,7 @@ use redisevents::wire::Keys;
 use redisevents::{Connection, StreamId};
 
 async fn place_order(order_id: &str, body: Bytes) -> redisevents::Result<StreamId> {
-    let conn = Connection::connect("redis://redis-db.infra:6379").await?;
+    let conn = Connection::connect("redis://127.0.0.1:6379").await?;
     let publisher = StreamPublisher::new(
         conn,
         Keys::from_env(),
@@ -546,7 +567,7 @@ impl TypedHandler<OrderPlaced> for Shipping {
 }
 
 async fn run() -> redisevents::Result<()> {
-    let conn = Connection::connect("redis://redis-db.infra:6379").await?;
+    let conn = Connection::connect("redis://127.0.0.1:6379").await?;
     let host = Streams::builder(conn)
         .topic("orders")
         .typed_handler::<OrderPlaced, _>(Shipping)
@@ -933,12 +954,12 @@ These are the rules that keep a Rust service and a C# service talking to each ot
 Each of these has cost somebody a day. The reason is attached because the reason is what you will
 remember.
 
-### Streams live on `redis-db`, never `redis-cache`
+### Streams need a persistent Redis
 
-`redis-cache` runs without persistence, so a pod restart loses every stream and every stored
-position: messages never consumed, and the record of what was. The connection is yours to build in
-this crate, so this is the one place it can go wrong without a warning. Build it from the same
-connection string the C# services use, `redis-db`.
+A Redis without persistence (a cache instance) loses every stream and every stored position on a
+restart: messages never consumed, and the record of what was. The connection is yours to build in
+this crate, so this is the one place it can go wrong without a warning. Point it at the same
+persistent Redis the C# services use.
 
 ### Partition count goes up and never comes down
 

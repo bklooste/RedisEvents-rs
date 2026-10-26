@@ -1,31 +1,41 @@
-//! Option structs mirroring the C# `Streams` configuration section. **Types and defaults: W0.2.
-//! Binding, validation, instance resolution, the advisor and connection-string translation: A2**
-//! (`binder.rs`, `instance.rs`, `advisor.rs`).
+//! Option structs for streams, topics, consumers and producers, plus their validation
+//! ([`StreamOptions::validate`]), startup advice ([`StreamOptions::advisories`]) and instance
+//! identity ([`instance`]).
 //!
-//! Field names are the C# property names in `snake_case`; serde reads the C# `PascalCase` keys, so
-//! one config file per environment serves both languages. Time spans keep the C# unit suffixes
-//! (`_ms`, `_seconds`) rather than becoming `Duration`s, for the same reason. Counts are unsigned:
-//! a negative value in a config file is a deserialize error rather than a validation message.
+//! Every struct is a plain `#[derive(Deserialize)]` with `snake_case` fields and
+//! `#[serde(default)]`, so it loads from any serde source (TOML, YAML, JSON, the `config` or
+//! `figment` crates, environment variables through one of those) or is built in code from
+//! [`Default`] plus struct-update syntax. Enum values are `snake_case` (`async_batch`,
+//! `work_queue`). Nothing here reads the process environment except [`instance`], whose
+//! environment fallbacks are documented there. Configuration never reaches Redis: only the
+//! values that shape the wire (topic names, partitions, consumer names, trimming) do, and those
+//! are written exactly as `wire-spec/WIRE.md` says.
 //!
-//! Where C# tracks "was this set explicitly" (`Delivery`, `Instances.Mode`, `MaxLen`), the Rust
-//! field is an `Option` and an accessor applies the default.
+//! Durations are integer fields with the unit in the name (`_ms`, `_seconds`), which reads
+//! unambiguously in every config format. Counts are unsigned, so a negative value is a
+//! deserialize error.
 
-pub mod advisor;
-pub mod binder;
 pub mod instance;
+mod validate;
 
 use std::collections::HashMap;
 
 use serde::Deserialize;
 use time::OffsetDateTime;
 
-/// The root `Streams` section (C# `StreamOptions`).
+pub use validate::Advisory;
+
+/// The root of the configuration: the Redis endpoint, topics, consumers and producers.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(rename_all = "PascalCase", default)]
+#[serde(default)]
 pub struct StreamOptions {
-    /// Connection string, C# StackExchange.Redis form (`host:port,abortConnect=false`). A2
-    /// translates it to a redis-rs URL. `None` means the C# default `redis-db.infra:6379`.
-    pub connection_string: Option<String>,
+    /// Redis URL (`redis://host:6379/0`, `rediss://` for TLS), read by
+    /// [`Connection::from_options`](crate::Connection::from_options). `None` means
+    /// [`StreamOptions::DEFAULT_REDIS_URL`].
+    pub redis_url: Option<String>,
+    /// Permit [`TrimMode::None`] on topics. Untrimmed streams grow until Redis runs out of
+    /// memory, so validation refuses them unless this is set (local development, benchmarks).
+    pub allow_untrimmed: bool,
     /// Default consumer name for every consumer that does not set its own.
     pub consumer: Option<String>,
     /// Per-topic settings, keyed by topic name.
@@ -36,9 +46,9 @@ pub struct StreamOptions {
     pub producers: Vec<ProducerOptions>,
 }
 
-/// Per-topic settings (C# `TopicOptions`).
+/// Per-topic settings.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "PascalCase", default)]
+#[serde(default)]
 pub struct TopicOptions {
     /// Partition count. May grow, never shrink (`WIRE.md` §3).
     pub partitions: u32,
@@ -59,7 +69,7 @@ pub struct TopicOptions {
 }
 
 impl TopicOptions {
-    /// The C# `TopicOptions.DefaultMaxLen`.
+    /// The `MAXLEN` used when [`TopicOptions::max_len`] is not set.
     pub const DEFAULT_MAX_LEN: u64 = 10_000;
 
     /// The effective `MAXLEN`.
@@ -68,7 +78,7 @@ impl TopicOptions {
         self.max_len.unwrap_or(Self::DEFAULT_MAX_LEN)
     }
 
-    /// Whether `MaxLen` was set explicitly.
+    /// Whether `max_len` was set explicitly.
     #[must_use]
     pub fn max_len_configured(&self) -> bool {
         self.max_len.is_some()
@@ -90,9 +100,9 @@ impl Default for TopicOptions {
     }
 }
 
-/// One consumer (C# `ConsumerOptions`).
+/// One consumer.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "PascalCase", default)]
+#[serde(default)]
 pub struct ConsumerOptions {
     /// The topic to consume. Required.
     pub topic: String,
@@ -134,10 +144,8 @@ pub struct ConsumerOptions {
     pub contested_grace_seconds: u32,
     /// Ownership: how often a contested partition is rechecked.
     pub contested_recheck_seconds: u32,
-    /// Delivery mode. `None` = not set ([`DeliveryMode::Ordered`]); see [`ConsumerOptions::delivery`].
-    pub delivery: Option<DeliveryMode>,
-    /// Legacy alias: `UseConsumerGroup = true` means `Delivery = WorkQueue`. A2 maps and warns.
-    pub use_consumer_group: Option<bool>,
+    /// Delivery mode.
+    pub delivery: DeliveryMode,
     /// Instance assignment; `None` = defaults.
     pub instances: Option<InstanceOptions>,
     /// Number of reader connections shared by this consumer's partitions.
@@ -150,15 +158,6 @@ pub struct ConsumerOptions {
     pub start_from_when_missing: StartFrom,
     /// Rewind to the start position on every start.
     pub reset_on_start: bool,
-}
-
-impl ConsumerOptions {
-    /// The effective delivery mode (explicit, else [`DeliveryMode::Ordered`]; A2 folds the legacy
-    /// `use_consumer_group` into `delivery` while binding).
-    #[must_use]
-    pub fn delivery(&self) -> DeliveryMode {
-        self.delivery.unwrap_or_default()
-    }
 }
 
 impl Default for ConsumerOptions {
@@ -183,8 +182,7 @@ impl Default for ConsumerOptions {
             degraded_silence_seconds: 0,
             contested_grace_seconds: 60,
             contested_recheck_seconds: 30,
-            delivery: None,
-            use_consumer_group: None,
+            delivery: DeliveryMode::Ordered,
             instances: None,
             reader_threads: 1,
             shutdown_timeout_seconds: 10,
@@ -195,9 +193,9 @@ impl Default for ConsumerOptions {
     }
 }
 
-/// Read-ahead between the read loop and the handler (C# `BackpressureOptions`).
+/// Read-ahead between the read loop and the handler.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "PascalCase", default)]
+#[serde(default)]
 pub struct BackpressureOptions {
     /// Read ahead into a bounded channel; `false` = read inline.
     pub enabled: bool,
@@ -214,16 +212,20 @@ impl Default for BackpressureOptions {
     }
 }
 
-/// How partitions are split between instances (C# `InstanceOptions`).
+/// How partitions are split between instances.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "PascalCase", default)]
+#[serde(default)]
 pub struct InstanceOptions {
-    /// `None` = not set ([`InstanceMode::Lease`]); see [`InstanceOptions::mode`].
-    pub mode: Option<InstanceMode>,
-    /// Static mode: instance count (else `STREAMS_INSTANCE_COUNT`).
+    /// How partitions are assigned.
+    pub mode: InstanceMode,
+    /// Static mode: instance count (else `STREAMS_INSTANCE_COUNT`, see [`instance`]).
     pub count: Option<u32>,
-    /// Static mode: this instance's index (else `STREAMS_INSTANCE_INDEX` or the `StatefulSet` ordinal).
+    /// Static mode: this instance's index (else `STREAMS_INSTANCE_INDEX` or the `StatefulSet`
+    /// ordinal of the pod name, see [`instance`]).
     pub index: Option<u32>,
+    /// This instance's pod name, used for its `StatefulSet` ordinal and in ownership logs. `None`
+    /// falls back to the `POD_NAME` environment variable.
+    pub pod_name: Option<String>,
     /// Lease mode: lease TTL.
     pub lease_ttl_seconds: u32,
     /// Lease mode: renew interval.
@@ -231,33 +233,28 @@ pub struct InstanceOptions {
 }
 
 impl InstanceOptions {
-    /// The C# `DefaultLeaseTtlSeconds`.
+    /// Default lease TTL.
     pub const DEFAULT_LEASE_TTL_SECONDS: u32 = 30;
-    /// The C# `DefaultLeaseRenewSeconds`.
+    /// Default lease renew interval.
     pub const DEFAULT_LEASE_RENEW_SECONDS: u32 = 10;
-
-    /// The effective mode.
-    #[must_use]
-    pub fn mode(&self) -> InstanceMode {
-        self.mode.unwrap_or_default()
-    }
 }
 
 impl Default for InstanceOptions {
     fn default() -> Self {
         Self {
-            mode: None,
+            mode: InstanceMode::Lease,
             count: None,
             index: None,
+            pod_name: None,
             lease_ttl_seconds: Self::DEFAULT_LEASE_TTL_SECONDS,
             lease_renew_seconds: Self::DEFAULT_LEASE_RENEW_SECONDS,
         }
     }
 }
 
-/// One producer (C# `ProducerOptions`).
+/// One producer.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "PascalCase", default)]
+#[serde(default)]
 pub struct ProducerOptions {
     /// The topic to publish to. Required.
     pub topic: String,
@@ -286,8 +283,9 @@ impl Default for ProducerOptions {
     }
 }
 
-/// Where a consumer starts (C# `StartFrom`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+/// Where a consumer starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum StartFrom {
     /// The stored position, else [`ConsumerOptions::start_from_when_missing`].
@@ -301,8 +299,9 @@ pub enum StartFrom {
     Date,
 }
 
-/// When positions are written (C# `PersistMode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+/// When positions are written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum PersistMode {
     /// A background flusher writes them every `persist_interval_ms`.
@@ -316,9 +315,10 @@ pub enum PersistMode {
     None,
 }
 
-/// What a partition does when a handler fails with an *ordinary* error (C# `ErrorPolicy`). A
+/// What a partition does when a handler fails with an *ordinary* error. A
 /// `Block` error always blocks and retries regardless of this policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ErrorPolicy {
     /// Log, advance the position, skip the message. The handler owns retrying transients.
@@ -330,8 +330,9 @@ pub enum ErrorPolicy {
     Fail,
 }
 
-/// Blocking or polling reads (C# `ReadMode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+/// Blocking or polling reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ReadMode {
     /// `XREAD BLOCK` on dedicated reader connections.
@@ -341,8 +342,9 @@ pub enum ReadMode {
     Poll,
 }
 
-/// How partitions are assigned to instances (C# `InstanceMode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+/// How partitions are assigned to instances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum InstanceMode {
     /// Fixed index/count.
@@ -352,8 +354,9 @@ pub enum InstanceMode {
     Lease,
 }
 
-/// Delivery semantics (C# `DeliveryMode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+/// Delivery semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DeliveryMode {
     /// Kafka-style: one owner per partition, in order.
@@ -363,8 +366,9 @@ pub enum DeliveryMode {
     WorkQueue,
 }
 
-/// How `XADD`/`XTRIM` trims (C# `TrimMode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+/// How `XADD`/`XTRIM` trims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum TrimMode {
     /// `MAXLEN ~`.
@@ -376,64 +380,118 @@ pub enum TrimMode {
     None,
 }
 
-/// Case-insensitive deserialization for a config enum, so one config file binds the same way in
-/// both runtimes (C# binds enum values case-insensitively: `lease`, `LEASE` and `Lease` are equal).
-macro_rules! case_insensitive_enum {
-    ($ty:ident: $($variant:ident),+) => {
-        impl<'de> Deserialize<'de> for $ty {
-            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                let text = String::deserialize(deserializer)?;
-                $(
-                    if text.eq_ignore_ascii_case(stringify!($variant)) {
-                        return Ok($ty::$variant);
-                    }
-                )+
-                Err(serde::de::Error::unknown_variant(&text, &[$(stringify!($variant)),+]))
-            }
-        }
-    };
+impl StreamOptions {
+    /// The URL used when [`StreamOptions::redis_url`] is not set.
+    pub const DEFAULT_REDIS_URL: &'static str = "redis://127.0.0.1:6379/0";
+
+    /// The effective Redis URL: [`StreamOptions::redis_url`] when set and not blank, else
+    /// [`StreamOptions::DEFAULT_REDIS_URL`].
+    #[must_use]
+    pub fn redis_url(&self) -> &str {
+        validate::non_blank(self.redis_url.as_deref()).unwrap_or(Self::DEFAULT_REDIS_URL)
+    }
+
+    /// The options for `topic`, or the defaults when it is not configured (legal;
+    /// [`StreamOptions::advisories`] reports it).
+    #[must_use]
+    pub fn topic(&self, topic: &str) -> TopicOptions {
+        self.topics.get(topic).cloned().unwrap_or_default()
+    }
+
+    /// The effective consumer name of `consumer`: its own `consumer`, else the root `consumer`,
+    /// else the running executable's file stem.
+    #[must_use]
+    pub fn consumer_name(&self, consumer: &ConsumerOptions) -> String {
+        validate::consumer_name(self, consumer)
+    }
+
+    /// Checks every rule and returns the first violation.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`](crate::Error::Config) naming the offending field by its path, such as
+    /// `consumers[0].batch_size`.
+    pub fn validate(&self) -> crate::Result<()> {
+        validate::validate(self)
+    }
+
+    /// The advisory lines for a configuration that is valid but probably not what was meant
+    /// (unconfigured topics, Block mode without co-located partitions). Call
+    /// [`StreamOptions::validate`] first; this does not check for errors.
+    #[must_use]
+    pub fn advisories(&self) -> Vec<Advisory> {
+        validate::advise(self)
+    }
 }
-
-case_insensitive_enum!(StartFrom: Stored, Beginning, Now, Date);
-
-case_insensitive_enum!(PersistMode: AsyncBatch, SyncBatch, SyncMessage, None);
-
-case_insensitive_enum!(ErrorPolicy: BestEffort, StopPartition, Fail);
-
-case_insensitive_enum!(ReadMode: Block, Poll);
-
-case_insensitive_enum!(InstanceMode: Static, Lease);
-
-case_insensitive_enum!(DeliveryMode: Ordered, WorkQueue);
-
-case_insensitive_enum!(TrimMode: Approx, Exact, None);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn defaults_match_csharp() {
+    fn documented_defaults() {
         let c = ConsumerOptions::default();
         assert_eq!(
             (c.batch_size, c.block_ms, c.persist_interval_ms),
             (100, 1000, 1000)
         );
-        assert_eq!(c.delivery(), DeliveryMode::Ordered);
-        assert_eq!(InstanceOptions::default().mode(), InstanceMode::Lease);
+        assert_eq!(c.delivery, DeliveryMode::Ordered);
+        assert_eq!(InstanceOptions::default().mode, InstanceMode::Lease);
         assert_eq!(TopicOptions::default().max_len(), 10_000);
+        assert_eq!(
+            StreamOptions::default().redis_url(),
+            "redis://127.0.0.1:6379/0"
+        );
     }
 
     #[test]
-    fn reads_pascal_case_keys() {
+    fn reads_snake_case_fields_and_values() {
         let c: ConsumerOptions = serde_json::from_str(
-            r#"{"Topic":"orders","BatchSize":5,"Delivery":"WorkQueue","StartFromDate":"2026-09-01T00:00:00Z"}"#,
+            r#"{"topic":"orders","batch_size":5,"delivery":"work_queue","persist":"sync_batch","start_from_date":"2026-09-01T00:00:00Z"}"#,
         )
         .unwrap();
         assert_eq!(c.topic, "orders");
         assert_eq!(c.batch_size, 5);
-        assert_eq!(c.delivery(), DeliveryMode::WorkQueue);
+        assert_eq!(c.delivery, DeliveryMode::WorkQueue);
+        assert_eq!(c.persist, PersistMode::SyncBatch);
         assert!(c.start_from_date.is_some());
         assert_eq!(c.block_ms, 1000);
+    }
+
+    #[test]
+    fn a_whole_configuration_reads_from_nested_data() {
+        let o: StreamOptions = serde_json::from_str(
+            r#"{
+              "redis_url": "redis://cache:6380/2",
+              "consumer": "svc",
+              "topics": { "Orders": { "partitions": 4, "trim": "exact", "max_len": 50 } },
+              "consumers": [ { "topic": "Orders", "instances": { "mode": "static", "count": 2, "index": 1 } } ],
+              "producers": [ { "topic": "Orders", "buffered": true } ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(o.redis_url(), "redis://cache:6380/2");
+        assert_eq!(o.topics["Orders"].trim, TrimMode::Exact);
+        assert_eq!(o.topics["Orders"].max_len(), 50);
+        let inst = o.consumers[0].instances.as_ref().unwrap();
+        assert_eq!(
+            (inst.mode, inst.count, inst.index),
+            (InstanceMode::Static, Some(2), Some(1))
+        );
+        assert!(o.producers[0].buffered);
+        o.validate().unwrap();
+    }
+
+    #[test]
+    fn an_unknown_enum_value_is_an_error() {
+        let err =
+            serde_json::from_str::<ConsumerOptions>(r#"{"delivery":"WorkQueue"}"#).unwrap_err();
+        assert!(err.to_string().contains("work_queue"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_document_yields_all_defaults() {
+        let o: StreamOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(o, StreamOptions::default());
     }
 }

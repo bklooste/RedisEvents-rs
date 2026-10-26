@@ -1,5 +1,5 @@
 //! The inventory read-side service: starts the consumer host on the `inventory` topic, then serves
-//! the views over HTTP. Configuration: `REDIS_URL` (else `Streams__ConnectionString`, else `redis://127.0.0.1:6379`), `PORT`
+//! the views over HTTP. Configuration: `REDIS_URL` (else `redis://127.0.0.1:6379/0`), `PORT`
 //! (default 8080). SIGTERM or Ctrl-C shuts down: HTTP drains first, then the consumer.
 
 use std::env;
@@ -17,7 +17,7 @@ use tokio::signal::unix::{SignalKind, signal};
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt().init();
 
-    let redis_url = redis_url()?;
+    let redis_url = redis_url();
     let port: u16 = env::var("PORT").map_or(Ok(8080), |p| p.parse())?;
 
     let conn = Connection::connect(&redis_url).await?;
@@ -42,21 +42,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// The Redis URL: `REDIS_URL` wins; else the C#-style `Streams__ConnectionString` (the same
-/// setting the C# runtime binds, translated by `Connection::url_from_options`); else localhost.
-fn redis_url() -> Result<String, redisevents::Error> {
-    if let Ok(url) = std::env::var("REDIS_URL") {
-        return Ok(url);
-    }
-    match std::env::var("Streams__ConnectionString") {
-        Ok(connection_string) => {
-            Connection::url_from_options(&redisevents::config::StreamOptions {
-                connection_string: Some(connection_string),
-                ..Default::default()
-            })
-        }
-        Err(_) => Ok("redis://127.0.0.1:6379".to_owned()),
-    }
+/// The Redis URL: `REDIS_URL`, else `redis://127.0.0.1:6379/0`.
+fn redis_url() -> String {
+    std::env::var("REDIS_URL")
+        .unwrap_or_else(|_| redisevents::config::StreamOptions::DEFAULT_REDIS_URL.to_owned())
 }
 
 async fn shutdown_signal() {

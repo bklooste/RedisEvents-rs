@@ -156,8 +156,8 @@ pub async fn start_host(
 ) -> StreamsHost {
     Streams::builder(redis.connect().await)
         .keys(redis.keys())
-        // Trim = None is refused in Production; the C# test host runs as Development.
-        .environment("Development")
+        // trim = none is refused without an explicit opt-in.
+        .allow_untrimmed(true)
         .topic_options(topic, topic_options)
         .topic(topic)
         .consumer(consumer)
