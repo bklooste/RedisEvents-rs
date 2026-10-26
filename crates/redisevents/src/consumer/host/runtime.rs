@@ -1247,6 +1247,15 @@ impl Supervisor {
             }
         }
         registry.quarantine(&partitions, quarantine);
+        // Revoked: nothing reads them any more, even while the old read side drains.
+        let reading: Vec<u32> = self
+            .generation
+            .owned
+            .iter()
+            .copied()
+            .filter(|p| !partitions.contains(p))
+            .collect();
+        self.state.set_owned(&reading);
         self.ctx.recycle_readers();
         tracing::error!(
             topic = %self.ctx.topic(), consumer = %self.ctx.name, ?partitions, reason,

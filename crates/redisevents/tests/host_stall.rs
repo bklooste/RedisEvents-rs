@@ -182,6 +182,15 @@ fn mine(topic: &str, consumer: &str) -> Vec<health::StreamPartitionStatus> {
         .collect()
 }
 
+/// This consumer's partitions graded alone: health is process-wide, and the other tests' hosts
+/// share this process.
+fn graded(topic: &str, consumer: &str) -> health::StreamHealthReport {
+    let mut context = health::StreamHealthContext::default();
+    context.consumers = 1;
+    context.consumers_started = 1;
+    health::evaluate(&mine(topic, consumer), &context)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lease_owner_that_stops_making_progress_hands_its_partitions_over_and_reports_unhealthy()
 {
@@ -243,7 +252,7 @@ async fn a_lease_owner_that_stops_making_progress_hands_its_partitions_over_and_
     let stalled = mine(&topic, &consumer);
     assert!(!stalled.is_empty());
     assert!(stalled.iter().all(|p| p.stood_down_stalled), "{stalled:?}");
-    let report = host.health().await;
+    let report = graded(&topic, &consumer);
     assert_eq!(
         report.status,
         StreamHealthStatus::Unhealthy,
@@ -294,7 +303,10 @@ async fn a_lease_owner_that_stops_making_progress_hands_its_partitions_over_and_
     let back = mine(&topic, &consumer);
     assert_eq!(back.len(), 2);
     assert!(back.iter().all(|p| !p.stood_down_stalled), "{back:?}");
-    assert_eq!(host.health().await.status, StreamHealthStatus::Healthy);
+    assert_eq!(
+        graded(&topic, &consumer).status,
+        StreamHealthStatus::Healthy
+    );
     assert!(
         ownership(redis, &topic, &consumer)
             .await
@@ -338,6 +350,12 @@ async fn a_second_instance_takes_a_stalled_owners_partitions_over_within_about_o
     )
     .await;
     let took = wedged_at.elapsed();
+    // Checked now: once the quarantine (2 x TTL) ends, the stuck instance rejoins the fair share
+    // and may legitimately take one partition back (and wedge again).
+    assert!(
+        stuck.owned_partitions(&topic, &consumer).is_empty(),
+        "the stalled owner reads nothing while quarantined"
+    );
     // Stall window + check tick + one renew cycle of the rival, plus slack for a loaded machine.
     assert!(
         took <= Duration::from_secs(u64::from(STALL_SECONDS + TTL) + 5),
@@ -347,7 +365,6 @@ async fn a_second_instance_takes_a_stalled_owners_partitions_over_within_about_o
     let mut bodies = rival.bodies();
     bodies.sort();
     assert_eq!(bodies, ["price p0", "price p1"]);
-    assert!(stuck.owned_partitions(&topic, &consumer).is_empty());
 
     healthy.shutdown().await.expect("shutdown b");
     stuck.shutdown().await.expect("shutdown a");
@@ -378,7 +395,7 @@ async fn a_static_owner_that_stalls_reports_unhealthy_and_keeps_its_partitions()
 
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        let report = host.health().await;
+        let report = graded(&topic, &consumer);
         if report.rule == StreamHealthRule::Stalled {
             assert_eq!(report.status, StreamHealthStatus::Unhealthy);
             assert!(

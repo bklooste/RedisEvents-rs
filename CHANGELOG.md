@@ -7,6 +7,9 @@ and the crates follow [Semantic Versioning](https://semver.org/).
 
 ### Added: a stalled Lease owner hands its partitions on (port of C# RedisEvents#52)
 
+Released as 0.4: `ConsumerOptions` gains a public field, which breaks exhaustive struct literals
+built against 0.3.0 (use `..ConsumerOptions::default()`).
+
 - `ConsumerOptions::unhealthy_stalled_seconds` (default 300, `0` off) and the health rule
   `StreamHealthRule::Stalled` (Unhealthy). Measured on the process's own clock: no read returned, no
   batch completed, a batch held too long, or position writes failing. `StreamPartitionStatus` gains
