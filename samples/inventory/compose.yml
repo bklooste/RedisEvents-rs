@@ -5,6 +5,8 @@
 # C# images build from a checkout of bklooste/cqrs-simple-micro-service (CSHARP_SAMPLE_DIR).
 # Rust images (E5b/E5c) are expected as ${RUST_COMMAND_IMAGE} / ${RUST_VIEWS_IMAGE}; matrix.sh skips a
 # pairing whose image is not present locally.
+# Every service sets STREAMS_KEY_PREFIX: C# defaults to `production:re:`, Rust to `local:re:`, so without it
+# the two sides would not share keys.
 name: inventory
 services:
   redis:
@@ -19,6 +21,7 @@ services:
       dockerfile: src/SimpleCQRS.API/Dockerfile
     environment:
       Streams__ConnectionString: redis:6379,allowAdmin=false
+      STREAMS_KEY_PREFIX: ${STREAMS_KEY_PREFIX:-inventory:re:}
     depends_on: [redis]
     ports: ["54105:8080"]
 
@@ -29,6 +32,7 @@ services:
       dockerfile: src/SimpleCQRS.Views/Dockerfile
     environment:
       Streams__ConnectionString: redis:6379,allowAdmin=false
+      STREAMS_KEY_PREFIX: ${STREAMS_KEY_PREFIX:-inventory:re:}
     depends_on: [redis]
     ports: ["54106:8080"]
 
@@ -39,6 +43,7 @@ services:
     pull_policy: never
     environment:
       REDIS_URL: redis://redis:6379
+      STREAMS_KEY_PREFIX: ${STREAMS_KEY_PREFIX:-inventory:re:}
       PORT: "8080"
     depends_on: [redis]
     ports: ["54105:8080"]
@@ -49,6 +54,7 @@ services:
     pull_policy: never
     environment:
       REDIS_URL: redis://redis:6379
+      STREAMS_KEY_PREFIX: ${STREAMS_KEY_PREFIX:-inventory:re:}
       PORT: "8080"
     depends_on: [redis]
     ports: ["54106:8080"]

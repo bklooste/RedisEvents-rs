@@ -12,16 +12,29 @@ Where this document and the C# code disagree, the code wins and this document ha
 ## 1. Key namespace
 *Source: `src/RedisEvents/Config/KeyNamespace.cs`*
 
-Every key below starts with a prefix, resolved in this order:
+> **WARNING: the C# and Rust defaults differ.** With nothing configured, C# uses `production:re:` and
+> Rust uses `local:re:`. They then silently read and write different keys. A deployment that mixes
+> the two languages MUST set `STREAMS_KEY_PREFIX` on every service (recommended), or set
+> `STREAMS_ENVIRONMENT` on the Rust side equal to the C# environment name.
+
+Every key below starts with a prefix. The prefix MUST be identical for all services that share a topic.
+How it is resolved is per implementation:
+
+**C#** (`KeyNamespace.cs`):
 
 1. `STREAMS_KEY_PREFIX`, when set and not blank, used **verbatim**.
 2. Otherwise `"<env>:re:"`, where `<env>` is the lowercased value of the first set variable among
    `ASPNETCORE_ENVIRONMENT` and `DOTNET_ENVIRONMENT`, defaulting to `production`.
 
-Implementations MUST resolve the prefix this way, including the two .NET variable names, so that a
-C# and a Rust service in the same environment read the same keys. An implementation MAY accept
-further variables, but only ranked below these.
+**Rust**:
 
+1. `STREAMS_KEY_PREFIX`, when set and not blank, used **verbatim** (same as C#).
+2. Otherwise `"<env>:re:"` with `<env>` the lowercased `STREAMS_ENVIRONMENT`.
+3. Otherwise `local:re:`.
+
+Rust never reads `ASPNETCORE_ENVIRONMENT` or `DOTNET_ENVIRONMENT` and never defaults to `production`,
+so a dev process with no configuration cannot touch production keys. `keys.json` `prefix_resolution`
+records the C# rule; Rust is tested against its own rule.
 The prefix always goes *outside* any `{…}` hash tag, so it never changes a key's cluster slot.
 
 ## 2. Keys

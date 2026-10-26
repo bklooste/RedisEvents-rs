@@ -12,6 +12,9 @@ PAIRINGS=${PAIRINGS:-"csharp/csharp csharp/rust rust/csharp rust/rust"}
 WRITE=http://localhost:54105 READ=http://localhost:54106
 # Overrides read by Scenarify's fixture (env vars: ':' is '__' on Linux).
 export SvcHttpUrl Streams__ConnectionString="127.0.0.1:6479,allowAdmin=false"
+# Same key prefix for the compose services AND the Scenarify test processes below (they publish through the
+# C# event store and inherit this): C# and Rust default to different prefixes when nothing is set.
+export STREAMS_KEY_PREFIX=${STREAMS_KEY_PREFIX:-inventory:re:}
 dc() { docker compose -f compose.yml "$@"; }
 
 wait_http() { for _ in $(seq 60); do curl -fsS -o /dev/null "$1" 2>/dev/null && return 0; sleep 1; done; return 1; }

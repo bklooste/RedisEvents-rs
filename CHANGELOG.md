@@ -3,6 +3,21 @@
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/),
 and the crates follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed (behaviour)
+
+- **Key prefix resolution (Rust only; C# unchanged).** `Keys::from_env` now resolves
+  `STREAMS_KEY_PREFIX` (verbatim, unless blank), else `STREAMS_ENVIRONMENT` (lowercased) -> `<env>:re:`,
+  else `local:re:`. Rust no longer reads `ASPNETCORE_ENVIRONMENT` or `DOTNET_ENVIRONMENT` and no longer
+  defaults to `production`. The consumer host's validation environment name follows the same rule
+  (`STREAMS_ENVIRONMENT`, else `local`). **A Rust service that relied on `ASPNETCORE_ENVIRONMENT`
+  (or the `production` default) now uses `local:re:` unless `STREAMS_ENVIRONMENT` or
+  `STREAMS_KEY_PREFIX` is set, and will no longer see its old keys.** C# still defaults to
+  `production:re:`, so mixed C#/Rust deployments must set `STREAMS_KEY_PREFIX` on both services (or
+  `STREAMS_ENVIRONMENT` on Rust equal to the C# environment name). No API change.
+- Startup logs the resolved prefix at info, and says when it fell back to `local:re:`.
+
 ## [0.2] - Unreleased
 
 First release. Versions follow the C# repo's scheme (`version.json` holds `0.2`; CI appends the git height, see `docs/PUBLISHING.md`).
