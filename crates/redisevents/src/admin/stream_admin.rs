@@ -691,7 +691,7 @@ fn check_name(what: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// The id right after `id` (C# `Next`).
+/// The id right after `id`.
 fn next_id(id: StreamId) -> StreamId {
     if id.seq == StreamId::MAX_PART {
         StreamId::new(id.ms + 1, 0)

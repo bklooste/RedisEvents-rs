@@ -78,7 +78,7 @@ crates/redisevents/src/
   admin/
     meta.rs              B1     topic meta (ensure / grow / refuse shrink)
     stream_admin.rs      D1     StreamAdmin
-    health.rs            D2     StreamHealth, StreamLag, StreamStatus
+    health.rs            D2     free functions `check`, `evaluate`, `grade`, `find_silent`, `partitions`, `any`, `estimate_entries_behind`
   diagnostics/mod.rs     W0.2 names / B6 everything else (+ `otel` feature)
   testing.rs             D4     in-memory doubles, behind feature `testing`
 crates/redisevents-test-support/   W0.2   Redis fixture + RecordingHandler (dev-dependency only)
@@ -195,7 +195,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
     Transport { message: String, source: Option<BoxError> },     // C# StreamTransportException
     Redis(redis::RedisError), InvalidArgument(String), Codec(CodecError), Closed(&'static str),
 }
-fn config(..), transport(..), transport_with(.., src), invalid_argument(..), is_dont_ignore(&self)
+fn config(..), transport(..), transport_with(.., src), invalid_argument(..), is_blocking(&self)
 ```
 Which to use: wrong configuration or Redis state that contradicts it (partition shrink, circular
 `StartFrom`) → `Config`. Unreadable data (malformed entry/header/id, unknown codec version) or a
@@ -801,22 +801,22 @@ pub struct NullPositionStore;                     // complete
     `StreamAdmin::reset_marker_field(p)`; consts `RESET_MARKER_PREFIX`, `DEFAULT_MAX_COUNT_SCAN`.
   - A2's `ResetOnStart` refusal names `StreamAdmin::reset_position`; that is this method.
   **D2 public API (`admin/health.rs`, added by D2, lead review):**
-  - `StreamHealth::check(connection: Option<&Connection>, consumers: u32, consumers_started: u32) -> StreamHealthReport`
-    (async): the readiness answer. Reads `StreamStatus::partitions()`, a `PING` (1 s bound) when a
+  - `health::check(connection: Option<&Connection>, consumers: u32, consumers_started: u32) -> StreamHealthReport`
+    (async): the readiness answer. Reads `health::partitions()`, a `PING` (1 s bound) when a
     connection is given, and `OwnershipRegistry::any_degraded()`. `consumers` / `consumers_started`
     are the consumer host's counts (`0, 0` when none); C4 supplies them.
-  - `StreamHealth::evaluate(&[StreamPartitionStatus], &StreamHealthContext) -> StreamHealthReport`
-    (pure, C# `Evaluate`), `StreamHealth::grade(&StreamPartitionStatus) -> StreamPartitionHealth`,
-    `StreamHealth::find_silent(&[..]) -> Option<StreamSilentConsumer>`.
+  - `health::evaluate(&[StreamPartitionStatus], &StreamHealthContext) -> StreamHealthReport`
+    (pure), `health::grade(&StreamPartitionStatus) -> StreamPartitionHealth`,
+    `health::find_silent(&[..]) -> Option<StreamSilentConsumer>`.
   - Types: `StreamHealthStatus` and `StreamHealthRule` (`#[non_exhaustive]`, `Copy`),
     `StreamPartitionRunState`, `StreamPartitionHealth { status, rule }`, `StreamHealthContext`
-    (pub fields, `Default`), `StreamHealthReport { status, rule, description, data:
-    BTreeMap<String, HealthValue>, partition }`, `HealthValue { Int, Float, Bool, Text }`,
+    (pub fields, `Default`), `StreamHealthReport { status, rule, description, details:
+    StreamHealthDetails, partition }` (`StreamHealthDetails`: typed `Option` fields, `Serialize`),
     `StreamSilentConsumer`, `StreamPartitionStatus` (pub fields: one snapshot per partition, C# names
     in snake_case, `StreamId` positions, `f64` milliseconds, `-1.0` for "never sampled").
-  - `StreamStatus::any()`, `StreamStatus::partitions()`: snapshots of the process-wide monitors.
-  - `StreamLag::{DEFAULT_SAMPLE_INTERVAL (15 s), DEFAULT_PUSH_INTERVAL (1 s), TAIL_STALE_AFTER (60 s)}`,
-    `StreamLag::estimate_entries_behind(length, first, last, processed) -> i64`.
+  - `health::any()`, `health::partitions()`: snapshots of the process-wide monitors.
+  - `health::{DEFAULT_SAMPLE_INTERVAL (15 s), DEFAULT_PUSH_INTERVAL (1 s), TAIL_STALE_AFTER (60 s)}`,
+    `health::estimate_entries_behind(length, first, last, processed) -> i64`.
   - Crate-private (C2/C4 wire these, `admin/health/monitor.rs`): `PartitionMonitor` (created with
     `monitor::track(..)`, fed by `observe`, `set_tail`, `mark_blocked/unblocked/stopped/running`,
     `set_lag_entries`), `StreamLagSampler::start(conn, sample, push)` (publishes `streams.lag.ms`,

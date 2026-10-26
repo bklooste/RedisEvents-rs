@@ -7,7 +7,7 @@
 
 use crate::wire::StreamMsg;
 
-/// Most trace links built for one batch (C# `StreamActivity.MaxTraceLinks`).
+/// Most trace links built for one batch.
 pub(crate) const MAX_TRACE_LINKS: usize = 16;
 
 /// Offset of the 32-hex trace id within `00-<trace>-<span>-<flags>`.

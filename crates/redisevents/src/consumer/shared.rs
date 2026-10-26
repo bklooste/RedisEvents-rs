@@ -4,12 +4,11 @@
 //!
 //! Three pieces:
 //!
-//! - [`ResetSignal`]: the live reset hand-off (C# `ResetSignal`). The flusher publishes a pending
+//! - [`ResetSignal`]: the live reset hand-off. The flusher publishes a pending
 //!   reset per partition ([`ResetSignal::request`]); the read loop takes it ([`ResetSignal::try_take`])
 //!   right before its next fetch, calls [`PositionSink::rewind`] and then `Fetch::seek`; the flusher
 //!   deletes the Redis marker only once [`ResetSignal::try_clear_taken`] says the take happened.
-//! - [`PositionSink`]: how the worker reports processed positions (C# `PositionRecorder`,
-//!   `PositionFlush`, `PositionFlusher.Rewind`). Positions are recorded **when processed, never when
+//! - [`PositionSink`]: how the worker reports processed positions. Positions are recorded **when processed, never when
 //!   read**.
 //! - [`PartitionStop`]: how a partition is stopped from outside: gracefully (shutdown) or because it
 //!   was lost (lease lost, rebalanced away, contested). After a revoke the worker records nothing
@@ -44,7 +43,7 @@ enum Slot {
     Taken(ResetMarker),
 }
 
-/// The live reset hand-off between the flusher tick and the read loops (C# `ResetSignal`).
+/// The live reset hand-off between the flusher tick and the read loops.
 ///
 /// One per consumer (host), indexed by partition `0..partition_count`. Shared as `Arc<ResetSignal>`.
 ///
@@ -183,8 +182,7 @@ impl ResetSignal {
 /// A boxed `Send` future, for the object-safe [`PositionSink::flush`].
 pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// Where the worker reports positions (C3's `PositionFlusher` implements it; C# `PositionRecorder`
-/// + `PositionFlush` + `PositionFlusher.Rewind`). Shared as `Arc<dyn PositionSink>`.
+/// Where the worker reports positions (C3's `PositionFlusher` implements it). Shared as `Arc<dyn PositionSink>`.
 ///
 /// Rules the worker keeps:
 /// - [`record`](Self::record) is called **only after** a batch (or, under `SyncMessage`, a message)
@@ -210,12 +208,10 @@ pub(crate) trait PositionSink: Send + Sync + 'static {
     fn flush(&self) -> BoxFuture<'_, Result<()>>;
 
     /// The worker entered (`true`) or left (`false`) the `HandleError::Block` back-off on
-    /// `partition`. Health hook: the host forwards it to the partition's monitor (C#
-    /// `Monitor.MarkBlocked` / `MarkUnblocked`). Nothing by default.
+    /// `partition`. Health hook: the host forwards it to the partition's monitor. Nothing by default.
     fn blocked(&self, _partition: u32, _blocked: bool) {}
 
-    /// `partition` stood down on a handler failure (`StopPartition` / `Fail`). Health hook (C#
-    /// `Monitor.MarkStopped`), called at the failure so the state is visible before the worker
+    /// `partition` stood down on a handler failure (`StopPartition` / `Fail`). Health hook, called at the failure so the state is visible before the worker
     /// exits. Nothing by default.
     fn stopped(&self, _partition: u32, _reason: &str) {}
 }

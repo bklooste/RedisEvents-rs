@@ -8,7 +8,7 @@
 //! | `outbox.rs` | B3 | `Outbox`, state store, idempotency, topic forwarder |
 //!
 //! Cancellation: there is no token parameter; drop the future. Whether a dropped publish was
-//! written is unknown (as with a cancelled C# call); each implementation documents its
+//! written is unknown ; each implementation documents its
 //! cancel-safety.
 
 pub mod buffered;
@@ -31,7 +31,7 @@ use crate::error::Result;
 use crate::message::{Message, PayloadCodec};
 use crate::wire::StreamId;
 
-/// Per-call publish options (C# `PublishOptions`). `Default` is "none of these".
+/// Per-call publish options. `Default` is "none of these".
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PublishOptions {
@@ -83,7 +83,7 @@ impl PublishOptions {
     }
 }
 
-/// Publishes to one topic (C# `IStreamPublisher`). Implementations are bound to a topic at
+/// Publishes to one topic. Implementations are bound to a topic at
 /// construction.
 pub trait Publisher: Send + Sync {
     /// Publishes one message and returns its id once Redis has it.
@@ -108,7 +108,7 @@ pub trait Publisher: Send + Sync {
     ) -> impl Future<Output = Result<()>> + Send;
 }
 
-/// Publishes through a buffer (C# `IStreamBufferedPublisher`). Enqueued messages not yet flushed
+/// Publishes through a buffer. Enqueued messages not yet flushed
 /// are lost if the process dies: the documented trade-off for throughput.
 pub trait BufferedPublisher: Publisher {
     /// Queues one message. Returns once queued (waiting for room, or dropping the oldest, per
@@ -163,7 +163,7 @@ impl<P: BufferedPublisher> BufferedPublisher for Arc<P> {
     }
 }
 
-/// Typed publishing over any [`Publisher`] (C# `TypedPublishExtensions`): encodes with codec `C`
+/// Typed publishing over any [`Publisher`]: encodes with codec `C`
 /// and uses [`Message::TYPE`] as the type string.
 ///
 /// ```no_run

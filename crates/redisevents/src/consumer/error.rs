@@ -1,15 +1,15 @@
 //! The handler error contract. **Owner: W0.2** (final). C2 implements the behaviour.
 //!
-//! | Outcome | C# | Rust | Worker does |
-//! | --- | --- | --- | --- |
-//! | success | return | `Ok(())` | advance the position |
-//! | ordinary failure | any exception | [`HandleError::Skip`] | apply `ConsumerOptions::on_error` (default `BestEffort`: log, count `streams.errors`, advance, carry on) |
-//! | must not be lost | `DontIgnoreException` | [`HandleError::Block`] | do **not** advance; retry the same batch after [`BLOCK_BACKOFF`] (1s, 2, 4, 8, 16, then 30s forever) while other partitions run; `streams.blocked` = 1 |
-//! | panic | (unhandled exception) | — | caught by the worker and treated as `Skip` |
+//! | Outcome | Handler returns | Worker does |
+//! | --- | --- | --- |
+//! | success | `Ok(())` | advance the position |
+//! | ordinary failure | [`HandleError::Skip`] | apply `ConsumerOptions::on_error` (default `BestEffort`: log, count `streams.errors`, advance, carry on) |
+//! | must not be lost | [`HandleError::Block`] | do **not** advance; retry the same batch after [`BLOCK_BACKOFF`] (1s, 2, 4, 8, 16, then 30s forever) while other partitions run; `streams.blocked` = 1 |
+//! | panic | (a panic) | caught by the worker and treated as `Skip` |
 //!
 //! `?` on any `std::error::Error` gives `Skip`, except the crate's own
 //! [`Error::Config`] / [`Error::Transport`], which
-//! give `Block` (they are `DontIgnoreException`s in C#). Use [`ResultExt::or_block`] or
+//! give `Block`. Use [`ResultExt::or_block`] or
 //! [`HandleError::block`] to block on anything else.
 
 use std::fmt;
@@ -79,7 +79,7 @@ impl<E: std::error::Error + Send + Sync + 'static> From<E> for HandleError {
     fn from(error: E) -> Self {
         let boxed: BoxError = Box::new(error);
         match boxed.downcast::<Error>() {
-            Ok(own) if own.is_dont_ignore() => Self::Block(own),
+            Ok(own) if own.is_blocking() => Self::Block(own),
             Ok(own) => Self::Skip(own),
             Err(other) => Self::Skip(other),
         }
@@ -138,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn question_mark_maps_ordinary_errors_to_skip_and_dont_ignore_to_block() {
+    fn question_mark_maps_ordinary_errors_to_skip_and_blocking_errors_to_block() {
         assert!(!HandleError::from(io()).is_block());
         assert!(HandleError::from(Error::config("bad")).is_block());
         assert!(HandleError::from(Error::transport("bad")).is_block());

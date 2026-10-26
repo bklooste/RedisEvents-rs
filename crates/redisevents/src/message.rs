@@ -1,8 +1,7 @@
 //! Typed messages and the payload codec seam. **Owner: W0.2** (final; [`Json`] is complete).
 //!
 //! A typed message is any serde type that names its wire type string through [`Message::TYPE`].
-//! The C# typed API defaults the type to `typeof(T).FullName`, which Rust cannot reproduce, so here
-//! it is mandatory (`WIRE.md` §4 "Type strings"). The payload format is a type parameter
+//! Rust has no stable type name to default to, so the type string is mandatory (`WIRE.md` §4 "Type strings"). The payload format is a type parameter
 //! implementing [`PayloadCodec`]: [`Json`] here, MessagePack (+ LZ4) in `redisevents-msgpack` (E1).
 //!
 //! An LZ4 MessagePack body is in MessagePack-CSharp's `Lz4BlockArray` framing (ext 98), which a

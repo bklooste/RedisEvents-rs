@@ -46,7 +46,7 @@ impl StartPosition {
         StreamId::MIN
     }
 
-    /// Resolves the configured start against the stored position (C# `StartPosition.Resolve`).
+    /// Resolves the configured start against the stored position.
     ///
     /// # Errors
     /// [`Error::Config`] for `Stored` with a `Stored` fallback, or `Date` without a date.

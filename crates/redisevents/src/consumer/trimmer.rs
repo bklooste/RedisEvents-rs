@@ -42,7 +42,7 @@ const META_SUFFIX: &str = ":meta";
 /// `Length` when no clamp was in force and `XLEN` was never read.
 pub(crate) const LENGTH_NOT_READ: i64 = -1;
 
-/// What one sweep did to one partition (C# `PartitionTrimResult`).
+/// What one sweep did to one partition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PartitionTrimResult {
     pub partition: u32,
@@ -61,7 +61,7 @@ pub(crate) struct PartitionTrimResult {
     pub clamp_released: bool,
 }
 
-/// What one sweep did to one topic (C# `TopicTrimResult`).
+/// What one sweep did to one topic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TopicTrimResult {
     pub topic: String,
@@ -199,7 +199,7 @@ impl BackgroundTrimmer {
         }
     }
 
-    /// One sweep of `topic` now (C# `TrimTopicOnceAsync`).
+    /// One sweep of `topic` now.
     ///
     /// # Errors
     /// [`Error::Config`] without a retention window (the cutoff would be "now", trimming

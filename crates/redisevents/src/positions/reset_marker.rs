@@ -34,7 +34,7 @@ pub(crate) struct ResetMarker {
     pub(crate) issued_utc: OffsetDateTime,
 }
 
-/// The issue time of a marker that carries none (C# `DateTimeOffset.MinValue`).
+/// The issue time of a marker that carries none.
 fn no_time() -> OffsetDateTime {
     datetime!(0001-01-01 0:00 UTC)
 }
