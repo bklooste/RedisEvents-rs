@@ -1,41 +1,30 @@
 # RedisEvents wire format, codec v1
 
 This is the contract shared by the C# library ([bklooste/RedisEvents](https://github.com/bklooste/RedisEvents))
-and this Rust port. Two implementations are compatible exactly when they agree on everything in this
-document. Internal design is free to differ.
+and this Rust port. It defines **what is in Redis**: key names, entry fields, value formats, scripts
+and the protocols built on them. Two implementations are compatible exactly when they agree on
+everything in this document, so C# and Rust services can share topics and read and write each other's
+data. Everything else, including configuration, defaults, APIs and internal design, is up to each
+library and documented there.
 
-The C# code is the reference implementation. Each section names the source file it was taken from.
-Where this document and the C# code disagree, the code wins and this document has a bug.
+For the bytes in Redis, the C# code is the reference. Each section names the source file it was taken
+from. Where this document and the C# code disagree about what is written to Redis, the code wins and
+this document has a bug.
 
 "MUST", "MUST NOT" and "SHOULD" are used as in RFC 2119.
 
 ## 1. Key namespace
-*Source: `src/RedisEvents/Config/KeyNamespace.cs`*
 
-> **WARNING: the C# and Rust defaults differ.** With nothing configured, C# uses `production:re:` and
-> Rust uses `local:re:`. They then silently read and write different keys. A deployment that mixes
-> the two languages MUST set `STREAMS_KEY_PREFIX` on every service (recommended), or set
-> `STREAMS_ENVIRONMENT` on the Rust side equal to the C# environment name.
+Every key below starts with a **prefix**, a literal string such as `prod:re:`. It goes *outside* any
+`{…}` hash tag, so it never changes a key's cluster slot.
 
-Every key below starts with a prefix. The prefix MUST be identical for all services that share a topic.
-How it is resolved is per implementation:
-
-**C#** (`KeyNamespace.cs`):
-
-1. `STREAMS_KEY_PREFIX`, when set and not blank, used **verbatim**.
-2. Otherwise `"<env>:re:"`, where `<env>` is the lowercased value of the first set variable among
-   `ASPNETCORE_ENVIRONMENT` and `DOTNET_ENVIRONMENT`, defaulting to `production`.
-
-**Rust**:
-
-1. `STREAMS_KEY_PREFIX`, when set and not blank, used **verbatim** (same as C#).
-2. Otherwise `"<env>:re:"` with `<env>` the lowercased `STREAMS_ENVIRONMENT`.
-3. Otherwise `local:re:`.
-
-Rust never reads `ASPNETCORE_ENVIRONMENT` or `DOTNET_ENVIRONMENT` and never defaults to `production`,
-so a dev process with no configuration cannot touch production keys. `keys.json` `prefix_resolution`
-records the C# rule; Rust is tested against its own rule.
-The prefix always goes *outside* any `{…}` hash tag, so it never changes a key's cluster slot.
+- Services that share a topic MUST use the same prefix. Different prefixes are separate namespaces,
+  so two environments can share one Redis.
+- Both libraries take the prefix verbatim from `STREAMS_KEY_PREFIX` when it is set. That is the
+  recommended way to configure a deployment that mixes C# and Rust services.
+- Without it, each library derives a prefix in its own way, and the two derivations do **not** agree
+  (see each library's docs). A mixed deployment that relies on them reads and writes different keys
+  without any error.
 
 ## 2. Keys
 *Source: `Wire/StreamKeys.cs`, `Producer/Outbox.cs` (`StateKey`), `Producer/Idempotency.cs`, `RedisEvents.Projections/RedisViewStore.cs`*
@@ -176,7 +165,8 @@ Fields that do not parse as a non-negative integer are not positions, and reader
 | `i:<instanceId>` | the same owner value (presence) | `HEXPIRE` lease TTL |
 | `__hexpire-probe:<instanceId>` | `1`, briefly at startup | deleted after the probe |
 
-- `<podName>` is `POD_NAME` (trimmed), or empty.
+- `<podName>` is free text naming the process (for example its pod or host name), possibly empty.
+  Readers display it and MUST NOT interpret it.
 - Per-field TTLs need **Redis 7.4 or later**. An implementation MUST probe for `HEXPIRE` at startup
   and refuse Lease mode without it.
 - Readers MUST skip fields that are not a partition number.
@@ -199,9 +189,8 @@ languages under one consumer name then share partitions fairly.
 Defaults: TTL 30 s, with the renew interval below the TTL.
 
 ### Static mode
-Ownership is computed from `STREAMS_INSTANCE_INDEX` / `STREAMS_INSTANCE_COUNT`, or from the
-`-<n>` ordinal suffix of `POD_NAME`. The hash is written for observation only and never decides
-ownership.
+Each instance is assigned its partitions by its own configuration. It writes the same `<p>` and
+`i:<instanceId>` fields for observation only, and the hash never decides ownership.
 
 ## 9. Text formats
 
