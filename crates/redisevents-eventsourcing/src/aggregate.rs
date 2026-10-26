@@ -1,5 +1,5 @@
 //! The aggregate abstraction: [`Aggregate`] (the type-level description) and [`AggregateRoot`] (an
-//! instance with id, version and uncommitted changes; C# `AggregateRoot`).
+//! instance with id, version and pending events).
 
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -28,7 +28,7 @@ pub trait Aggregate: Send + Sync + 'static {
     const NAME: &'static str;
 
     /// Applies one event to the state. Must be infallible and deterministic: it runs when an event
-    /// is raised and again on every load.
+    /// is emitted and again on every load.
     fn apply(state: &mut Self::State, event: &Self::Event);
 
     /// Encodes an event as `(wire type, body)`.
@@ -46,17 +46,16 @@ pub trait Aggregate: Send + Sync + 'static {
     }
 }
 
-/// One aggregate instance: id, version, state and the events raised since it was loaded or last
-/// saved (C# `AggregateRoot`: `Raise`, `GetUncommittedChanges`, `MarkChangesAsCommitted`,
-/// `LoadFromHistory`, `Version`).
+/// One aggregate instance: id, version, state and the events emitted since it was loaded or last
+/// saved.
 ///
 /// It derefs to the state, so a pure domain's commands are called directly:
-/// `let event = root.check_in(5, 1.0)?; root.raise(event);`.
+/// `let event = root.check_in(5, 1.0)?; root.emit(event);`.
 pub struct AggregateRoot<A: Aggregate> {
     id: String,
     version: u64,
     state: A::State,
-    uncommitted: Vec<A::Event>,
+    pending: Vec<A::Event>,
     _marker: PhantomData<fn() -> A>,
 }
 
@@ -70,7 +69,7 @@ where
             .field("id", &self.id)
             .field("version", &self.version)
             .field("state", &self.state)
-            .field("uncommitted", &self.uncommitted.len())
+            .field("pending", &self.pending.len())
             .finish()
     }
 }
@@ -79,19 +78,17 @@ impl<A: Aggregate> AggregateRoot<A> {
     /// A new, empty aggregate at version 0 with `id`.
     ///
     /// # Errors
-    /// [`Error::InvalidArgument`] when `id` is blank.
+    /// [`Error::BlankId`] when `id` is blank.
     pub fn new(id: impl Into<String>) -> Result<Self> {
         let id = id.into();
         if id.trim().is_empty() {
-            return Err(Error::InvalidArgument(
-                "An aggregate id must not be blank.".to_owned(),
-            ));
+            return Err(Error::BlankId);
         }
         Ok(Self {
             id,
             version: 0,
             state: A::State::default(),
-            uncommitted: Vec::new(),
+            pending: Vec::new(),
             _marker: PhantomData,
         })
     }
@@ -109,46 +106,52 @@ impl<A: Aggregate> AggregateRoot<A> {
     }
 
     /// The number of events in the state stream as of the last load or save (the optimistic
-    /// concurrency token). Uncommitted events are not counted.
+    /// concurrency token). Pending events are not counted.
     #[must_use]
     pub fn version(&self) -> u64 {
         self.version
     }
 
-    /// The current state, including uncommitted events.
+    /// The current state, including pending events.
     #[must_use]
     pub fn state(&self) -> &A::State {
         &self.state
     }
 
-    /// Applies `event` to the state and records it as uncommitted (C# `Raise`).
-    pub fn raise(&mut self, event: A::Event) {
+    /// Applies a new `event` to the state and queues it to be saved.
+    pub fn emit(&mut self, event: A::Event) {
         A::apply(&mut self.state, &event);
-        self.uncommitted.push(event);
+        self.pending.push(event);
     }
 
-    /// The events raised since the last load or save, oldest first.
+    /// The events emitted since the last load or save, oldest first.
     #[must_use]
-    pub fn uncommitted_changes(&self) -> &[A::Event] {
-        &self.uncommitted
+    pub fn pending(&self) -> &[A::Event] {
+        &self.pending
     }
 
-    /// Advances the version by the number of uncommitted events and clears them. The repository
-    /// calls this after a successful save.
-    pub fn mark_changes_as_committed(&mut self) {
-        self.version += self.uncommitted.len() as u64;
-        self.uncommitted.clear();
+    /// Advances the version by the number of pending events and clears them. A repository calls
+    /// this after a successful save; application code does not need to.
+    pub fn commit(&mut self) {
+        self.version += self.pending.len() as u64;
+        self.pending.clear();
     }
 
-    /// Applies a stored history in order and sets the version to its length. Adds nothing to the
-    /// uncommitted changes.
-    pub fn load_from_history(&mut self, history: impl IntoIterator<Item = A::Event>) {
-        let mut count = 0_u64;
+    /// Rebuilds the aggregate `id` from a stored history, applied in order. The version is the
+    /// history's length and nothing is pending.
+    ///
+    /// # Errors
+    /// [`Error::BlankId`] when `id` is blank.
+    pub fn from_history(
+        id: impl Into<String>,
+        history: impl IntoIterator<Item = A::Event>,
+    ) -> Result<Self> {
+        let mut root = Self::new(id)?;
         for event in history {
-            A::apply(&mut self.state, &event);
-            count += 1;
+            A::apply(&mut root.state, &event);
+            root.version += 1;
         }
-        self.version = count;
+        Ok(root)
     }
 }
 

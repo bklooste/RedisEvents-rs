@@ -122,6 +122,12 @@ curl -X POST "localhost:54105/InventoryCommand/Add?name=widget"
 curl localhost:54106/items/
 ```
 
+## Connection
+
+The Rust services read `REDIS_URL` (default `redis://127.0.0.1:6379/0`); the C# services keep their
+`Streams__ConnectionString`. Both point at the same Redis in `compose.yml`. To reuse a C# connection
+string in a Rust service, translate it with `redisevents::connection::stackexchange::to_redis_url`.
+
 ## Key prefix (read this when mixing C# and Rust)
 
 C# defaults to the key prefix `production:re:` and Rust to `local:re:`, so with no configuration the

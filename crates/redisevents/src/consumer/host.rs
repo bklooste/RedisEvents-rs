@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::admin::health::{StreamHealth, StreamHealthReport};
+use crate::admin::health::{self, StreamHealthReport};
 use crate::config::{ConsumerOptions, StreamOptions, TopicOptions};
 use crate::connection::Connection;
 use crate::consumer::handler::BatchHandler;
@@ -49,7 +49,7 @@ use crate::wire::Keys;
 use erased::{HandlerRunner, RunnerFactory, StoreDyn, StoreHolder};
 use runtime::{ConsumerState, Fault};
 
-/// Entry point of the consumer host (C# `AddStreams` + `AddStream`).
+/// Entry point of the consumer host.
 #[derive(Debug, Clone, Copy)]
 pub struct Streams;
 
@@ -62,7 +62,6 @@ impl Streams {
             conn,
             keys: None,
             options: StreamOptions::default(),
-            environment: None,
             registrations: Vec::new(),
         }
     }
@@ -73,7 +72,6 @@ pub struct StreamsBuilder {
     conn: Connection,
     keys: Option<Keys>,
     options: StreamOptions,
-    environment: Option<String>,
     registrations: Vec<Registration>,
 }
 
@@ -93,7 +91,7 @@ impl StreamsBuilder {
         self
     }
 
-    /// Replaces the whole configuration (C# `Streams` section): topics, consumer defaults, the
+    /// Replaces the whole configuration ([`StreamOptions`]): topics, consumer defaults, the
     /// root consumer name. Call it before [`StreamsBuilder::topic`], which reads consumer entries
     /// from it.
     #[must_use]
@@ -108,15 +106,15 @@ impl StreamsBuilder {
         &self.options
     }
 
-    /// The host environment name used by validation (`Development` relaxes `Trim = None`).
-    /// Default: `STREAMS_ENVIRONMENT`, else `local`.
+    /// Permits topics with `trim = none` ([`StreamOptions::allow_untrimmed`]); validation refuses
+    /// them otherwise, because an untrimmed stream grows until Redis runs out of memory.
     #[must_use]
-    pub fn environment(mut self, name: impl Into<String>) -> Self {
-        self.environment = Some(name.into());
+    pub fn allow_untrimmed(mut self, allow: bool) -> Self {
+        self.options.allow_untrimmed = allow;
         self
     }
 
-    /// Sets (replaces) the options of one topic (C# `Streams:Topics:<topic>`).
+    /// Sets (replaces) the options of one topic (`topics.<topic>`).
     #[must_use]
     pub fn topic_options(mut self, topic: impl Into<String>, options: TopicOptions) -> Self {
         self.options.topics.insert(topic.into(), options);
@@ -124,7 +122,7 @@ impl StreamsBuilder {
     }
 
     /// Starts a consumer registration on `topic`. Its options start from the first
-    /// `Streams:Consumers` entry for that topic, else the defaults.
+    /// `consumers` entry for that topic, else the defaults.
     #[must_use]
     pub fn topic(self, topic: impl Into<String>) -> ConsumerBuilder {
         let topic = topic.into();
@@ -155,17 +153,7 @@ impl StreamsBuilder {
     /// Redis fails during startup.
     pub async fn spawn(self) -> Result<StreamsHost> {
         let keys = self.keys.unwrap_or_else(Keys::from_env);
-        let environment = self
-            .environment
-            .unwrap_or_else(runtime::environment_from_env);
-        runtime::spawn(
-            self.conn,
-            keys,
-            self.options,
-            &environment,
-            self.registrations,
-        )
-        .await
+        runtime::spawn(self.conn, keys, self.options, self.registrations).await
     }
 }
 
@@ -178,8 +166,8 @@ pub struct ConsumerBuilder {
 }
 
 impl ConsumerBuilder {
-    /// The consumer name (owner of the position hash). Default: the options' `Consumer`, the root
-    /// `Streams:Consumer`, then the executable name.
+    /// The consumer name (owner of the position hash). Default: the options' `consumer`, the
+    /// root `consumer`, then the executable name.
     #[must_use]
     pub fn consumer(mut self, name: impl Into<String>) -> Self {
         self.options.consumer = Some(name.into());
@@ -210,7 +198,7 @@ impl ConsumerBuilder {
         &self.options
     }
 
-    /// Uses `store` instead of the Redis position store (C# `IPositionStore` override). Only used
+    /// Uses `store` instead of the Redis position store. Only used
     /// when `Persist` is not `None`.
     #[must_use]
     pub fn position_store<S: PositionStore>(mut self, store: S) -> Self {
@@ -285,7 +273,7 @@ impl StreamsHost {
     }
 
     /// How many consumers are up (started and not stopped or failed); for
-    /// [`StreamHealth::check`].
+    /// [`health::check`].
     #[must_use]
     pub fn consumers_started(&self) -> u32 {
         let up = self.consumers.iter().filter(|c| c.is_started()).count();
@@ -309,15 +297,15 @@ impl StreamsHost {
             .unwrap_or_default()
     }
 
-    /// The readiness answer for this process (D2 [`StreamHealth::check`] with this host's counts).
+    /// The readiness answer for this process (D2 [`health::check`] with this host's counts).
     pub async fn health(&self) -> StreamHealthReport {
-        StreamHealth::check(Some(&self.conn), self.consumers(), self.consumers_started()).await
+        health::check(Some(&self.conn), self.consumers(), self.consumers_started()).await
     }
 
     /// Resolves when the host has stopped: `Ok` after [`StreamsHost::shutdown`], `Err` when a
     /// consumer failed it (`ErrorPolicy::Fail`, a configuration error found while running). On a
     /// failure the host has already shut itself down gracefully; the process should exit so the
-    /// orchestrator restarts it (C# `StopApplication`).
+    /// orchestrator restarts it.
     ///
     /// # Errors
     /// The failure that stopped the host: [`Error::Config`](crate::Error::Config) for a configuration error, otherwise

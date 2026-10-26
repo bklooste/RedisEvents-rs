@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use redisevents::admin::health::{HealthValue, StreamHealthReport};
+use redisevents::admin::health::StreamHealthReport;
 use redisevents::config::{ConsumerOptions, TopicOptions, TrimMode};
 use redisevents::consumer::{Streams, StreamsHost};
 use redisevents::positions::{PositionStore, RedisPositionStore};
@@ -156,8 +156,8 @@ pub async fn start_host(
 ) -> StreamsHost {
     Streams::builder(redis.connect().await)
         .keys(redis.keys())
-        // Trim = None is refused in Production; the C# test host runs as Development.
-        .environment("Development")
+        // trim = none is refused without an explicit opt-in.
+        .allow_untrimmed(true)
         .topic_options(topic, topic_options)
         .topic(topic)
         .consumer(consumer)
@@ -180,10 +180,11 @@ pub async fn positions(
         .expect("load positions")
 }
 
-/// An integer field of a health report's data, or `None`.
-pub fn health_int(report: &StreamHealthReport, key: &str) -> Option<i64> {
-    match report.data.get(key)? {
-        HealthValue::Int(v) => Some(*v),
+/// A count field of a health report's details, by its serialized (snake case) name, or `None`.
+pub fn health_count(report: &StreamHealthReport, key: &str) -> Option<u32> {
+    match key {
+        "partitions_blocked" => report.details.partitions_blocked,
+        "partitions_stopped" => report.details.partitions_stopped,
         _ => None,
     }
 }

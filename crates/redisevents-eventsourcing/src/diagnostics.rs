@@ -1,8 +1,8 @@
-//! Spans and counters (C# `EventSourcingSpans` / `EventSourcingDiagnostics`).
+//! Spans and counters.
 //!
-//! Spans are `tracing` spans `eventsourcing.save` and `eventsourcing.load`; the C# display name
+//! Spans are `tracing` spans `eventsourcing.save` and `eventsourcing.load`; the display name
 //! (`eventsourcing.save <Aggregate>`) is in `otel.name`, with `otel.kind = "client"`. Attribute
-//! names are the C# tag names. A failed span gets `otel.status_code = "ERROR"` and
+//! names are shared with the .NET package. A failed span gets `otel.status_code = "ERROR"` and
 //! `otel.status_description`; a lost version check gets the description
 //! `Concurrency conflict: ...`.
 
@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracing::Span;
 
-/// The instrumentation scope of the C# package, also the meter name under the `otel` feature.
+/// The instrumentation scope, shared with the .NET package so dashboards line up; also the meter name under the `otel` feature.
 pub const SOURCE_NAME: &str = "RedisEvents.EventSourcing";
 
 /// Counter name: successful saves.

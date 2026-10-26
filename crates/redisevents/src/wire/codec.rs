@@ -175,7 +175,7 @@ fn lossy(value: &Bytes) -> String {
     String::from_utf8_lossy(value).into_owned()
 }
 
-/// The `MAXLEN` arguments for `XADD` under `trim` (C# `TrimArgs.GetMaxLenArgs`): empty for `None`,
+/// The `MAXLEN` arguments for `XADD` under `trim`: empty for `None`,
 /// `MAXLEN ~ n` for `Approx`, `MAXLEN n` for `Exact`.
 #[allow(
     dead_code,
@@ -189,7 +189,7 @@ pub(crate) fn max_len_args(trim: TrimMode, max_len: u64) -> Vec<String> {
     }
 }
 
-/// The `MINID` arguments for `XTRIM` under `trim` (C# `TrimArgs.GetMinIdArgs`).
+/// The `MINID` arguments for `XTRIM` under `trim`.
 pub(crate) fn min_id_args(trim: TrimMode, min_id: StreamId) -> Vec<String> {
     match trim {
         TrimMode::None => Vec::new(),

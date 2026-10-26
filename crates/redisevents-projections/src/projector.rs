@@ -1,5 +1,4 @@
-//! [`Projector`]: the [`BatchHandler`] that decodes a batch and dispatches it to projections (C#
-//! `EventProjector`).
+//! [`Projector`]: the [`BatchHandler`] that decodes a batch and dispatches it to projections.
 
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
@@ -14,70 +13,115 @@ use redisevents::{
 use tracing::Instrument;
 
 use crate::diagnostics;
-use crate::{BatchProjection, EventMeta, EventTypeRegistry, Projection, ProjectionBatch};
+use crate::{BatchFlush, BatchProjection, EventMeta, EventTypeRegistry, Projection};
 
 type BoxFut<'a> = Pin<Box<dyn Future<Output = HandleResult> + Send + 'a>>;
+type Pending = Box<dyn Any + Send>;
 
 /// A projection bound to one event type, type-erased.
 trait Binding: Send + Sync {
+    /// `pending` is this binding's batch buffer when it is a batch projection.
     fn call<'a>(
         &'a self,
         event: &'a (dyn Any + Send + Sync),
+        pending: Option<&'a mut Pending>,
         meta: &'a EventMeta,
         ctx: &'a PartitionContext,
     ) -> BoxFut<'a>;
 
-    fn flusher(&self) -> Option<&Arc<dyn Flusher>>;
+    /// The index of this binding's flusher in the projector, for a batch projection.
+    fn flusher(&self) -> Option<usize>;
 }
 
-/// A batch projection's flush, type-erased. `id` is the projection's address, so one projection
+/// A batch projection's flush, type-erased. One per distinct projection instance, so a projection
 /// bound for several event types is flushed once.
 trait Flusher: Send + Sync {
-    fn id(&self) -> usize;
     fn name(&self) -> &str;
-    fn flush<'a>(&'a self, batch: &'a ProjectionBatch, ctx: &'a PartitionContext) -> BoxFut<'a>;
+    fn new_pending(&self) -> Pending;
+    fn flush<'a>(&'a self, pending: Pending, ctx: &'a PartitionContext) -> BoxFut<'a>;
 }
 
-struct Bound<P, T> {
+fn wrong_type() -> HandleError {
+    HandleError::skip("decoded event is not the bound type")
+}
+
+struct Plain<P, T> {
     projection: Arc<P>,
-    flusher: Option<Arc<dyn Flusher>>,
     _event: PhantomData<fn() -> T>,
 }
 
-impl<P: Projection<T>, T: Send + Sync + 'static> Binding for Bound<P, T> {
+impl<P: Projection<T>, T: Send + Sync + 'static> Binding for Plain<P, T> {
     fn call<'a>(
         &'a self,
         event: &'a (dyn Any + Send + Sync),
+        _pending: Option<&'a mut Pending>,
         meta: &'a EventMeta,
         ctx: &'a PartitionContext,
     ) -> BoxFut<'a> {
         Box::pin(async move {
             let Some(event) = event.downcast_ref::<T>() else {
-                return Err(HandleError::skip("decoded event is not the bound type"));
+                return Err(wrong_type());
             };
             self.projection.handle(event, meta, ctx).await
         })
     }
 
-    fn flusher(&self) -> Option<&Arc<dyn Flusher>> {
-        self.flusher.as_ref()
+    fn flusher(&self) -> Option<usize> {
+        None
+    }
+}
+
+struct Batched<P, T> {
+    projection: Arc<P>,
+    flusher: usize,
+    _event: PhantomData<fn() -> T>,
+}
+
+impl<P: BatchProjection<T>, T: Send + Sync + 'static> Binding for Batched<P, T> {
+    fn call<'a>(
+        &'a self,
+        event: &'a (dyn Any + Send + Sync),
+        pending: Option<&'a mut Pending>,
+        meta: &'a EventMeta,
+        ctx: &'a PartitionContext,
+    ) -> BoxFut<'a> {
+        Box::pin(async move {
+            let (Some(event), Some(pending)) = (
+                event.downcast_ref::<T>(),
+                pending.and_then(|p| p.downcast_mut::<P::Pending>()),
+            ) else {
+                return Err(wrong_type());
+            };
+            self.projection.buffer(event, pending, meta, ctx).await
+        })
+    }
+
+    fn flusher(&self) -> Option<usize> {
+        Some(self.flusher)
     }
 }
 
 struct FlushOf<P>(Arc<P>);
 
-impl<P: BatchProjection> Flusher for FlushOf<P> {
-    fn id(&self) -> usize {
-        Arc::as_ptr(&self.0).cast::<()>() as usize
-    }
-
+impl<P: BatchFlush> Flusher for FlushOf<P> {
     fn name(&self) -> &str {
         let full = std::any::type_name::<P>();
         full.rsplit("::").next().unwrap_or(full)
     }
 
-    fn flush<'a>(&'a self, batch: &'a ProjectionBatch, ctx: &'a PartitionContext) -> BoxFut<'a> {
-        Box::pin(self.0.flush(batch, ctx))
+    fn new_pending(&self) -> Pending {
+        Box::new(P::Pending::default())
+    }
+
+    fn flush<'a>(&'a self, pending: Pending, ctx: &'a PartitionContext) -> BoxFut<'a> {
+        Box::pin(async move {
+            match pending.downcast::<P::Pending>() {
+                Ok(pending) => self.0.flush(*pending, ctx).await,
+                Err(_) => Err(HandleError::skip(
+                    "batch buffer is not the projection's type",
+                )),
+            }
+        })
     }
 }
 
@@ -86,51 +130,87 @@ pub struct ProjectorBuilder {
     topic: String,
     registry: Arc<EventTypeRegistry>,
     bindings: HashMap<TypeId, Vec<Arc<dyn Binding>>>,
+    flushers: Vec<Arc<dyn Flusher>>,
+    /// Address of each bound batch projection, to give one instance one flusher.
+    flusher_of: HashMap<usize, usize>,
     unregistered: Vec<&'static str>,
 }
 
 impl ProjectorBuilder {
-    /// Binds `projection` to events decoded as `T`. Several projections (or one projection for
-    /// several `T`) may bind; for one event they run in binding order.
+    /// Binds `projection` to events decoded as `T`. Several projections may bind; for one event
+    /// they run in binding order. To bind one instance for several `T`, use
+    /// [`shared_projection`](Self::shared_projection).
     #[must_use]
-    pub fn projection<T, P>(self, projection: Arc<P>) -> Self
+    pub fn projection<T, P>(self, projection: P) -> Self
     where
         T: Send + Sync + 'static,
         P: Projection<T>,
     {
-        self.bind::<T, P>(projection, None)
+        self.shared_projection::<T, P>(Arc::new(projection))
     }
 
-    /// [`projection`](Self::projection) for a projection that is also a [`BatchProjection`]: after
-    /// the batch's last event, `flush` runs once if it was handed any event. Bind it for each `T`
-    /// it handles; it is still flushed once.
+    /// [`projection`](Self::projection) for an instance you keep a handle to (to bind it for
+    /// several event types, or to inspect it afterwards).
     #[must_use]
-    pub fn batch_projection<T, P>(self, projection: Arc<P>) -> Self
-    where
-        T: Send + Sync + 'static,
-        P: Projection<T> + BatchProjection,
-    {
-        let flusher: Arc<dyn Flusher> = Arc::new(FlushOf(Arc::clone(&projection)));
-        self.bind::<T, P>(projection, Some(flusher))
-    }
-
-    fn bind<T, P>(mut self, projection: Arc<P>, flusher: Option<Arc<dyn Flusher>>) -> Self
+    pub fn shared_projection<T, P>(mut self, projection: Arc<P>) -> Self
     where
         T: Send + Sync + 'static,
         P: Projection<T>,
     {
+        self.note::<T>();
+        self.push::<T>(Arc::new(Plain {
+            projection,
+            _event: PhantomData::<fn() -> T>,
+        }));
+        self
+    }
+
+    /// Binds a [`BatchProjection`]: after the batch's last event, its [`BatchFlush::flush`] runs
+    /// once if it was handed any event. To bind it for several `T`, use
+    /// [`shared_batch_projection`](Self::shared_batch_projection).
+    #[must_use]
+    pub fn batch_projection<T, P>(self, projection: P) -> Self
+    where
+        T: Send + Sync + 'static,
+        P: BatchProjection<T>,
+    {
+        self.shared_batch_projection::<T, P>(Arc::new(projection))
+    }
+
+    /// [`batch_projection`](Self::batch_projection) for a shared instance. Bind the same `Arc` for
+    /// each `T` it handles; it is still flushed once.
+    #[must_use]
+    pub fn shared_batch_projection<T, P>(mut self, projection: Arc<P>) -> Self
+    where
+        T: Send + Sync + 'static,
+        P: BatchProjection<T>,
+    {
+        self.note::<T>();
+        let address = Arc::as_ptr(&projection).cast::<()>() as usize;
+        let flusher = *self.flusher_of.entry(address).or_insert_with(|| {
+            self.flushers
+                .push(Arc::new(FlushOf(Arc::clone(&projection))));
+            self.flushers.len() - 1
+        });
+        self.push::<T>(Arc::new(Batched {
+            projection,
+            flusher,
+            _event: PhantomData::<fn() -> T>,
+        }));
+        self
+    }
+
+    fn note<T: 'static>(&mut self) {
         if !self.registry.decodes_to::<T>() {
             self.unregistered.push(std::any::type_name::<T>());
         }
+    }
+
+    fn push<T: 'static>(&mut self, binding: Arc<dyn Binding>) {
         self.bindings
             .entry(TypeId::of::<T>())
             .or_default()
-            .push(Arc::new(Bound {
-                projection,
-                flusher,
-                _event: PhantomData::<fn() -> T>,
-            }));
-        self
+            .push(binding);
     }
 
     /// Finishes the projector.
@@ -149,12 +229,13 @@ impl ProjectorBuilder {
             topic: self.topic,
             registry: self.registry,
             bindings: self.bindings,
+            flushers: self.flushers,
             warned_unknown: Mutex::new(HashSet::new()),
         })
     }
 }
 
-/// Decodes each entry of a batch by wire type and runs the bound projections (C# `EventProjector`).
+/// Decodes each entry of a batch by wire type and runs the bound projections.
 ///
 /// It is a [`BatchHandler`], so register it like any other: positions, replay and the
 /// `Skip` / `Block` contract are core's.
@@ -166,7 +247,7 @@ impl ProjectorBuilder {
 ///   still projected. Returning an error would make core skip the whole batch.
 /// * **Projection error**: ends the batch and is returned unchanged, so later events of the batch
 ///   are not reached. Per-event projections have already written the events before it.
-/// * **Batch projections** ([`BatchProjection`]): flushed once after the last event, in first-use
+/// * **Batch projections** ([`BatchProjection`](crate::BatchProjection)): flushed once after the last event, in first-use
 ///   order. On an ordinary event error the flush still runs for the events before it and the
 ///   original error is returned; if that flush finds the store down (`Block`) the `Block` wins, so
 ///   the batch redelivers instead of skipping past unwritten rows. On a `Block` or a shutdown no
@@ -178,6 +259,7 @@ pub struct Projector {
     topic: String,
     registry: Arc<EventTypeRegistry>,
     bindings: HashMap<TypeId, Vec<Arc<dyn Binding>>>,
+    flushers: Vec<Arc<dyn Flusher>>,
     warned_unknown: Mutex<HashSet<String>>,
 }
 
@@ -191,7 +273,7 @@ impl std::fmt::Debug for Projector {
 }
 
 impl Projector {
-    /// Starts a projector for `topic` (used in logs, spans and the batch scope; it does not have
+    /// Starts a projector for `topic` (used in logs and spans; it does not have
     /// to equal the consumer's topic, but should).
     #[must_use]
     pub fn builder(
@@ -202,6 +284,8 @@ impl Projector {
             topic: topic.into(),
             registry: registry.into(),
             bindings: HashMap::new(),
+            flushers: Vec::new(),
+            flusher_of: HashMap::new(),
             unregistered: Vec::new(),
         }
     }
@@ -216,8 +300,7 @@ impl Projector {
     async fn dispatch(
         &self,
         batch: &[StreamMsg],
-        scope: &ProjectionBatch,
-        to_flush: &mut Vec<Arc<dyn Flusher>>,
+        buffers: &mut Buffers,
         ctx: &PartitionContext,
     ) -> HandleResult {
         for msg in batch {
@@ -237,7 +320,7 @@ impl Projector {
                         partition_key = msg.partition_key(),
                         wire_type = msg.msg_type(),
                         %error,
-                        "EventProjector: skipping malformed event of wire type '{}' on topic={} \
+                        "Projector: skipping malformed event of wire type '{}' on topic={} \
                          partition={} id={} partitionKey={}: its body failed to decode. The rest \
                          of the batch is still projected.",
                         msg.msg_type(),
@@ -252,25 +335,23 @@ impl Projector {
 
             let Some(bound) = self.bindings.get(&decoded.type_id()) else {
                 tracing::debug!(
-                    "EventProjector: skipping event of wire type '{}': known to the registry but \
+                    "Projector: skipping event of wire type '{}': known to the registry but \
                      no projection is bound for it.",
                     msg.msg_type()
                 );
                 continue;
             };
 
-            let meta = EventMeta::from_msg(msg, scope);
+            let meta = EventMeta::from_msg(msg);
             let span = diagnostics::project_span(msg.msg_type(), msg.partition_key(), msg.id());
             let outcome: HandleResult = async {
                 for binding in bound {
                     // Recorded before the call, so a batch projection that buffered part of this
                     // event and then failed is still flushed on the skip path.
-                    if let Some(flusher) = binding.flusher()
-                        && !to_flush.iter().any(|f| f.id() == flusher.id())
-                    {
-                        to_flush.push(Arc::clone(flusher));
-                    }
-                    binding.call(decoded.as_any(), &meta, ctx).await?;
+                    let pending = binding
+                        .flusher()
+                        .map(|i| buffers.slot(i, &self.flushers[i]));
+                    binding.call(decoded.as_any(), pending, &meta, ctx).await?;
                 }
                 Ok(())
             }
@@ -287,7 +368,7 @@ impl Projector {
     fn log_unknown(&self, msg: &StreamMsg) {
         if self.first_time_unknown(msg.msg_type()) {
             tracing::warn!(
-                "EventProjector: skipping events of unknown wire type '{}' on topic={}: no \
+                "Projector: skipping events of unknown wire type '{}' on topic={}: no \
                  EventTypeRegistry registration for it. First seen at partition={} id={} \
                  partitionKey={}; further events of this type are skipped at debug.",
                 msg.msg_type(),
@@ -298,7 +379,7 @@ impl Projector {
             );
         } else {
             tracing::debug!(
-                "EventProjector: skipping event of unknown wire type '{}' on topic={} id={}",
+                "Projector: skipping event of unknown wire type '{}' on topic={} id={}",
                 msg.msg_type(),
                 self.topic,
                 msg.id(),
@@ -306,16 +387,15 @@ impl Projector {
         }
     }
 
-    async fn flush_all(
-        &self,
-        scope: &ProjectionBatch,
-        to_flush: &[Arc<dyn Flusher>],
-        ctx: &PartitionContext,
-    ) -> HandleResult {
+    async fn flush_all(&self, buffers: &mut Buffers, ctx: &PartitionContext) -> HandleResult {
         let mut first: Option<HandleError> = None;
-        for flusher in to_flush {
-            let span = diagnostics::flush_span(flusher.name(), scope.topic(), scope.partition());
-            let outcome = flusher.flush(scope, ctx).instrument(span.clone()).await;
+        for index in std::mem::take(&mut buffers.order) {
+            let flusher = &self.flushers[index];
+            let Some(pending) = buffers.slots[index].take() else {
+                continue;
+            };
+            let span = diagnostics::flush_span(flusher.name(), &self.topic, ctx.partition());
+            let outcome = flusher.flush(pending, ctx).instrument(span.clone()).await;
             let Err(error) = outcome else { continue };
             diagnostics::failed(&span, error.error());
             if redelivers(&error, ctx) {
@@ -327,14 +407,38 @@ impl Projector {
                 tracing::error!(
                     projection = flusher.name(),
                     topic = %self.topic,
-                    partition = scope.partition(),
+                    partition = ctx.partition(),
                     %error,
-                    "EventProjector: a later flush also failed; the first flush failure in the \
+                    "Projector: a later flush also failed; the first flush failure in the \
                      batch is the one returned."
                 );
             }
         }
         first.map_or(Ok(()), Err)
+    }
+}
+
+/// The batch buffers of one `handle_batch` call: one slot per batch projection, in first-use order.
+struct Buffers {
+    slots: Vec<Option<Pending>>,
+    order: Vec<usize>,
+}
+
+impl Buffers {
+    fn new(flushers: usize) -> Self {
+        Self {
+            slots: (0..flushers).map(|_| None).collect(),
+            order: Vec::new(),
+        }
+    }
+
+    /// The buffer of flusher `index`, created on first use. Recorded before the projection runs,
+    /// so one that buffered part of an event and then failed is still flushed on the skip path.
+    fn slot(&mut self, index: usize, flusher: &Arc<dyn Flusher>) -> &mut Pending {
+        if self.slots[index].is_none() {
+            self.order.push(index);
+        }
+        self.slots[index].get_or_insert_with(|| flusher.new_pending())
     }
 }
 
@@ -345,46 +449,39 @@ fn redelivers(error: &HandleError, ctx: &PartitionContext) -> bool {
 
 impl BatchHandler for Projector {
     async fn handle_batch(&self, batch: &[StreamMsg], ctx: &PartitionContext) -> HandleResult {
-        let Some(first) = batch.first() else {
+        if batch.is_empty() {
             return Ok(());
-        };
-        let scope = ProjectionBatch::new(self.topic.clone(), first.partition());
-        let mut to_flush: Vec<Arc<dyn Flusher>> = Vec::new();
+        }
+        let mut buffers = Buffers::new(self.flushers.len());
 
-        let outcome = async {
-            if let Err(error) = self.dispatch(batch, &scope, &mut to_flush, ctx).await {
-                if to_flush.is_empty() || redelivers(&error, ctx) {
-                    return Err(error);
-                }
-                // An ordinary error: core skips this batch and advances. Per-event projections
-                // have written the events before the failing one; flush the batch projections so
-                // they have too.
-                if let Err(flush) = self.flush_all(&scope, &to_flush, ctx).await {
-                    if redelivers(&flush, ctx) {
-                        // The store behind the flush is down (or we are stopping): redeliver
-                        // instead of skipping, or the held rows would be lost.
-                        return Err(flush);
-                    }
-                    tracing::error!(
-                        topic = %self.topic,
-                        partition = scope.partition(),
-                        %flush,
-                        "EventProjector: flushing batch projections after an event failed also \
-                         failed. The event's error is returned and the batch is skipped, so this \
-                         batch's buffered work is lost."
-                    );
-                }
+        if let Err(error) = self.dispatch(batch, &mut buffers, ctx).await {
+            if buffers.order.is_empty() || redelivers(&error, ctx) {
                 return Err(error);
             }
-            if to_flush.is_empty() {
-                Ok(())
-            } else {
-                self.flush_all(&scope, &to_flush, ctx).await
+            // An ordinary error: core skips this batch and advances. Per-event projections
+            // have written the events before the failing one; flush the batch projections so
+            // they have too.
+            if let Err(flush) = self.flush_all(&mut buffers, ctx).await {
+                if redelivers(&flush, ctx) {
+                    // The store behind the flush is down (or we are stopping): redeliver
+                    // instead of skipping, or the held rows would be lost.
+                    return Err(flush);
+                }
+                tracing::error!(
+                    topic = %self.topic,
+                    partition = ctx.partition(),
+                    %flush,
+                    "Projector: flushing batch projections after an event failed also \
+                     failed. The event's error is returned and the batch is skipped, so this \
+                     batch's buffered work is lost."
+                );
             }
+            return Err(error);
         }
-        .await;
-
-        scope.close();
-        outcome
+        if buffers.order.is_empty() {
+            Ok(())
+        } else {
+            self.flush_all(&mut buffers, ctx).await
+        }
     }
 }

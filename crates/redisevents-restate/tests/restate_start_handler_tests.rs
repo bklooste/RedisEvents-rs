@@ -47,14 +47,14 @@ fn default_map() -> Map {
                 &StartInput {
                     bet_id: m.value.id.clone(),
                 },
-            ),
+            )?,
         )
     })
 }
 
 fn fast(ingress: &FakeIngress, attempts: u32) -> RestateStartOptions {
     RestateStartOptions {
-        max_attempts: attempts,
+        max_attempts: std::num::NonZeroU32::new(attempts).unwrap(),
         initial_retry_delay: Duration::from_millis(1),
         max_retry_delay: Duration::from_millis(4),
         attempt_timeout: Duration::from_secs(10),
@@ -182,9 +182,6 @@ async fn a_batch_of_1000_with_10_kept_makes_exactly_10_calls_to_their_own_workfl
             .body,
         "{\"BetId\":\"bet300\"}"
     );
-    let stats = handler.inner().stats();
-    assert_eq!((stats.kept, stats.filtered, stats.accepted), (10, 990, 10));
-    assert_eq!((stats.already_started, stats.blocked), (0, 0));
 }
 
 #[tokio::test]
@@ -251,13 +248,6 @@ async fn three_items_failing_past_their_attempts_block_the_batch_and_the_retry_s
         .map(|a| a.0.clone())
         .collect();
     assert_eq!(fresh, failing);
-
-    let s = handler.inner().stats();
-    assert_eq!((s.kept, s.filtered), (20, 1_980));
-    assert_eq!(
-        (s.accepted, s.already_started, s.retried, s.blocked),
-        (17, 7, 12, 1)
-    );
 }
 
 #[tokio::test]
@@ -399,7 +389,7 @@ async fn submits_are_bounded_parallel_at_the_configured_degree() {
     let narrow = FakeIngress::start().await;
     narrow.set_latency(Duration::from_millis(20));
     let mut options = fast(&narrow, 5);
-    options.max_parallelism = 3;
+    options.max_parallelism = std::num::NonZeroUsize::new(3).unwrap();
     let handler = starter_with(Client::new(), options, default_keep(), default_map());
     deliver(&handler, &batch_of(20, |_| true, None))
         .await
@@ -428,9 +418,11 @@ async fn any_2xx_is_accepted_and_previously_accepted_counts_as_already_started()
     deliver(&handler, &batch_of(4, |_| true, None))
         .await
         .unwrap();
-
-    let s = handler.inner().stats();
-    assert_eq!((s.accepted, s.already_started, s.retried), (4, 1, 0));
+    assert_eq!(
+        ingress.requests().len(),
+        4,
+        "any 2xx is accepted: no retries"
+    );
 }
 
 #[tokio::test]
@@ -503,22 +495,22 @@ async fn an_empty_workflow_or_key_blocks() {
 }
 
 #[tokio::test]
-async fn an_input_that_cannot_be_serialized_blocks_naming_the_key() {
+async fn an_input_that_cannot_be_serialized_fails_the_map_and_blocks() {
     let ingress = FakeIngress::start().await;
     let map: Map = Box::new(|m| {
         // JSON object keys must be strings: a tuple key cannot be serialized.
         let unserializable: HashMap<(i32, i32), i32> = HashMap::from([((1, 2), 3)]);
         Ok(
             RestateStart::new("BonusPayout", m.value.claim.clone().unwrap())
-                .with_input(&unserializable),
+                .with_input(&unserializable)?,
         )
     });
     let handler = starter_with(Client::new(), fast(&ingress, 5), default_keep(), map);
 
     let b = blocked(deliver(&handler, &batch_of(1, |_| true, None)).await);
 
-    assert_eq!(b.failed_keys(), ["BonusPayout/c0"]);
-    assert!(b.to_string().contains("serializing the "), "{b}");
+    assert_eq!(b.failed_keys(), ["stream id 1000-0"]);
+    assert!(b.to_string().contains("Map failed"), "{b}");
     assert!(ingress.requests().is_empty());
 }
 
@@ -542,7 +534,7 @@ async fn a_no_input_start_sends_no_body() {
 async fn keys_and_workflow_names_are_escaped_into_one_path_segment_each() {
     let ingress = FakeIngress::start().await;
     let mut options = fast(&ingress, 5);
-    options.ingress = Some(ingress.url.join("prefix/").unwrap());
+    options.ingress = ingress.url.join("prefix/").unwrap();
     options.handler = "Run".to_owned();
     let map: Map = Box::new(|_| Ok(RestateStart::new("Verify", "cust:42/1")));
     let handler = starter_with(Client::new(), options, default_keep(), map);
@@ -576,11 +568,6 @@ async fn cancellation_mid_batch_is_reported_as_a_blocked_batch_never_as_a_skip()
 
     assert!(b.shutting_down());
     assert_eq!(b.failed_keys().len(), 30);
-    assert_eq!(
-        handler.inner().stats().blocked,
-        0,
-        "a shutdown is not an outage"
-    );
 }
 
 #[tokio::test]
@@ -628,40 +615,30 @@ async fn the_traceparent_continues_the_trace_of_the_message_that_caused_the_star
 }
 
 #[test]
-fn the_handler_refuses_to_start_without_an_ingress_address_or_with_bad_options() {
+fn the_handler_refuses_to_start_with_a_bad_ingress_or_bad_options() {
     let new = |o: RestateStartOptions| {
         RestateStartHandler::<Bet, _, _>::new(Client::new(), o, default_keep(), default_map())
     };
     let ingress = reqwest::Url::parse("http://r:8080").unwrap();
 
-    assert!(
-        new(RestateStartOptions::default())
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("no ingress address")
-    );
-    assert!(
-        reqwest::Url::parse("/x").is_err(),
-        "a relative ingress cannot even be built"
-    );
+    assert!(new(RestateStartOptions::new(ingress.clone())).is_ok());
     let ftp = reqwest::Url::parse("ftp://r/").unwrap();
     assert!(new(RestateStartOptions::new(ftp)).is_err());
-    let mut zero_parallel = RestateStartOptions::new(ingress.clone());
-    zero_parallel.max_parallelism = 0;
-    assert!(new(zero_parallel).is_err());
-    let mut zero_attempts = RestateStartOptions::new(ingress);
-    zero_attempts.max_attempts = 0;
-    assert!(new(zero_attempts).is_err());
+    let mut blank_handler = RestateStartOptions::new(ingress.clone());
+    blank_handler.handler = " ".to_owned();
+    assert!(new(blank_handler).is_err());
+    let mut inverted = RestateStartOptions::new(ingress);
+    inverted.max_retry_delay = Duration::from_millis(1);
+    assert!(new(inverted).is_err());
 }
 
 #[test]
 fn the_defaults_are_the_ones_the_ack_rule_was_designed_around() {
-    let o = RestateStartOptions::default();
+    let o = RestateStartOptions::new(reqwest::Url::parse("http://r:8080").unwrap());
 
     assert_eq!(o.handler, "run");
-    assert_eq!(o.max_parallelism, 8);
-    assert_eq!(o.max_attempts, 5);
+    assert_eq!(o.max_parallelism.get(), 8);
+    assert_eq!(o.max_attempts.get(), 5);
     assert_eq!(o.initial_retry_delay, Duration::from_millis(200));
     assert_eq!(o.max_retry_delay, Duration::from_secs(5));
 }

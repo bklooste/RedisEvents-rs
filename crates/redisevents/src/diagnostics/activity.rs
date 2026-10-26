@@ -36,7 +36,7 @@ pub(crate) const CONSUMER_KEY: &str = "streams.consumer";
 /// Attribute: milliseconds between acceptance and processing.
 pub(crate) const LAG_MS_KEY: &str = "streams.lag_ms";
 
-/// The three fields every consumer span is tagged with (C# `StreamSpanContext`).
+/// The three fields every consumer span is tagged with.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StreamSpanContext<'a> {
     /// The topic the batch was read from.

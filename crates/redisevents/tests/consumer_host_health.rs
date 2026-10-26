@@ -8,9 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use redisevents::admin::health::{
-    HealthValue, StreamHealthReport, StreamHealthRule, StreamHealthStatus,
-};
+use redisevents::admin::health::{StreamHealthReport, StreamHealthRule, StreamHealthStatus};
 use redisevents::config::{ConsumerOptions, StreamOptions, TopicOptions};
 use redisevents::consumer::{HandleError, Streams, StreamsHost};
 use redisevents::producer::{PublishOptions, Publisher, StreamPublisher};
@@ -114,11 +112,7 @@ async fn a_blocked_partition_degrades_health_until_its_batch_succeeds() {
     })
     .await;
     assert_eq!(report.status, StreamHealthStatus::Degraded, "{report:?}");
-    assert_eq!(
-        report.data.get("partitionsBlocked"),
-        Some(&HealthValue::Int(1)),
-        "{report:?}"
-    );
+    assert_eq!(report.details.partitions_blocked, Some(1), "{report:?}");
 
     // The next retry (1 s back-off) succeeds: Running again.
     failing.store(false, Ordering::SeqCst);
@@ -127,9 +121,6 @@ async fn a_blocked_partition_degrades_health_until_its_batch_succeeds() {
     })
     .await;
     assert_eq!(report.rule, StreamHealthRule::None);
-    assert_eq!(
-        report.data.get("partitionsBlocked"),
-        Some(&HealthValue::Int(0))
-    );
+    assert_eq!(report.details.partitions_blocked, Some(0));
     host.shutdown().await.expect("shutdown");
 }

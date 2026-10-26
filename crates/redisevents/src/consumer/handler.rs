@@ -23,8 +23,7 @@
 //! # Bounds, and why
 //!
 //! - `Send + Sync + 'static` on the handler: one handler value serves **every partition** of a
-//!   topic, concurrently, from tasks spawned on a multi-thread tokio runtime (C# registers one
-//!   handler instance per topic too). Use interior mutability (`Mutex`, atomics) for state.
+//!   topic, concurrently, from tasks spawned on a multi-thread tokio runtime. Use interior mutability (`Mutex`, atomics) for state.
 //! - `+ Send` on the returned future: the worker `tokio::spawn`s it.
 //! - The message and context are borrowed for the duration of the call. Calls on one partition
 //!   are strictly sequential; calls on different partitions overlap.
@@ -50,7 +49,7 @@ use crate::config::ErrorPolicy;
 use crate::message::{Json, PayloadCodec};
 use crate::wire::{StreamMsg, TypedMsg};
 
-/// Handles one message at a time (C# `IMessageHandler`).
+/// Handles one message at a time.
 pub trait MessageHandler: Send + Sync + 'static {
     /// Handles `msg`. See `HandleError` for what an error does.
     fn handle(
@@ -60,7 +59,7 @@ pub trait MessageHandler: Send + Sync + 'static {
     ) -> impl Future<Output = HandleResult> + Send;
 }
 
-/// Handles a batch of messages from one partition (C# `IBatchHandler`).
+/// Handles a batch of messages from one partition.
 pub trait BatchHandler: Send + Sync + 'static {
     /// Handles `batch` (non-empty, in stream order, one partition).
     fn handle_batch(
@@ -70,7 +69,7 @@ pub trait BatchHandler: Send + Sync + 'static {
     ) -> impl Future<Output = HandleResult> + Send;
 }
 
-/// Handles one decoded message (C# `IMessageHandler<T>`). Adapt with [`Typed`].
+/// Handles one decoded message. Adapt with [`Typed`].
 pub trait TypedHandler<T>: Send + Sync + 'static {
     /// Handles `msg`.
     fn handle(
@@ -80,7 +79,7 @@ pub trait TypedHandler<T>: Send + Sync + 'static {
     ) -> impl Future<Output = HandleResult> + Send;
 }
 
-/// Handles a batch of decoded messages (C# `IBatchHandler<T>`). Adapt with [`Typed`].
+/// Handles a batch of decoded messages. Adapt with [`Typed`].
 pub trait TypedBatchHandler<T>: Send + Sync + 'static {
     /// Handles `batch`. Entries whose body failed to decode have been logged and dropped, so the
     /// batch may be shorter than the read (and is never empty).
@@ -144,7 +143,7 @@ impl<H: MessageHandler> BatchHandler for PerMessage<H> {
 }
 
 /// Decodes bodies with codec `C` (default [`Json`]) and runs a [`TypedHandler`] or
-/// [`TypedBatchHandler`] (C# `TypedHandlerAdapter`).
+/// [`TypedBatchHandler`].
 ///
 /// As a [`MessageHandler`]: a body that fails to decode is a `Skip`. As a [`BatchHandler`]: a body
 /// that fails to decode is logged and dropped from the batch, and the rest still run.

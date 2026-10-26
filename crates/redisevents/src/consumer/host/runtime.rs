@@ -1,7 +1,7 @@
-//! The running host (C# `StreamConsumerHost`): startup checks, one supervisor task per consumer
+//! The running host: startup checks, one supervisor task per consumer
 //! that owns its read side, and the host task that runs the orderly shutdown.
 //!
-//! A consumer's *read side* (C# `StartReadSideAsync`) is one generation of: stored positions and
+//! A consumer's *read side* is one generation of: stored positions and
 //! cold reset markers, the position flusher, a monitor per partition, and the workers (one per read
 //! loop). It is rebuilt as a whole when the held partition set changes (lease rebalance), when a
 //! contested partition recovers, and after a read loop fails with an error no back-off fixes, as
@@ -17,16 +17,14 @@ use redis::streams::StreamInfoStreamReply;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
-use tracing::Level;
 
 use super::Registration;
 use super::StreamsHost;
 use super::erased::{FlusherDyn, RunnerFactory, StoreDyn, StoreHolder, WorkerRun};
-use crate::admin::health::StreamLag;
+use crate::admin::health;
 use crate::admin::health::monitor::{self, PartitionMonitor, StreamLagSampler, Thresholds};
 use crate::admin::meta::ensure_topic_meta;
-use crate::config::binder;
-use crate::config::instance::InstanceResolver;
+use crate::config::instance::InstanceIdentity;
 use crate::config::{
     ConsumerOptions, DeliveryMode, InstanceMode, PersistMode, ReadMode, StreamOptions, TopicOptions,
 };
@@ -48,14 +46,6 @@ const MAX_RECOVERIES: u32 = 5;
 /// Attempts to rebuild the read side after a lease change before the host fails (C#: 3, 2 s apart).
 const REBUILD_ATTEMPTS: u32 = 3;
 const REBUILD_DELAY: Duration = Duration::from_secs(2);
-
-/// The host environment name: `STREAMS_ENVIRONMENT`, else `local`. The .NET variables are never read.
-pub(crate) fn environment_from_env() -> String {
-    std::env::var("STREAMS_ENVIRONMENT")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "local".to_owned())
-}
 
 // ------------------------------------------------------------------------------------------------
 // Faults and shared state
@@ -163,7 +153,6 @@ pub(crate) async fn spawn(
     conn: Connection,
     keys: Keys,
     mut options: StreamOptions,
-    environment: &str,
     registrations: Vec<Registration>,
 ) -> Result<StreamsHost> {
     // The registered consumers are part of the configuration C# validates.
@@ -172,14 +161,9 @@ pub(crate) async fn spawn(
             options.consumers.push(registration.options.clone());
         }
     }
-    let sync_timeout = binder::resolve_sync_timeout_ms(options.connection_string.as_deref())?;
-    binder::validate(&options, environment, sync_timeout)?;
-    for advisory in binder::advise(&options) {
-        if advisory.level == Level::WARN {
-            tracing::warn!("{}", advisory.message);
-        } else {
-            tracing::info!("{}", advisory.message);
-        }
+    options.validate()?;
+    for advisory in options.advisories() {
+        advisory.log();
     }
 
     let stop = CancellationToken::new();
@@ -217,8 +201,8 @@ pub(crate) async fn spawn(
     } else {
         StreamLagSampler::start(
             conn.clone(),
-            StreamLag::DEFAULT_SAMPLE_INTERVAL,
-            StreamLag::DEFAULT_PUSH_INTERVAL,
+            health::DEFAULT_SAMPLE_INTERVAL,
+            health::DEFAULT_PUSH_INTERVAL,
         )
         .ok()
     };
@@ -276,11 +260,11 @@ async fn start_consumer(
         instance_id,
         runner,
     } = registration;
-    let name = binder::resolve_consumer_name(options, &consumer);
+    let name = options.consumer_name(&consumer);
     let topic = consumer.topic.clone();
     if topic.trim().is_empty() {
         return Err(Error::config(format!(
-            "Streams: consumer '{name}' has no Topic. Set it in Streams:Consumers or pass it to Streams::builder().topic()."
+            "Streams: consumer '{name}' has no topic. Set it in consumers or pass it to Streams::builder().topic()."
         )));
     }
     if !seen.insert((topic.clone(), name.clone())) {
@@ -288,14 +272,14 @@ async fn start_consumer(
             "Streams: consumer '{name}' is registered twice on topic '{topic}'. One host runs one handler per (topic, consumer)."
         )));
     }
-    if consumer.delivery() == DeliveryMode::WorkQueue {
+    if consumer.delivery == DeliveryMode::WorkQueue {
         return Err(Error::config(format!(
-            "Streams: consumer '{name}' on topic '{topic}' has Delivery=WorkQueue, which this version does not support yet. \
-             Use Delivery=Ordered."
+            "Streams: consumer '{name}' on topic '{topic}' has delivery = work_queue, which this version does not support yet. \
+             Use delivery = ordered."
         )));
     }
 
-    let topic_options = binder::resolve_topic(options, &topic);
+    let topic_options = options.topic(&topic);
     // Creates the topic when new, refuses a shrink and an unknown codec version.
     let meta = ensure_topic_meta(conn, keys, &topic, &topic_options).await?;
     let partitions = meta.partitions();
@@ -304,9 +288,9 @@ async fn start_consumer(
     let lease = consumer
         .instances
         .as_ref()
-        .map_or(InstanceMode::Lease, crate::config::InstanceOptions::mode)
+        .map_or(InstanceMode::Lease, |i| i.mode)
         == InstanceMode::Lease;
-    let identity = InstanceResolver::resolve_from_env(consumer.instances.as_ref())?;
+    let identity = InstanceIdentity::from_env(consumer.instances.as_ref())?;
     let pod_name = identity
         .pod_name
         .clone()
@@ -315,9 +299,7 @@ async fn start_consumer(
     let assigned: Vec<u32> = if lease {
         Vec::new()
     } else {
-        InstanceResolver::owned_for(partitions, &identity)
-            .iter()
-            .collect()
+        identity.owned(partitions).iter().collect()
     };
 
     let use_positions = consumer.persist != PersistMode::None;
@@ -347,9 +329,9 @@ async fn start_consumer(
     tracing::info!(
         consumer = %name, topic = %topic, partitions,
         ownership = %if lease {
-            format!("Instances:Mode=Lease (pod {pod_name}): partitions are claimed from the ownership registry, not assigned")
+            format!("instances.mode = lease (pod {pod_name}): partitions are claimed from the ownership registry, not assigned")
         } else {
-            InstanceResolver::describe_ownership(partitions, &identity)
+            identity.describe_ownership(partitions)
         },
         read_mode = ?consumer.read_mode, persist = ?consumer.persist, batch_size = consumer.batch_size,
         backpressure = consumer.backpressure.enabled,
@@ -583,7 +565,7 @@ impl Ctx {
         }
     }
 
-    /// Builds and starts a read side over `owned` (C# `StartReadSideAsync`). On error nothing of
+    /// Builds and starts a read side over `owned`. On error nothing of
     /// it is left running.
     #[allow(clippy::too_many_lines)] // one sequence, as C#
     async fn start_generation(self: &Arc<Self>, owned: &[u32], number: u64) -> Result<Generation> {
@@ -754,7 +736,7 @@ impl Ctx {
         self.store.flusher(opts)
     }
 
-    /// Stops a read side (C# `StopReadSideAsync`): graceful stop of every partition not already
+    /// Stops a read side: graceful stop of every partition not already
     /// revoked, wait for the workers up to the budget (then drop them), final flush, monitors
     /// forgotten (their gauges cleared). `log` = an ordinary shutdown line on a timeout.
     async fn stop_generation(&self, mut generation: Generation, log: bool) {

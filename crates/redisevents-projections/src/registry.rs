@@ -1,5 +1,4 @@
-//! [`EventTypeRegistry`]: explicit wire type strings to Rust types and codecs (C#
-//! `EventTypeRegistry`).
+//! [`EventTypeRegistry`]: explicit wire type strings to Rust types and codecs.
 
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
@@ -74,7 +73,7 @@ struct Entry {
 /// use redisevents_projections::EventTypeRegistry;
 ///
 /// #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
-/// #[serde(rename_all = "PascalCase")] // C# producers write System.Text.Json's default casing
+/// #[serde(rename_all = "PascalCase")] // .NET producers write System.Text.Json's default casing
 /// struct WidgetCreated { id: String, name: String }
 ///
 /// # fn main() -> redisevents::Result<()> {
@@ -127,7 +126,7 @@ impl EventTypeRegistry {
         )
     }
 
-    /// [`register`](Self::register) with the [`Json`] codec (C# `RegisterJson`).
+    /// [`register`](Self::register) with the [`Json`] codec.
     ///
     /// # Errors
     /// As [`register`](Self::register).
@@ -138,7 +137,7 @@ impl EventTypeRegistry {
         self.register::<T, Json>(wire_type)
     }
 
-    /// Registers `T` with a hand-written serializer pair (C# `Register`), for formats without a
+    /// Registers `T` with a hand-written serializer pair, for formats without a
     /// [`PayloadCodec`].
     ///
     /// # Errors
@@ -235,7 +234,7 @@ impl EventTypeRegistry {
             .insert(wire_type.to_owned(), Entry { type_id, decode });
     }
 
-    /// Encodes a registered event as `(wire type, body)` (C# `Encode`).
+    /// Encodes a registered event as `(wire type, body)`.
     ///
     /// # Errors
     /// [`Error::InvalidArgument`] when `T` was not registered with an encoder;
@@ -272,7 +271,7 @@ impl EventTypeRegistry {
         self.decodes_to.contains(&TypeId::of::<T>())
     }
 
-    /// Decodes a body (C# `TryDecode`). `Ok(None)` is an unknown wire type.
+    /// Decodes a body. `Ok(None)` is an unknown wire type.
     ///
     /// # Errors
     /// The body does not decode as the registered type: the entry is malformed.

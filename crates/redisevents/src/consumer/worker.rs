@@ -66,7 +66,7 @@ pub(crate) mod testing;
 #[cfg(test)]
 mod tests;
 
-/// At most one "still blocked" error line per this interval (C# `BlockLogIntervalMs`).
+/// At most one "still blocked" error line per this interval.
 pub(crate) const BLOCK_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The delay before block retry `attempt` (0-based): 1, 2, 4, 8, 16, then 30 s forever.
@@ -203,7 +203,7 @@ impl PartitionSlot {
 // Type filter
 // ------------------------------------------------------------------------------------------------
 
-/// The consumer's message-type filter (C# `TypeFilter`). Built once per worker.
+/// The consumer's message-type filter. Built once per worker.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TypeFilter {
     types: Option<Box<[String]>>,
@@ -592,7 +592,7 @@ impl<H: BatchHandler> Processor<H> {
         }
     }
 
-    /// Handler, then advance: the two steps that happen together on every attempt (C# `InvokeAsync`).
+    /// Handler, then advance: the two steps that happen together on every attempt.
     async fn invoke(
         &self,
         part: &Part,
@@ -642,7 +642,7 @@ impl<H: BatchHandler> Processor<H> {
         })
     }
 
-    /// Records (and under `Sync*`, persists) a processed position (C# `AdvanceAsync`).
+    /// Records (and under `Sync*`, persists) a processed position.
     async fn advance(&self, part: &Part, id: StreamId) -> std::result::Result<(), HandleError> {
         if self.cfg.persist == PersistMode::None || part.stop.is_revoked() {
             return Ok(());
@@ -668,7 +668,7 @@ impl<H: BatchHandler> Processor<H> {
         }
     }
 
-    /// Applies `on_error` to an ordinary failure (C# `OnFailureAsync`).
+    /// Applies `on_error` to an ordinary failure.
     async fn on_failure(
         &self,
         part: &Part,
@@ -740,7 +740,7 @@ impl<H: BatchHandler> Processor<H> {
     }
 
     /// Blocks this partition on a failing batch and retries it on [`BLOCK_BACKOFF`] until it
-    /// succeeds, fails with a `Skip`, or the partition is stopped (C# `BlockAndRetryAsync`).
+    /// succeeds, fails with a `Skip`, or the partition is stopped.
     async fn block_and_retry(
         &self,
         part: &Part,
@@ -1208,7 +1208,7 @@ impl<H: BatchHandler, F: FetchSource> Worker<H, F> {
     }
 }
 
-/// Pooled mode: one partition's processor (C# `ProcessLoopAsync`).
+/// Pooled mode: one partition's processor.
 async fn process_loop<H: BatchHandler>(
     processor: Arc<Processor<H>>,
     part: Part,

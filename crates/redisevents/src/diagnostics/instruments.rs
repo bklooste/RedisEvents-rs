@@ -56,7 +56,7 @@ pub(crate) struct Series {
     pub(crate) value: GaugeValue,
 }
 
-/// How a series key maps onto tags (C# `TagShape`).
+/// How a series key maps onto tags.
 #[derive(Clone, Copy)]
 enum TagShape {
     Topic,
@@ -73,7 +73,7 @@ fn gauges() -> MutexGuard<'static, GaugeStore> {
     GAUGES.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// 1 while a partition is blocked retrying a `DontIgnoreException`, 0 once it is not. Reported at
+/// 1 while a partition is blocked retrying a blocking error, 0 once it is not. Reported at
 /// 0 (never removed) so a recovery is visible and a dead pod is not mistaken for one.
 pub(crate) fn set_blocked(key: &str, value: i64) {
     set_series(

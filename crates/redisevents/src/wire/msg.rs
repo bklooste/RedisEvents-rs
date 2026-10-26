@@ -132,7 +132,7 @@ impl StreamMsg {
     }
 }
 
-/// A message whose body has been decoded into a `T` (C# `StreamMsg<T>`).
+/// A message whose body has been decoded into a `T`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedMsg<T> {
     /// The decoded body.

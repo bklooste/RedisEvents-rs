@@ -1,5 +1,5 @@
 //! The slice of the core `StreamStore` the repository needs, as a trait so tests (and other
-//! stores) can stand in for it (C# `IStreamStore`).
+//! stores) can stand in for it.
 
 use std::future::Future;
 

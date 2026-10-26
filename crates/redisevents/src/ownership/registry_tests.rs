@@ -18,7 +18,7 @@ use tracing_subscriber::layer::{Context, SubscriberExt};
 use uuid::Uuid;
 
 use super::*;
-use crate::config::instance::{InstanceResolver, InstanceSource, PartitionRange};
+use crate::config::instance::{self, InstanceIdentity, InstanceSource, PartitionRange};
 
 const PARTITIONS: u32 = 8;
 
@@ -179,7 +179,7 @@ fn keys() -> Keys {
 }
 
 fn owned_range(index: u32, count: u32) -> PartitionRange {
-    InstanceResolver::owned(PARTITIONS, count, index)
+    instance::owned(PARTITIONS, count, index)
 }
 
 fn static_registry(
@@ -456,9 +456,9 @@ async fn s6d_a_restarted_instance_reclaims_its_ordinal_range_with_no_stale_dupli
     let consumer = redis.new_consumer("s6d-bounce");
 
     let resolve_one = || {
-        InstanceResolver::resolve(None, |name| match name {
-            InstanceResolver::POD_NAME_VARIABLE => Some("svc-1".to_owned()),
-            InstanceResolver::COUNT_VARIABLE => Some("2".to_owned()),
+        InstanceIdentity::resolve(None, |name| match name {
+            instance::POD_NAME_VARIABLE => Some("svc-1".to_owned()),
+            instance::COUNT_VARIABLE => Some("2".to_owned()),
             _ => None,
         })
         .unwrap()
@@ -466,7 +466,7 @@ async fn s6d_a_restarted_instance_reclaims_its_ordinal_range_with_no_stale_dupli
     let before = resolve_one();
     assert_eq!((before.index, before.count), (1, 2));
     assert_eq!(before.index_source, InstanceSource::PodOrdinal);
-    let range_one = InstanceResolver::owned_for(PARTITIONS, &before);
+    let range_one = before.owned(PARTITIONS);
     assert_eq!(range_one.iter().collect::<Vec<_>>(), [4, 5, 6, 7]);
 
     let log = Capture::default();
@@ -514,7 +514,7 @@ async fn s6d_a_restarted_instance_reclaims_its_ordinal_range_with_no_stale_dupli
 
     let after = resolve_one();
     assert_eq!(after.index, before.index);
-    let reclaimed = InstanceResolver::owned_for(PARTITIONS, &after);
+    let reclaimed = after.owned(PARTITIONS);
     assert_eq!(reclaimed, range_one);
 
     let restarted_id = Uuid::new_v4();

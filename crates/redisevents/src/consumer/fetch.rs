@@ -8,14 +8,14 @@
 //! # Shape
 //!
 //! - `ReaderConnection`: the dedicated, read-only socket a `ReadMode::Block` consumer reads on
-//!   (C# `StreamReaderConnection`). Cheap to clone; clones share one socket, which is how the
-//!   per-partition read loops of a consumer with `CoLocatePartitions = false` share one reader
-//!   connection, as in C#. It can only issue `XREAD`, and it reconnects on its own.
+//!   Cheap to clone; clones share one socket, which is how the
+//!   per-partition read loops of a consumer with `co_locate_partitions = false` share one reader
+//!   connection. It can only issue `XREAD`, and it reconnects on its own.
 //! - `Fetch`: one read loop's fetch, over one or more partitions (the co-located group is one
 //!   multi-stream `XREAD`, the single-partition form is a group of one). It owns the read cursor of
 //!   every partition it covers, advances each to the last id it returned, and moves one on
 //!   `Fetch::seek` (C# `SeekTo` / `ResetSeek`, for the reset-marker protocol). Built with
-//!   `Fetch::block` (C# `BlockFetch`) or `Fetch::poll` (C# `PollFetch`, on the shared
+//!   `Fetch::block` or `Fetch::poll` (on the shared
 //!   connection, with the idle back-off folded in).
 //! - `StreamBatch`: what one fetch hands back per partition: decoded messages plus the last id
 //!   read. No pooling: the batch owns a `Vec`, and every body is a `Bytes` that took over the
@@ -70,7 +70,7 @@ mod redis_tests;
 // ------------------------------------------------------------------------------------------------
 
 /// One partition's share of one fetch: the decoded messages, in stream order, and the id of the
-/// last entry read (C# `StreamBatch` / `StreamSlice`). Never empty when returned by [`Fetch::fetch`].
+/// last entry read. Never empty when returned by [`Fetch::fetch`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StreamBatch {
     /// The partition the messages were read from.
@@ -86,7 +86,7 @@ pub(crate) struct StreamBatch {
 // ReaderConnection
 // ------------------------------------------------------------------------------------------------
 
-/// The dedicated, read-only connection a blocking consumer reads on (C# `StreamReaderConnection`).
+/// The dedicated, read-only connection a blocking consumer reads on.
 ///
 /// - Opened through [`Connection::dedicated`], so it has **no response timeout**: a `BLOCK` may
 ///   wait as long as its argument says. (C# raises `syncTimeout` above `N × BlockMs` for N loops
@@ -108,7 +108,7 @@ pub(crate) struct ReaderConnection {
 struct ReaderInner {
     conn: Connection,
     block_ms: u32,
-    /// `CLIENT SETNAME` for every socket this reader opens (C# `StreamNames.ReaderClientName`);
+    /// `CLIENT SETNAME` for every socket this reader opens;
     /// `None` leaves it unnamed.
     client_name: Option<String>,
     /// The live socket and its generation; `None` until the first read and after a discard.
@@ -559,7 +559,7 @@ impl Fetch {
     }
 }
 
-/// The idle back-off ladder (C# `Backoff.Next`): 0 → 1 → 2 → 4 … capped at `max`; `max` 0 pins 0.
+/// The idle back-off ladder: 0 → 1 → 2 → 4 … capped at `max`; `max` 0 pins 0.
 pub(crate) fn backoff_next(current: u32, max: u32) -> u32 {
     if max == 0 {
         return 0;
@@ -593,7 +593,7 @@ pub(crate) enum SliceKey {
     Foreign(Vec<u8>),
 }
 
-/// One stream's entries out of a multi-stream reply (C# `StreamSlice`). Never empty.
+/// One stream's entries out of a multi-stream reply. Never empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Slice {
     pub(crate) key: SliceKey,
@@ -764,7 +764,7 @@ fn parse_fields(fields: Value) -> Result<Vec<(Bytes, Bytes)>> {
         .collect()
 }
 
-/// Parses a single-key reply (C# `BlockFetch.Parse`): the stream whose key is `expected`, or the
+/// Parses a single-key reply: the stream whose key is `expected`, or the
 /// only stream if there is just one (a key prefix on the connection would rewrite its text).
 ///
 /// # Errors
@@ -799,7 +799,7 @@ pub(crate) fn parse(reply: Value, expected: &[u8]) -> Result<Vec<RawEntry>> {
     parse_entries(entries)
 }
 
-/// Parses a multi-stream reply (C# `BlockFetch.ParseAll`) into one [`Slice`] per stream that had
+/// Parses a multi-stream reply into one [`Slice`] per stream that had
 /// entries, in reply order, each matched to a requested key on raw bytes. A key that was not
 /// requested is carried through as [`SliceKey::Foreign`], except that a single-key request whose
 /// reply holds exactly one (unmatched) stream attributes it to that key.

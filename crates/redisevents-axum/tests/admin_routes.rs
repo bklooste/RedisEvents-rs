@@ -448,7 +448,7 @@ async fn a_preview_with_no_stored_position_says_what_it_assumed() {
         .format(&time::format_description::well_known::Rfc3339)
         .expect("format");
 
-    // whenMissing defaults to beginning: the consumer would have started at 0-0, so moving to the
+    // when_missing defaults to beginning: the consumer would have started at 0-0, so moving to the
     // second entry skips one.
     let (status, beginning) = get(
         &app,
@@ -462,11 +462,11 @@ async fn a_preview_with_no_stored_position_says_what_it_assumed() {
     assert!(beginning.contains("assuming 0-0"), "{beginning}");
     assert!(beginning.contains("skip"), "{beginning}");
 
-    // whenMissing=now: it would have started at the tail, so the same request is a rewind.
+    // when_missing=now: it would have started at the tail, so the same request is a rewind.
     let (status, now) = get(
         &app,
         &format!(
-            "/admin/streams/{topic}/{consumer}/reset/preview?from={}&whenMissing=now",
+            "/admin/streams/{topic}/{consumer}/reset/preview?from={}&when_missing=now",
             enc(&from)
         ),
     )

@@ -2,11 +2,11 @@
 //! detection and release on shutdown. **Owner: B5.** Crate-private; C3, C4, D1 and D2 consume it.
 //! Embeds `wire-spec/lua/lease.lua` and `release.lua` byte for byte (`include_str!`).
 //!
-//! Port of C# `OwnershipRegistry`. The interface C3/C4 consume (see `CONTRACTS.md` §5, B5):
+//! The interface C3/C4 consume (see `CONTRACTS.md` §5, B5):
 //!
 //! - `OwnershipRegistry::new` validates the options (errors are `Error::Config`).
 //! - `OwnershipRegistry::start` probes `HEXPIRE` (refusing to run without it), claims once and
-//!   spawns the renew loop. A failed first claim is logged, not returned, as in C#.
+//!   spawns the renew loop. A failed first claim is logged, not returned.
 //! - `OwnershipRegistry::subscribe` / `OwnershipRegistry::held`: the partitions this instance
 //!   holds, as a `tokio::sync::watch` of a sorted `Arc<[u32]>`. In Lease mode the value changes the
 //!   moment a lease cycle returns a different set (before anything else in that cycle), so a worker
@@ -52,7 +52,7 @@ const PROBE_FIELD_PREFIX: &str = "__hexpire-probe:";
 static LEASE: LazyLock<Script> = LazyLock::new(|| Script::new(LEASE_SCRIPT));
 static RELEASE: LazyLock<Script> = LazyLock::new(|| Script::new(RELEASE_SCRIPT));
 
-/// Latest map per `topic:consumer`, process-wide (C# `Observed`), for health checks.
+/// Latest map per `topic:consumer`, process-wide, for health checks.
 static OBSERVED: LazyLock<Mutex<HashMap<String, OwnershipMap>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -63,7 +63,7 @@ fn observed() -> MutexGuard<'static, HashMap<String, OwnershipMap>> {
 /// The partitions an instance holds, sorted ascending.
 pub(crate) type Held = Arc<[u32]>;
 
-/// C# `OwnershipRegistryOptions`.
+/// Options of one [`OwnershipRegistry`].
 #[derive(Debug, Clone)]
 pub(crate) struct OwnershipRegistryOptions {
     pub(crate) topic: String,
@@ -79,7 +79,7 @@ pub(crate) struct OwnershipRegistryOptions {
 }
 
 impl OwnershipRegistryOptions {
-    /// The C# defaults: Lease mode, TTL 30 s, renew 10 s, pod `unknown`, the stable instance id.
+    /// The defaults: Lease mode, TTL 30 s, renew 10 s, pod `unknown`, the stable instance id.
     pub(crate) fn new(
         topic: impl Into<String>,
         consumer: impl Into<String>,
@@ -211,7 +211,7 @@ impl OwnershipRegistry {
         self.shared.options.instance_id
     }
 
-    /// The partitions held now (C# `Held`).
+    /// The partitions held now.
     pub(crate) fn held(&self) -> Held {
         self.shared.held.borrow().clone()
     }
@@ -221,22 +221,22 @@ impl OwnershipRegistry {
         self.shared.held.subscribe()
     }
 
-    /// The last map this registry computed (C# `Latest`).
+    /// The last map this registry computed.
     pub(crate) fn latest(&self) -> Option<OwnershipMap> {
         self.shared.state().latest.clone()
     }
 
-    /// `true` when any live registry in this process last saw a degraded map (C# `AnyDegraded`).
+    /// `true` when any live registry in this process last saw a degraded map.
     pub(crate) fn any_degraded() -> bool {
         observed().values().any(OwnershipMap::is_degraded)
     }
 
-    /// The last map seen for `topic` / `consumer` in this process (C# `TryGetSnapshot`).
+    /// The last map seen for `topic` / `consumer` in this process.
     pub(crate) fn snapshot(topic: &str, consumer: &str) -> Option<OwnershipMap> {
         observed().get(&format!("{topic}:{consumer}")).cloned()
     }
 
-    /// Probes `HEXPIRE`, claims once and starts the renew loop (C# `StartAsync`). Idempotent.
+    /// Probes `HEXPIRE`, claims once and starts the renew loop. Idempotent.
     ///
     /// # Errors
     /// [`Error::Config`] when the server cannot expire hash fields. Nothing is left running then.
@@ -263,7 +263,7 @@ impl OwnershipRegistry {
         Ok(())
     }
 
-    /// Stops the renew loop and releases what this instance still holds (C# `StopAsync`). Does
+    /// Stops the renew loop and releases what this instance still holds. Does
     /// nothing if the registry was never started.
     pub(crate) async fn stop(&self) {
         let Some(running) = self.running.lock().await.take() else {
@@ -274,7 +274,7 @@ impl OwnershipRegistry {
         self.shared.release().await;
     }
 
-    /// [`stop`](Self::stop), then clears the gauges and the process-wide snapshot (C# `DisposeAsync`).
+    /// [`stop`](Self::stop), then clears the gauges and the process-wide snapshot.
     pub(crate) async fn dispose(&self) {
         self.stop().await;
         instruments::set_unowned_partitions(&self.shared.metric_key, 0);
@@ -282,7 +282,7 @@ impl OwnershipRegistry {
         observed().remove(&self.shared.metric_key);
     }
 
-    /// Runs one cycle now (C# `RefreshAsync`).
+    /// Runs one cycle now.
     ///
     /// # Errors
     /// The Redis failure; the renew loop logs and swallows these.
@@ -662,7 +662,7 @@ impl Shared {
     }
 }
 
-/// HEXPIRE answered: `1` (set) or `2` (deleted, already due) is support (C# `Success` / `Due`).
+/// HEXPIRE answered: `1` (set) or `2` (deleted, already due) is support.
 fn probe_verdict(key: &str, topic: &str, result: &[i64]) -> Result<()> {
     match result.first() {
         Some(1 | 2) => Ok(()),
@@ -678,7 +678,7 @@ fn is_unreachable(e: &RedisError) -> bool {
     e.is_io_error() || e.is_timeout() || e.is_connection_dropped() || e.is_connection_refusal()
 }
 
-/// `i:<instanceId>`, the presence field (C# `PresenceField`).
+/// `i:<instanceId>`, the presence field.
 pub(crate) fn presence_field(instance_id: Uuid) -> String {
     format!("{PRESENCE_PREFIX}{}", instance_id.hyphenated())
 }
@@ -718,7 +718,7 @@ fn parse_partition(name: &str) -> Option<u32> {
     name.parse::<i32>().ok().and_then(|p| u32::try_from(p).ok())
 }
 
-/// Live instances: `i:` fields, at least 1 (C# `CountMembers`).
+/// Live instances: `i:` fields, at least 1.
 pub(crate) fn count_members(entries: &[(String, String)]) -> usize {
     entries
         .iter()

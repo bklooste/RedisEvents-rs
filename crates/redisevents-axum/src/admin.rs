@@ -1,12 +1,12 @@
 //! Stream administration routes: preview and apply a position reset, and read the ownership map.
 //!
-//! The port of C# `RedisEvents.Web.StreamAdminEndpoints`. Routes, verbs, query parameters, status
-//! codes and bodies match the C# ones; see the crate docs for the table.
+//! Responses are plain text meant for an operator with `curl`; errors start with `Error:` and use
+//! the HTTP status that fits (400 invalid, 404 unknown topic, 409 live consumer, 503 Redis down).
 //!
 //! These routes can rewind and fast-forward production consumers, so they are only ever mounted
 //! through [`stream_admin_router`], which takes an authorization layer that every route carries.
 //! There is no unauthenticated variant: a caller who wants none passes an explicit pass-through
-//! layer, where the C# equivalent is `RequireAuthorization = false`.
+//! layer.
 
 use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
@@ -30,7 +30,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tower::{Layer, Service};
 
-/// Longest topic or consumer name accepted in a route (C# `StreamAdminEndpoints.MaxNameLength`).
+/// Longest topic or consumer name accepted in a route.
 pub const MAX_NAME_LENGTH: usize = 128;
 
 /// Options for [`stream_admin_router`]. The defaults are the safe ones.
@@ -39,7 +39,7 @@ pub const MAX_NAME_LENGTH: usize = 128;
 pub struct StreamAdminOptions {
     /// Whether a reset may be applied while the consumer still holds partition claims (default
     /// `false`). Left `false`, an apply against a live consumer answers 409 and names the owners;
-    /// a caller who means it passes `force=true`. C# `AllowResetWhileRunning`.
+    /// a caller who means it passes `force=true`.
     pub allow_reset_while_running: bool,
 }
 
@@ -55,7 +55,7 @@ struct AdminState {
 ///
 /// Mapped routes:
 ///
-/// - `GET  {topic}/{consumer}/reset/preview?from=…|id=…|to=start|end[&partition=N][&maxCountScan=N][&whenMissing=beginning|now]`
+/// - `GET  {topic}/{consumer}/reset/preview?from=…|id=…|to=start|end[&partition=N][&max_count_scan=N][&when_missing=beginning|now]`
 /// - `POST {topic}/{consumer}/reset?from=…|id=…|to=start|end[&partition=N][&force=true]`
 /// - `GET  {topic}/ownership`
 ///
@@ -158,7 +158,7 @@ fn bad_request(message: impl Into<String>) -> Failure {
     (StatusCode::BAD_REQUEST, message.into())
 }
 
-/// Maps a core error to the status the C# handlers answer with.
+/// Maps a core error to an HTTP status.
 fn core_failure(error: Error) -> Failure {
     match error {
         Error::Config(message) | Error::InvalidArgument(message) => {
@@ -254,7 +254,7 @@ async fn apply_reset(
     Ok(body)
 }
 
-/// The validation and checks shared by preview and apply, in the C# order: names, target, when
+/// The validation and checks shared by preview and apply,: names, target, when
 /// missing, scan cap, then the topic's layout (404 when it has none), partition range, and the
 /// ownership of the consumer. Returns the running-owner description when any partition is held.
 async fn prepare(
@@ -292,8 +292,8 @@ async fn prepare(
     Ok((admin, layout, running))
 }
 
-/// Validates the query. `preview` reads `maxCountScan` and `whenMissing`; the apply route does not
-/// take them, so they are ignored there, as C# does.
+/// Validates the query. `preview` reads `max_count_scan` and `when_missing`; the apply route does not
+/// take them, so they are ignored there.
 fn parse_reset(query: &HashMap<String, String>, apply: bool) -> Result<ResetRequest, Failure> {
     let get = |name: &str| query.get(name).map(String::as_str);
     let from = get("from").filter(|v| !v.trim().is_empty());
@@ -327,17 +327,17 @@ fn parse_reset(query: &HashMap<String, String>, apply: bool) -> Result<ResetRequ
         });
     }
 
-    let when_missing = parse_when_missing(get("whenMissing"))?;
-    let max_count_scan = match get("maxCountScan") {
+    let when_missing = parse_when_missing(get("when_missing"))?;
+    let max_count_scan = match get("max_count_scan") {
         None => None,
         Some(value) => match value.parse::<i64>() {
             Ok(n) if n > 0 => Some(u64::try_from(n).unwrap_or(u64::MAX)),
             Ok(_) => {
                 return Err(bad_request(
-                    "Error: maxCountScan must be greater than zero\n",
+                    "Error: max_count_scan must be greater than zero\n",
                 ));
             }
-            Err(_) => return Err(bad_request("Error: maxCountScan must be an integer\n")),
+            Err(_) => return Err(bad_request("Error: max_count_scan must be an integer\n")),
         },
     };
     Ok(ResetRequest {
@@ -349,7 +349,7 @@ fn parse_reset(query: &HashMap<String, String>, apply: bool) -> Result<ResetRequ
     })
 }
 
-/// Resolves exactly one of `from`, `id` and `to` into a target (C# `TryResolveTarget`).
+/// Resolves exactly one of `from`, `id` and `to` into a target.
 fn parse_target(
     from: Option<&str>,
     id: Option<&str>,
@@ -384,14 +384,14 @@ fn parse_target(
     }
 }
 
-/// Parses `whenMissing` (C# `TryParseWhenMissing`).
+/// Parses `when_missing`.
 fn parse_when_missing(value: Option<&str>) -> Result<StartFrom, Failure> {
     match value.map(str::trim) {
         None | Some("") => Ok(StartFrom::Beginning),
         Some(v) if v.eq_ignore_ascii_case("beginning") => Ok(StartFrom::Beginning),
         Some(v) if v.eq_ignore_ascii_case("now") => Ok(StartFrom::Now),
         Some(_) => Err(bad_request(
-            "Error: whenMissing must be either beginning or now (the consumer's StartFromWhenMissing)\n",
+            "Error: when_missing must be either beginning or now (the consumer's `start_from_when_missing`)\n",
         )),
     }
 }
@@ -477,7 +477,7 @@ async fn scan_consumers(state: &AdminState, topic: &str) -> Result<Vec<String>, 
     Ok(names.into_iter().collect())
 }
 
-/// `full map: 0->pod-0 1->(none)` (C# `OwnershipMap.Describe`).
+/// `full map: 0->pod-0 1->(none)`.
 fn describe_map(ownership: &OwnershipMap, partitions: u32) -> String {
     let mut text = String::from("full map:");
     for partition in 0..partitions {
@@ -502,7 +502,7 @@ fn partition_of(request: &ResetRequest) -> Option<u32> {
     request.partition.and_then(|p| u32::try_from(p).ok())
 }
 
-/// The text a reset appends while the consumer still holds claims (C# `RunningConsumerText`).
+/// The text a reset appends while the consumer still holds claims.
 fn running_consumer_text(map: &str, owned: usize, blocked: bool) -> String {
     let mut text = String::from("\n");
     let _ = writeln!(
@@ -523,7 +523,7 @@ fn running_consumer_text(map: &str, owned: usize, blocked: bool) -> String {
     text
 }
 
-/// Validates a topic or consumer name (C# `StreamAdminEndpoints.NameError`). The accepted alphabet
+/// Validates a topic or consumer name. The accepted alphabet
 /// is letters, digits, `_`, `-`, `.` and `:`: braces re-tag the key and glob characters would turn
 /// the ownership SCAN into a pattern.
 pub(crate) fn name_error(value: &str, what: &str) -> Option<String> {
@@ -699,10 +699,11 @@ mod tests {
 
     #[test]
     fn max_count_scan_must_be_positive() {
-        let (_, body) =
-            parse_reset(&query(&[("to", "end"), ("maxCountScan", "0")]), false).expect_err("zero");
+        let (_, body) = parse_reset(&query(&[("to", "end"), ("max_count_scan", "0")]), false)
+            .expect_err("zero");
         assert!(body.contains("greater than zero"), "{body}");
-        let ok = parse_reset(&query(&[("to", "end"), ("maxCountScan", "10")]), false).expect("ok");
+        let ok =
+            parse_reset(&query(&[("to", "end"), ("max_count_scan", "10")]), false).expect("ok");
         assert_eq!(ok.max_count_scan, Some(10));
     }
 
@@ -711,12 +712,12 @@ mod tests {
         let request = parse_reset(
             &query(&[
                 ("to", "start"),
-                ("whenMissing", "bogus"),
-                ("maxCountScan", "-1"),
+                ("when_missing", "bogus"),
+                ("max_count_scan", "-1"),
             ]),
             true,
         )
-        .expect("apply does not read whenMissing or maxCountScan");
+        .expect("apply does not read when_missing or max_count_scan");
         assert_eq!(request.max_count_scan, None);
     }
 

@@ -11,7 +11,9 @@ use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::{StreamLag, StreamPartitionRunState, StreamPartitionStatus};
+use super::{
+    StreamPartitionRunState, StreamPartitionStatus, TAIL_STALE_AFTER, estimate_entries_behind,
+};
 use crate::connection::Connection;
 use crate::diagnostics::instruments;
 use crate::error::{Error, Result};
@@ -50,7 +52,7 @@ pub(crate) struct Thresholds {
     pub(crate) degraded_silence_seconds: u32,
 }
 
-/// Progress against the stream's tail (C# `TailProgress`).
+/// Progress against the stream's tail.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TailProgress {
     pub(crate) position: StreamId,
@@ -75,7 +77,7 @@ struct Progress {
 }
 
 struct Inner {
-    /// `None` until something is observed (C# `lastProcessedMs < 0`).
+    /// `None` until something is observed.
     last_processed: Option<StreamId>,
     caught_up: bool,
     lag_entries: i64,
@@ -87,7 +89,7 @@ struct Inner {
     progress: Progress,
 }
 
-/// Tracks one partition this process reads (C# `StreamPartitionMonitor`).
+/// Tracks one partition this process reads.
 pub(crate) struct PartitionMonitor {
     topic: String,
     consumer: String,
@@ -176,25 +178,24 @@ impl PartitionMonitor {
         self.lock().last_processed.unwrap_or(self.start_position)
     }
 
-    /// Records a processed entry (C# `Observe`).
+    /// Records a processed entry.
     pub(crate) fn observe(&self, id: StreamId) {
         let mut inner = self.lock();
         inner.last_processed = Some(id);
         inner.caught_up = false;
     }
 
-    /// Marks the partition as at the tail (C# `MarkCaughtUp`).
+    /// Marks the partition as at the tail.
     pub(crate) fn mark_caught_up(&self) {
         self.lock().caught_up = true;
     }
 
-    /// Records the entries-behind estimate from the last sample (C# `SetLagEntries`).
+    /// Records the entries-behind estimate from the last sample.
     pub(crate) fn set_lag_entries(&self, entries: i64) {
         self.lock().lag_entries = entries;
     }
 
-    /// Records a tail sample: the last entry that is actually in the stream, `MIN` when empty
-    /// (C# `SetTail`).
+    /// Records a tail sample: the last entry that is actually in the stream, `MIN` when empty.
     pub(crate) fn set_tail(&self, last_entry: StreamId) {
         let mut inner = self.lock();
         let now = self.clock.now();
@@ -212,7 +213,7 @@ impl PartitionMonitor {
         Self::note_progress(&mut inner, now, self.start_position);
     }
 
-    /// Lets the sampler tick notice a position change without a sample (C# `RefreshProgress`).
+    /// Lets the sampler tick notice a position change without a sample.
     pub(crate) fn refresh_progress(&self) {
         let mut inner = self.lock();
         let now = self.clock.now();
@@ -237,7 +238,7 @@ impl PartitionMonitor {
         }
     }
 
-    /// Progress against the tail (C# `ReadProgress`).
+    /// Progress against the tail.
     pub(crate) fn read_progress(&self) -> TailProgress {
         let mut inner = self.lock();
         let now = self.clock.now();
@@ -249,8 +250,7 @@ impl PartitionMonitor {
             -1.0
         };
         // A sample that has stopped arriving says nothing about now.
-        let fresh =
-            p.tail_sampled && sample_age <= StreamLag::TAIL_STALE_AFTER.as_secs_f64() * 1000.0;
+        let fresh = p.tail_sampled && sample_age <= TAIL_STALE_AFTER.as_secs_f64() * 1000.0;
         TailProgress {
             position: p.noted,
             position_unchanged_ms: elapsed_ms(p.position_changed_at, now),
@@ -270,7 +270,7 @@ impl PartitionMonitor {
         }
     }
 
-    /// The partition is being read (C# `MarkRunning`).
+    /// The partition is being read.
     pub(crate) fn mark_running(&self) {
         let mut inner = self.lock();
         inner.stop_reason = None;
@@ -280,7 +280,7 @@ impl PartitionMonitor {
         self.clear_block(&mut inner);
     }
 
-    /// The partition is retrying a blocking failure (C# `MarkBlocked`).
+    /// The partition is retrying a blocking failure.
     pub(crate) fn mark_blocked(&self) {
         let mut inner = self.lock();
         inner.state = StreamPartitionRunState::Blocked;
@@ -292,24 +292,24 @@ impl PartitionMonitor {
         instruments::set_block_duration_ms(&self.metric_key, blocked);
     }
 
-    /// Whether the partition is in the blocked state (C# `State == PartitionRunState.Blocked`).
+    /// Whether the partition is in the blocked state.
     pub(crate) fn is_blocked(&self) -> bool {
         self.lock().state == StreamPartitionRunState::Blocked
     }
 
-    /// Whether the partition is in the stopped state (C# `State == PartitionRunState.Stopped`).
+    /// Whether the partition is in the stopped state.
     pub(crate) fn is_stopped(&self) -> bool {
         self.lock().state == StreamPartitionRunState::Stopped
     }
 
-    /// The blocking failure cleared (C# `MarkUnblocked`).
+    /// The blocking failure cleared.
     pub(crate) fn mark_unblocked(&self) {
         let mut inner = self.lock();
         self.clear_block(&mut inner);
         inner.state = StreamPartitionRunState::Running;
     }
 
-    /// The partition stood down (C# `MarkStopped`). `escalate` is kept from the first stop only.
+    /// The partition stood down. `escalate` is kept from the first stop only.
     pub(crate) fn mark_stopped(&self, reason: &str, escalate: bool) {
         let mut inner = self.lock();
         inner.stop_reason = Some(reason.to_owned());
@@ -321,7 +321,7 @@ impl PartitionMonitor {
         self.clear_block(&mut inner);
     }
 
-    /// Publishes `streams.lag.ms` and the block duration (C# `PublishLagMs`).
+    /// Publishes `streams.lag.ms` and the block duration.
     pub(crate) fn publish_lag_ms(&self) {
         self.refresh_progress();
         let lag = self.lag_ms();
@@ -352,7 +352,7 @@ impl PartitionMonitor {
         }
     }
 
-    /// Snapshot for grading (C# `StreamStatus.Snapshot`).
+    /// Snapshot for grading.
     pub(crate) fn status(&self) -> StreamPartitionStatus {
         let progress = self.read_progress();
         let lag_ms = self.lag_ms();
@@ -406,7 +406,7 @@ impl PartitionMonitor {
 
 type Registry = BTreeMap<String, Arc<PartitionMonitor>>;
 
-/// Process-wide monitors, keyed `topic:partition:consumer` (C# `StreamLag.Monitors`).
+/// Process-wide monitors, keyed `topic:partition:consumer`.
 static MONITORS: LazyLock<Mutex<Registry>> = LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
 fn monitors() -> MutexGuard<'static, Registry> {
@@ -461,19 +461,19 @@ pub(crate) fn track_with_clock(
     Ok(monitor)
 }
 
-/// Every registered monitor (C# `StreamLag.All`).
+/// Every registered monitor.
 pub(crate) fn all() -> Vec<Arc<PartitionMonitor>> {
     monitors().values().cloned().collect()
 }
 
-/// Unregisters a monitor and clears its gauge series (C# `StreamLag.Forget`).
+/// Unregisters a monitor and clears its gauge series.
 pub(crate) fn forget(monitor: &Arc<PartitionMonitor>) {
     monitors().remove(&monitor.metric_key);
     instruments::clear_partition(&monitor.metric_key);
     instruments::clear_stream_length(&monitor.stream_metric_key);
 }
 
-/// Unregisters every monitor (C# `StreamLag.Clear`).
+/// Unregisters every monitor.
 pub(crate) fn clear() {
     let drained: Vec<_> = monitors().values().cloned().collect();
     for monitor in &drained {
@@ -481,14 +481,14 @@ pub(crate) fn clear() {
     }
 }
 
-/// Publishes lag for every monitor (C# `StreamLag.PublishLagMs`).
+/// Publishes lag for every monitor.
 pub(crate) fn publish_lag_ms() {
     for monitor in all() {
         monitor.publish_lag_ms();
     }
 }
 
-/// Samples the stream of every registered monitor once (C# `StreamLagSampler.SampleOnceAsync`).
+/// Samples the stream of every registered monitor once.
 /// A failed sample keeps the previous values; a missing stream is an empty one.
 pub(crate) async fn sample_once(connection: &Connection) {
     let mut conn = connection.shared();
@@ -513,8 +513,7 @@ pub(crate) async fn sample_once(connection: &Connection) {
                     .and_then(entry_id)
                     .unwrap_or(StreamId::MIN);
                 monitor.set_tail(tail);
-                let behind =
-                    StreamLag::estimate_entries_behind(length, first, last, monitor.position());
+                let behind = estimate_entries_behind(length, first, last, monitor.position());
                 monitor.set_lag_entries(behind);
                 instruments::set_stream_length(&monitor.stream_metric_key, length);
                 instruments::set_lag_entries(&monitor.metric_key, behind);

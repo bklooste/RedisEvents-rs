@@ -1,4 +1,6 @@
-//! [`CachedAggregate`] (C# `CachedAggregate<T>`).
+//! [`CachedAggregate`].
+
+use tokio::sync::Mutex;
 
 use crate::aggregate::{Aggregate, AggregateRoot};
 use crate::decision::AggregateDecision;
@@ -7,15 +9,16 @@ use crate::execute::{ExecuteOptions, load_or_create};
 use crate::repository::EventRepository;
 
 /// Keeps the last known-good instance of one aggregate between commands, so a hot aggregate is not
-/// replayed on every command (C# `CachedAggregate<T>`).
+/// replayed on every command.
 ///
-/// One `CachedAggregate` serves one aggregate id. It takes `&mut self`: share it between tasks
-/// with a `tokio::sync::Mutex`, which also serialises the commands that would otherwise race each
-/// other on its version. The cached instance is dropped whenever it might be stale or
-/// half-decided: a lost version check, a refusal after raising, an error from `decide`, a failed
-/// save, or [`Redo`](AggregateDecision::Redo).
+/// One `CachedAggregate` serves one aggregate id and is shared by reference (put it in an `Arc` or
+/// in your service state): [`run`](Self::run) takes `&self` and holds an internal lock for the
+/// whole load, decide, save, so concurrent commands on this id are serialised instead of racing on
+/// the version. The cached instance is dropped whenever it might be stale or half-decided: a lost
+/// version check, a refusal after emitting, an error from `decide`, a failed save, or
+/// [`Redo`](AggregateDecision::Redo).
 pub struct CachedAggregate<A: Aggregate> {
-    cached: Option<AggregateRoot<A>>,
+    cached: Mutex<Option<AggregateRoot<A>>>,
     expected_version: Option<fn(&AggregateRoot<A>) -> u64>,
 }
 
@@ -30,7 +33,7 @@ impl<A: Aggregate> CachedAggregate<A> {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            cached: None,
+            cached: Mutex::new(None),
             expected_version: None,
         }
     }
@@ -45,18 +48,17 @@ impl<A: Aggregate> CachedAggregate<A> {
     }
 
     /// Drops the cached instance; the next run reloads.
-    pub fn evict(&mut self) {
-        self.cached = None;
+    pub async fn evict(&self) {
+        *self.cached.lock().await = None;
     }
 
     /// True while an instance is cached.
-    #[must_use]
-    pub fn is_cached(&self) -> bool {
-        self.cached.is_some()
+    pub async fn is_cached(&self) -> bool {
+        self.cached.lock().await.is_some()
     }
 
     /// Runs `decide` against the cached instance (or a fresh load of `id`) and saves what it
-    /// raised, retrying as [`execute`](crate::execute) does. `decide` also learns whether its
+    /// emitted, retrying as [`execute`](crate::execute) does. `decide` also learns whether its
     /// instance came from the cache, so it can do its own freshness check and return
     /// [`AggregateDecision::Redo`].
     ///
@@ -65,7 +67,7 @@ impl<A: Aggregate> CachedAggregate<A> {
     /// # Errors
     /// As [`execute`](crate::execute).
     pub async fn run<R, T, E, F>(
-        &mut self,
+        &self,
         repository: &R,
         id: &str,
         options: &ExecuteOptions,
@@ -75,16 +77,16 @@ impl<A: Aggregate> CachedAggregate<A> {
         R: EventRepository,
         F: AsyncFnMut(&mut AggregateRoot<A>, bool) -> Result<AggregateDecision<T>, E>,
     {
-        options.validate()?;
+        let mut slot = self.cached.lock().await;
         let mut attempt = 1_u32;
         loop {
-            let cached = self.cached.take();
+            let cached = slot.take();
             let from_cache = cached.is_some();
             let mut root = match cached {
                 Some(root) => root,
                 None => load_or_create::<R, A>(repository, id).await?,
             };
-            // `self.cached` stays empty until a save commits or a no-op decision stands: an error
+            // the slot stays empty until a save commits or a no-op decision stands: an error
             // anywhere below must not leave a stale or half-decided instance for the next caller.
             let decision = decide(&mut root, from_cache)
                 .await
@@ -92,24 +94,24 @@ impl<A: Aggregate> CachedAggregate<A> {
             let Some(value) = decision.settle(&root)? else {
                 continue;
             };
-            if root.uncommitted_changes().is_empty() {
-                self.cached = Some(root);
+            if root.pending().is_empty() {
+                *slot = Some(root);
                 return Ok(value);
             }
             if !options.concurrency_check {
                 repository
                     .save_unchecked(&mut root, &options.publish)
                     .await?;
-                self.cached = Some(root);
+                *slot = Some(root);
                 return Ok(value);
             }
             let expected = self.expected_version.map(|select| select(&root));
             match repository.save(&mut root, expected, &options.publish).await {
                 Ok(_) => {
-                    self.cached = Some(root);
+                    *slot = Some(root);
                     return Ok(value);
                 }
-                Err(Error::Concurrency(conflict)) if attempt < options.max_attempts => {
+                Err(Error::Concurrency(conflict)) if attempt < options.max_attempts.get() => {
                     if let Some(hook) = &options.on_conflict {
                         hook(attempt, conflict).await;
                     }

@@ -50,7 +50,7 @@ use crate::wire::{HeaderBlock, Keys, RoundRobin, StreamId, StreamMsg};
 // Outbox
 // ------------------------------------------------------------------------------------------------
 
-/// One publish inside an outbox transaction (C# `OutboxPublish`).
+/// One publish inside an outbox transaction.
 #[derive(Debug, Clone, Copy)]
 pub struct OutboxPublish<'a> {
     /// The topic. Every publish of one transaction must land in one hash slot.
@@ -67,7 +67,7 @@ pub struct OutboxPublish<'a> {
     pub topic_options: &'a TopicOptions,
 }
 
-/// Writes state and publishes the events announcing it as one `MULTI`/`EXEC` (C# `Outbox`).
+/// Writes state and publishes the events announcing it as one `MULTI`/`EXEC`.
 ///
 /// **`MULTI`/`EXEC` is isolation, not rollback**: a queued command failing at run time (say
 /// `WRONGTYPE`) does not stop the others. No other client sees a half-applied state, and a crash
@@ -121,7 +121,7 @@ impl Outbox {
         self
     }
 
-    /// A state key sharing `topic`'s slot: `<prefix>{topic}:state:<name>` (C# `Outbox.StateKey`).
+    /// A state key sharing `topic`'s slot: `<prefix>{topic}:state:<name>`.
     ///
     /// # Errors
     /// [`Error::InvalidArgument`] for a blank `topic` or `name`; [`Error::Config`] when `topic`
@@ -155,7 +155,7 @@ impl Outbox {
         )
     }
 
-    /// Queues `state_writes` and one `XADD` in one `MULTI`/`EXEC` (C# `WriteAndPublishAsync`).
+    /// Queues `state_writes` and one `XADD` in one `MULTI`/`EXEC`.
     /// `state_writes` adds commands to a pipeline already in atomic mode; it must not run them.
     ///
     /// # Errors
@@ -709,7 +709,7 @@ impl Guarded {
 // State store
 // ------------------------------------------------------------------------------------------------
 
-/// One event to append to a state stream and publish to its topic (C# `StateEvent`).
+/// One event to append to a state stream and publish to its topic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateEvent {
     /// The body.
@@ -839,7 +839,7 @@ impl StreamStore {
     }
 
     /// Appends `events` to `name` and publishes them to the topic, both in order, atomically, if
-    /// and only if the state stream's length is still `expected_len` (C# `AppendAndPublishAsync`).
+    /// and only if the state stream's length is still `expected_len`.
     ///
     /// Returns the **state-stream** entry ids, or `None` when the length check failed, in which
     /// case nothing was written (neither stream).
@@ -1057,7 +1057,7 @@ fn bytes_of(value: Value) -> Option<Bytes> {
 // Idempotency
 // ------------------------------------------------------------------------------------------------
 
-/// Dedupe markers for at-least-once handlers (C# `Idempotency`). A marker, not a lock: it never
+/// Dedupe markers for at-least-once handlers. A marker, not a lock: it never
 /// clears on failure.
 #[derive(Debug, Clone, Copy)]
 pub struct Idempotency;
@@ -1120,7 +1120,7 @@ impl Idempotency {
 // Topic forwarder
 // ------------------------------------------------------------------------------------------------
 
-/// One message a [`TopicForwarder`] publishes (C# `ForwardedMessage`).
+/// One message a [`TopicForwarder`] publishes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardedMessage {
     /// The routing key on the target topic.
