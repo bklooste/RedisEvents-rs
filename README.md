@@ -104,10 +104,12 @@ Samples live under [`samples/`](samples). They are not published. `redisevents-t
 
 - **Explicit type strings.** The C# typed API defaults the message type to the .NET full type name.
   Cross-language topics must use explicit type strings, which the Rust API always requires.
-- **Same environment variables.** Keys are prefixed from `STREAMS_KEY_PREFIX`, or else from
-  `ASPNETCORE_ENVIRONMENT` / `DOTNET_ENVIRONMENT`. The Rust side reads the same variables, so set
-  them the same way for both services. The Rust side also reads `STREAMS_ENVIRONMENT` after those
-  two (C# does not), so do not set it on a service that must interoperate.
+- **Set the key prefix explicitly (C# and Rust defaults differ).** `STREAMS_KEY_PREFIX` is used
+  verbatim by both. Without it C# uses `<ASPNETCORE_ENVIRONMENT|DOTNET_ENVIRONMENT>:re:`, defaulting to
+  `production:re:`, while Rust uses `<STREAMS_ENVIRONMENT>:re:`, defaulting to `local:re:`, and never reads
+  the .NET variables. With nothing set the two silently use different namespaces. Mixed deployments
+  must set `STREAMS_KEY_PREFIX` on every service (or `STREAMS_ENVIRONMENT` on Rust equal to the C#
+  environment name).
 - **Redis 7.4+** (for `HEXPIRE`), the same requirement as C#.
 
 ## Performance

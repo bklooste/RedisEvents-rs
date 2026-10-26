@@ -24,11 +24,12 @@ idioms wherever the bytes in Redis stay identical.
 Taken from the code. Phase 0 turns this list into `WIRE.md` plus golden vectors.
 
 ### 2.1 Key namespace (`Config/KeyNamespace.cs`)
-- Prefix = `STREAMS_KEY_PREFIX` if set. Otherwise `"{env}:re:"`, where `env` is the lowercased
+- C# prefix = `STREAMS_KEY_PREFIX` if set. Otherwise`"{env}:re:"`, where `env` is the lowercased
   `ASPNETCORE_ENVIRONMENT`, then `DOTNET_ENVIRONMENT`, defaulting to `production`.
-- **Rust must read the same variables in the same order.** A Rust service that defaults to a
-  different prefix silently sees an empty topic. Rust may also accept `STREAMS_ENVIRONMENT` as an
-  alias, but it must rank below the two .NET variables.
+- **Rust differs on purpose.** Rust uses `STREAMS_KEY_PREFIX` verbatim, else `"{STREAMS_ENVIRONMENT}:re:"`,
+  else `local:re:`; it never reads the .NET variables and never defaults to `production`. With nothing
+  set, C# (`production:re:`) and Rust (`local:re:`) use different namespaces, so mixed deployments must
+  set `STREAMS_KEY_PREFIX` on both (or `STREAMS_ENVIRONMENT` on Rust equal to the C# environment).
 
 ### 2.2 Keys (`Wire/StreamKeys.cs`, `Outbox.StateKey`, `Idempotency`, `RedisViewStore`)
 | Key | Shape |
@@ -274,7 +275,7 @@ in both directions:
 | `t` defaults to C# `FullName` | Rust requires `Message::TYPE`; the C# docs recommend explicit types for cross-language topics |
 | JSON property casing (silent in C#: wrong casing reads as defaults) | match C# (PascalCase by default); golden bodies from the real C# types; Rust rejects mismatches |
 | MessagePack array vs map | document the mapping; vectors for both forms |
-| Different key prefix per runtime | identical env var resolution; startup log prints the resolved prefix |
+| Different key prefix per runtime | Rust and C# defaults differ on purpose (`local:re:` vs `production:re:`): set `STREAMS_KEY_PREFIX` on both; Rust logs the resolved prefix and the fallback at startup |
 | GUID / timestamp text formats | `uuid` hyphenated lowercase; timestamps with 7 fractional digits + `Z`/offset, and the parser accepts both |
 | `HEXPIRE` availability | same startup probe (`__hexpire-probe:<id>`); refuse Lease mode without it, as C# does |
 | Lua drift | one shared script text, plus a CI diff |

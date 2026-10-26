@@ -668,9 +668,9 @@ fn partition_router_for_key_empty_key_is_stable_but_not_spread() {
 // ----------------------------------------------------------------- StreamKeys
 
 fn production_keys() -> Keys {
-    // The C# tests read `KeyNamespace.Prefix()` from the ambient environment. The Rust port reads
-    // no environment here, so the prefix is pinned to the default it resolves to.
-    Keys::from_lookup(|_| None)
+    // The C# tests read `KeyNamespace.Prefix()` from the ambient environment (default `production`).
+    // Rust's own default is `local:re:`, so the C# prefix is pinned here to assert C#'s key shapes.
+    Keys::with_prefix("production:re:")
 }
 
 #[test]
@@ -756,5 +756,5 @@ fn stream_keys_long_topic_name_exceeding_the_stack_buffer_still_builds() {
 }
 
 // Prefix resolution (`KeyNamespace.Prefix`) is covered by `wire_vectors.rs` (keys.json) and by
-// `wire/keys.rs` unit tests, through `Keys::from_lookup`. No test mutates the process environment:
+// `wire/keys.rs` unit tests (the Rust rule), through `Keys::from_lookup`. No test mutates the process environment:
 // edition 2024 makes `std::env::set_var` unsafe, and this crate forbids `unsafe`.

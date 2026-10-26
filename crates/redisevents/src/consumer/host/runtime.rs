@@ -49,17 +49,12 @@ const MAX_RECOVERIES: u32 = 5;
 const REBUILD_ATTEMPTS: u32 = 3;
 const REBUILD_DELAY: Duration = Duration::from_secs(2);
 
-/// The host environment name: `ASPNETCORE_ENVIRONMENT`, `DOTNET_ENVIRONMENT`,
-/// `STREAMS_ENVIRONMENT`, else `Production`.
+/// The host environment name: `STREAMS_ENVIRONMENT`, else `local`. The .NET variables are never read.
 pub(crate) fn environment_from_env() -> String {
-    [
-        "ASPNETCORE_ENVIRONMENT",
-        "DOTNET_ENVIRONMENT",
-        "STREAMS_ENVIRONMENT",
-    ]
-    .iter()
-    .find_map(|name| std::env::var(name).ok().filter(|v| !v.trim().is_empty()))
-    .unwrap_or_else(|| "Production".to_owned())
+    std::env::var("STREAMS_ENVIRONMENT")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "local".to_owned())
 }
 
 // ------------------------------------------------------------------------------------------------

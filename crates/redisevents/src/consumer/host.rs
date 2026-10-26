@@ -109,7 +109,7 @@ impl StreamsBuilder {
     }
 
     /// The host environment name used by validation (`Development` relaxes `Trim = None`).
-    /// Default: `ASPNETCORE_ENVIRONMENT`, `DOTNET_ENVIRONMENT`, `STREAMS_ENVIRONMENT`, `Production`.
+    /// Default: `STREAMS_ENVIRONMENT`, else `local`.
     #[must_use]
     pub fn environment(mut self, name: impl Into<String>) -> Self {
         self.environment = Some(name.into());

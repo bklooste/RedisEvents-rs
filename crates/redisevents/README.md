@@ -913,16 +913,15 @@ These are the rules that keep a Rust service and a C# service talking to each ot
   field names. A type shared with C# needs `#[serde(rename_all = "PascalCase")]`. The mismatch is
   silent on the C# side: a wrongly cased body fails to decode there, and in Rust it is skipped as
   malformed, so nothing is raised.
-- **Same environment variables, same key prefix.** Stream keys are `<prefix>s:{topic}:<p>` (the braces are the hash tag, present by default), where the prefix
-  is `STREAMS_KEY_PREFIX` verbatim, else `<environment>:re:` from `ASPNETCORE_ENVIRONMENT`, then
-  `DOTNET_ENVIRONMENT`, defaulting to `production`. Both languages read the same variables, lowercase
-  the name, and treat a blank `STREAMS_KEY_PREFIX` as unset. Set them the same way for both services.
-- **The silent-default hazard.** If neither variable is set, both sides use `production:re:`. That
-  is consistent, but it means a dev service with no variables set shares its keys with production
-  if it points at the same Redis. Set the variable on every service.
-- **Rust-only variable.** `STREAMS_ENVIRONMENT` is read by Rust after the two .NET variables and is
-  not read by C#. A service that sets only `STREAMS_ENVIRONMENT` has a different prefix from its C#
-  peer. Do not set it on a service that must interoperate.
+- **Set `STREAMS_KEY_PREFIX` on every service: the C# and Rust defaults differ.** Stream keys are
+  `<prefix>s:{topic}:<p>` (the braces are the hash tag, present by default). Rust resolves the prefix as
+  `STREAMS_KEY_PREFIX` verbatim, else `<STREAMS_ENVIRONMENT lowercased>:re:`, else `local:re:`. Rust never
+  reads `ASPNETCORE_ENVIRONMENT` or `DOTNET_ENVIRONMENT` and never defaults to `production`. C# uses
+  `STREAMS_KEY_PREFIX`, else `ASPNETCORE_ENVIRONMENT` / `DOTNET_ENVIRONMENT`, defaulting to `production:re:`.
+  With nothing configured the two use different namespaces (`production:re:` vs `local:re:`) and do
+  not see each other's topics. Set `STREAMS_KEY_PREFIX` on both, or `STREAMS_ENVIRONMENT` on Rust equal to
+  the C# environment name. Rust logs the resolved prefix at startup (info), and says so when it fell
+  back to `local:re:`.
 - **Redis 7.4 or later** in Lease mode (for `HEXPIRE`), the same requirement as C#.
 - **Stream ids and positions are the same bytes.** A position written by one language is read by the
   other. A Rust consumer resumes at a C# consumer's position and the reverse.

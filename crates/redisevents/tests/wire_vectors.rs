@@ -336,16 +336,25 @@ fn keys_names_match_vector() {
     }
 }
 
+/// keys.json `prefix_resolution` documents C#'s rule (ASPNETCORE/DOTNET/production). Rust resolves
+/// differently on purpose (WIRE.md section 1), so only the cases both rules agree on are asserted
+/// against the vector; the rest are asserted against the Rust rule in `wire/keys.rs` unit tests.
 #[test]
-fn keys_prefix_resolution_matches_vector() {
+fn keys_prefix_resolution_agrees_with_vector_where_rules_overlap() {
     let v = vectors("keys.json");
     let cases = cases(&v, "prefix_resolution");
     assert_ne!(cases.len(), 0);
     for case in cases {
         let name = s(case, "name");
         let env = &case["env"];
-        let lookup = |var: &str| env[var].as_str().map(str::to_owned);
-        let keys = Keys::from_lookup(lookup);
+        if env["STREAMS_KEY_PREFIX"]
+            .as_str()
+            .is_none_or(|p| p.trim().is_empty())
+        {
+            // C#-only resolution via ASPNETCORE_/DOTNET_ENVIRONMENT or the production default.
+            continue;
+        }
+        let keys = Keys::from_lookup(|var| env[var].as_str().map(str::to_owned));
         assert_eq!(keys.prefix(), s(case, "prefix"), "prefix case `{name}`");
     }
 }
