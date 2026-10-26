@@ -2,11 +2,9 @@
 //!
 //! **Owner: W0.2.** Variants are added only through a lead-reviewed PR (`docs/CONTRACTS.md`).
 //!
-//! The C# library has two exception types that mean "do not ignore this": `StreamConfigurationException`
-//! and `StreamTransportException`, both `DontIgnoreException`s. Here they are [`Error::Config`] and
-//! [`Error::Transport`], and [`Error::is_dont_ignore`] reports exactly those two. When a handler
-//! returns one through `?`, the [`HandleError`](crate::HandleError) conversion turns it into
-//! `Block`, as the C# worker does.
+//! Two variants mean "must not be skipped": [`Error::Config`] and [`Error::Transport`].
+//! [`Error::is_blocking`] reports exactly those two. When a handler returns one through `?`, the
+//! [`HandleError`](crate::HandleError) conversion turns it into `Block`.
 
 use std::fmt;
 
@@ -20,13 +18,12 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// The configuration is invalid or contradicts what is recorded in Redis (C#
-    /// `StreamConfigurationException`). Never retried by the library; blocks a handler.
+    /// The configuration is invalid or contradicts what is recorded in Redis . Never retried by the library; blocks a handler.
     #[error("{0}")]
     Config(String),
 
     /// The data in Redis cannot be read safely: a malformed entry, header block or id, an unknown
-    /// codec version, or a failed connect (C# `StreamTransportException`). Blocks a handler.
+    /// codec version, or a failed connect. Blocks a handler.
     #[error("{message}")]
     Transport {
         /// What went wrong, written for an operator.
@@ -41,8 +38,7 @@ pub enum Error {
     #[error(transparent)]
     Redis(#[from] redis::RedisError),
 
-    /// A caller passed a value the API rejects, for example more than 64 headers (C#
-    /// `ArgumentException`).
+    /// A caller passed a value the API rejects, for example more than 64 headers.
     #[error("{0}")]
     InvalidArgument(String),
 
@@ -82,10 +78,10 @@ impl Error {
         Self::InvalidArgument(message.into())
     }
 
-    /// `true` for the errors the C# library models as `DontIgnoreException`
-    /// ([`Error::Config`] and [`Error::Transport`]). A handler returning one blocks its partition.
+    /// `true` for the errors that must not be skipped ([`Error::Config`] and
+    /// [`Error::Transport`]). A handler returning one blocks its partition.
     #[must_use]
-    pub fn is_dont_ignore(&self) -> bool {
+    pub fn is_blocking(&self) -> bool {
         matches!(self, Self::Config(_) | Self::Transport { .. })
     }
 }

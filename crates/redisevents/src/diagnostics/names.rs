@@ -1,4 +1,4 @@
-//! Client and thread names (C# `StreamNames`). Every component is sanitised to `[A-Za-z0-9._:-]`
+//! Client and thread names. Every component is sanitised to `[A-Za-z0-9._:-]`
 //! (Redis `CLIENT SETNAME` rejects spaces and control characters) and the whole name is capped at
 //! 256 bytes.
 
@@ -20,7 +20,7 @@ pub(crate) fn reader_client_name(service: &str, consumer: &str, index: u32, pod:
     ))
 }
 
-/// The service name in client names (C# `Assembly.GetEntryAssembly().GetName().Name`): the
+/// The service name in client names: the
 /// running executable's file stem, or `unknown`.
 pub(crate) fn service_name() -> String {
     std::env::current_exe()

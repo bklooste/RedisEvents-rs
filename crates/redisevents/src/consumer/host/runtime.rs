@@ -1,7 +1,7 @@
-//! The running host (C# `StreamConsumerHost`): startup checks, one supervisor task per consumer
+//! The running host: startup checks, one supervisor task per consumer
 //! that owns its read side, and the host task that runs the orderly shutdown.
 //!
-//! A consumer's *read side* (C# `StartReadSideAsync`) is one generation of: stored positions and
+//! A consumer's *read side* is one generation of: stored positions and
 //! cold reset markers, the position flusher, a monitor per partition, and the workers (one per read
 //! loop). It is rebuilt as a whole when the held partition set changes (lease rebalance), when a
 //! contested partition recovers, and after a read loop fails with an error no back-off fixes, as
@@ -22,7 +22,7 @@ use tracing::Level;
 use super::Registration;
 use super::StreamsHost;
 use super::erased::{FlusherDyn, RunnerFactory, StoreDyn, StoreHolder, WorkerRun};
-use crate::admin::health::StreamLag;
+use crate::admin::health;
 use crate::admin::health::monitor::{self, PartitionMonitor, StreamLagSampler, Thresholds};
 use crate::admin::meta::ensure_topic_meta;
 use crate::config::binder;
@@ -217,8 +217,8 @@ pub(crate) async fn spawn(
     } else {
         StreamLagSampler::start(
             conn.clone(),
-            StreamLag::DEFAULT_SAMPLE_INTERVAL,
-            StreamLag::DEFAULT_PUSH_INTERVAL,
+            health::DEFAULT_SAMPLE_INTERVAL,
+            health::DEFAULT_PUSH_INTERVAL,
         )
         .ok()
     };
@@ -583,7 +583,7 @@ impl Ctx {
         }
     }
 
-    /// Builds and starts a read side over `owned` (C# `StartReadSideAsync`). On error nothing of
+    /// Builds and starts a read side over `owned`. On error nothing of
     /// it is left running.
     #[allow(clippy::too_many_lines)] // one sequence, as C#
     async fn start_generation(self: &Arc<Self>, owned: &[u32], number: u64) -> Result<Generation> {
@@ -754,7 +754,7 @@ impl Ctx {
         self.store.flusher(opts)
     }
 
-    /// Stops a read side (C# `StopReadSideAsync`): graceful stop of every partition not already
+    /// Stops a read side: graceful stop of every partition not already
     /// revoked, wait for the workers up to the budget (then drop them), final flush, monitors
     /// forgotten (their gauges cleared). `log` = an ordinary shutdown line on a timeout.
     async fn stop_generation(&self, mut generation: Generation, log: bool) {

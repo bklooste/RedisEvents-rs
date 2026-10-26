@@ -119,7 +119,7 @@ async fn s12_a_poison_message_is_logged_once_advanced_past_and_never_retried() {
 /// S12b. A `Block` error blocks its partition, the sibling keeps going, health degrades and then fails
 /// readiness, and the partition recovers and resumes once the downstream is back.
 #[tokio::test]
-async fn s12b_a_custom_dont_ignore_exception_blocks_its_partition_and_recovers() {
+async fn s12b_a_custom_blocking_error_blocks_its_partition_and_recovers() {
     let _serial = SERIAL.lock().await;
     let redis = require_redis!();
     let topic = redis.new_topic("s12b");
@@ -201,11 +201,11 @@ async fn s12b_a_custom_dont_ignore_exception_blocks_its_partition_and_recovers()
     .await;
     let degraded = host.health().await;
     assert_eq!(degraded.status, StreamHealthStatus::Degraded);
-    assert_eq!(health_int(&degraded, "partitionsBlocked"), Some(1));
+    assert_eq!(health_count(&degraded, "partitions_blocked"), Some(1));
     assert!(
         degraded
             .description
-            .contains("blocked retrying a DontIgnoreException"),
+            .contains("blocked retrying a blocking error"),
         "{}",
         degraded.description
     );
@@ -259,8 +259,8 @@ async fn s12b_a_custom_dont_ignore_exception_blocks_its_partition_and_recovers()
     )
     .await;
     let healthy = host.health().await;
-    assert_eq!(health_int(&healthy, "partitionsBlocked"), Some(0));
-    assert_eq!(health_int(&healthy, "partitionsStopped"), Some(0));
+    assert_eq!(health_count(&healthy, "partitions_blocked"), Some(0));
+    assert_eq!(health_count(&healthy, "partitions_stopped"), Some(0));
     assert_ne!(healthy.status, StreamHealthStatus::Unhealthy);
     host.shutdown().await.expect("shutdown");
 }
@@ -351,8 +351,8 @@ async fn s13_stop_partition_stands_one_partition_down_and_leaves_the_others_runn
     assert_eq!(stored.keys().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
     let health = host.health().await;
     assert_eq!(health.status, StreamHealthStatus::Degraded);
-    assert_eq!(health_int(&health, "partitionsStopped"), Some(1));
-    assert_eq!(health_int(&health, "partitionsBlocked"), Some(0));
+    assert_eq!(health_count(&health, "partitions_stopped"), Some(1));
+    assert_eq!(health_count(&health, "partitions_blocked"), Some(0));
     assert!(
         health.description.contains("stopped"),
         "{}",

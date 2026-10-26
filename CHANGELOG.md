@@ -5,6 +5,29 @@ and the crates follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+Core, axum and test-support API made idiomatic Rust (version 0.3). Nothing written to or read from
+Redis changes; metric and span names are unchanged.
+
+- `Error::is_dont_ignore` is now `Error::is_blocking`. Descriptions and docs no longer say
+  `DontIgnoreException` (the health description reads "blocked retrying a blocking error").
+- `admin::health`: the static-class structs `StreamHealth`, `StreamStatus` and `StreamLag` are gone.
+  Use the free functions `health::check`, `evaluate`, `grade`, `find_silent`, `partitions`, `any`,
+  `estimate_entries_behind` and the constants `health::DEFAULT_SAMPLE_INTERVAL`,
+  `DEFAULT_PUSH_INTERVAL`, `TAIL_STALE_AFTER`.
+- `StreamHealthReport::data: BTreeMap<String, HealthValue>` (camelCase string keys) is replaced by
+  `details: StreamHealthDetails`, a struct of typed `Option` fields (`partitions_blocked`,
+  `worst_lag_ms`, ...). `HealthValue` and `with_data` are removed (`with_details` added). Status,
+  rule and details implement `serde::Serialize` (snake_case).
+- `redisevents-axum` health: the body is `{"status","rule","description","details"}` with lowercase
+  snake_case values, not the ASP.NET `HealthReport` shape (`entries`, `tags`, "Healthy"). Status codes
+  are unchanged (healthy and degraded 200, unhealthy 503). `CHECK_NAME` is removed.
+- `redisevents-axum` admin: the preview query parameters are `max_count_scan` and `when_missing`
+  (were `maxCountScan`, `whenMissing`). Operations and status codes are unchanged.
+- Docs and messages no longer describe the C# library's types; cross-language rules stay in the
+  Interop section.
+
 ### Changed (behaviour)
 
 - **Key prefix resolution (Rust only; C# unchanged).** `Keys::from_env` now resolves

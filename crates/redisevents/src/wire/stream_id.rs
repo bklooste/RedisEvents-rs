@@ -28,7 +28,7 @@ impl StreamId {
     /// valid id on this wire (`WIRE.md` §4) and [`StreamId::parse`] rejects it.
     pub const MAX_PART: u64 = i64::MAX as u64;
 
-    /// The largest id, `i64::MAX-i64::MAX` (C# `StreamId.Max`).
+    /// The largest id, `i64::MAX-i64::MAX`.
     pub const MAX: Self = Self {
         ms: Self::MAX_PART,
         seq: Self::MAX_PART,

@@ -1,11 +1,10 @@
-//! Test support for redisevents integration tests (port of `RedisEvents.TestSupport`).
+//! Test support for redisevents integration tests .
 //!
 //! - [`redis()`] gives a test a Redis: `REDIS_URL` when set (CI runs `redis:8-alpine` as a service),
 //!   otherwise a `redis:8-alpine` container through testcontainers. When neither is available it
 //!   returns `None`, and [`require_redis!`] skips the test with a message. Set
 //!   `REDISEVENTS_REQUIRE_REDIS=1` to make that a failure instead.
-//! - [`RecordingHandler`] records what a consumer delivers and lets a test wait for it
-//!   (C# `TestHandler`).
+//! - [`RecordingHandler`] records what a consumer delivers and lets a test wait for it.
 //! - [`wait_until`] / [`wait_until_async`] poll a condition with a short back-off.
 //!
 //! The container is started once per test binary and is **reused across runs** (named

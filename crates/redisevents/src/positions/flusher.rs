@@ -173,7 +173,7 @@ impl FlusherOptions {
     }
 }
 
-/// What has been said about a partition's foreign writer (C# `Reported*`).
+/// What has been said about a partition's foreign writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Reported {
     /// Nothing yet.
@@ -390,7 +390,7 @@ impl<S: PositionStore> PositionFlusher<S> {
         let _ = self.inner.flush().await;
     }
 
-    /// `stop`, then zeroes the contention gauge (C# `DisposeAsync`).
+    /// `stop`, then zeroes the contention gauge.
     pub(crate) async fn dispose(&self) {
         self.stop().await;
         instruments::set_contested_partitions(&self.inner.metric_key, 0);

@@ -1,4 +1,4 @@
-//! [`RecordingHandler`], a port of the C# `TestHandler`.
+//! [`RecordingHandler`].
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -61,14 +61,14 @@ impl RecordingHandler {
         }
     }
 
-    /// Sleeps `delay` in every call (C# `Delay`).
+    /// Sleeps `delay` in every call.
     #[must_use]
     pub fn with_delay(mut self, delay: Duration) -> Self {
         self.delay = delay;
         self
     }
 
-    /// Decides every call's result (C# `OnBatch`).
+    /// Decides every call's result.
     #[must_use]
     pub fn with_hook(
         mut self,

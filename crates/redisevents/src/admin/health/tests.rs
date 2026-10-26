@@ -95,7 +95,7 @@ fn monitor(clock: &Arc<ManualClock>, start: StreamId) -> PartitionMonitor {
 
 fn grade(monitors: &[&PartitionMonitor]) -> StreamHealthReport {
     let snapshots: Vec<_> = monitors.iter().map(|m| m.status()).collect();
-    StreamHealth::evaluate(&snapshots, &StreamHealthContext::default())
+    evaluate(&snapshots, &StreamHealthContext::default())
 }
 
 /// Advances in sampler-sized steps, re-sampling the same tail each time.
@@ -144,10 +144,10 @@ fn behind_the_tail_with_a_frozen_position_is_unhealthy_once_the_window_has_passe
             report.description
         );
     }
-    assert_eq!(report.data["partitionsBehind"], HealthValue::Int(1));
+    assert_eq!(report.details.partitions_behind, Some(1));
     assert_eq!(
-        report.data["behindPartition"],
-        HealthValue::Text("orders[0]/billing".to_owned())
+        report.details.behind_partition.as_deref(),
+        Some("orders[0]/billing")
     );
 }
 
@@ -301,7 +301,7 @@ fn a_tail_sample_that_has_gone_stale_stops_counting_until_sampling_resumes() {
     assert_eq!(grade(&[&m]).rule, StreamHealthRule::BehindTail);
 
     // The sampler stops answering. One missed sample is tolerated...
-    clock.advance(StreamLag::TAIL_STALE_AFTER);
+    clock.advance(TAIL_STALE_AFTER);
     assert!(
         m.status().is_behind_tail,
         "a sample inside the staleness bound still counts"
@@ -315,7 +315,7 @@ fn a_tail_sample_that_has_gone_stale_stops_counting_until_sampling_resumes() {
         Some(TAIL),
         "the last value is still reported, with its age"
     );
-    assert!(stale.tail_sample_age_ms > StreamLag::TAIL_STALE_AFTER.as_secs_f64() * 1000.0);
+    assert!(stale.tail_sample_age_ms > TAIL_STALE_AFTER.as_secs_f64() * 1000.0);
     assert!(!stale.is_behind_tail);
     assert_eq!(stale.behind_ms, 0.0);
     assert_eq!(
@@ -574,7 +574,7 @@ fn a_blocked_partition_past_its_threshold_is_named_ahead_of_a_behind_one() {
         StreamHealthRule::BlockedTooLong,
         "the declared state is the more specific diagnosis"
     );
-    assert_eq!(report.data["partitionsBehind"], HealthValue::Int(2));
+    assert_eq!(report.details.partitions_behind, Some(2));
 }
 
 #[test]
@@ -666,7 +666,7 @@ fn a_hand_built_snapshot_grades_without_the_new_members_and_is_never_behind() {
     };
 
     assert_eq!(
-        StreamHealth::grade(&status),
+        super::grade(&status),
         StreamPartitionHealth {
             status: StreamHealthStatus::Healthy,
             rule: StreamHealthRule::None
@@ -680,7 +680,7 @@ fn a_hand_built_snapshot_grades_without_the_new_members_and_is_never_behind() {
         ..status.clone()
     };
     assert_eq!(
-        StreamHealth::grade(&duration_only).status,
+        super::grade(&duration_only).status,
         StreamHealthStatus::Healthy
     );
 
@@ -689,7 +689,7 @@ fn a_hand_built_snapshot_grades_without_the_new_members_and_is_never_behind() {
         ..duration_only
     };
     assert_eq!(
-        StreamHealth::grade(&behind),
+        super::grade(&behind),
         StreamPartitionHealth {
             status: StreamHealthStatus::Unhealthy,
             rule: StreamHealthRule::BehindTail
@@ -704,7 +704,7 @@ fn process_level_facts_come_through_the_context() {
     m.set_tail(TAIL);
     let snapshot = [m.status()];
 
-    let down = StreamHealth::evaluate(
+    let down = evaluate(
         &snapshot,
         &StreamHealthContext {
             connection_fault: Some("redis:6379".to_owned()),
@@ -715,7 +715,7 @@ fn process_level_facts_come_through_the_context() {
     assert_eq!(down.rule, StreamHealthRule::ConnectionDown);
     assert!(down.description.contains("redis:6379"));
 
-    let never_started = StreamHealth::evaluate(
+    let never_started = evaluate(
         &snapshot,
         &StreamHealthContext {
             consumers: 2,
@@ -725,7 +725,7 @@ fn process_level_facts_come_through_the_context() {
     );
     assert_eq!(never_started.rule, StreamHealthRule::NoConsumerStarted);
 
-    let ownership = StreamHealth::evaluate(
+    let ownership = evaluate(
         &snapshot,
         &StreamHealthContext {
             ownership_degraded: true,
@@ -736,7 +736,7 @@ fn process_level_facts_come_through_the_context() {
     assert_eq!(ownership.rule, StreamHealthRule::OwnershipDegraded);
 
     assert_eq!(
-        StreamHealth::evaluate(&[], &StreamHealthContext::default()).status,
+        evaluate(&[], &StreamHealthContext::default()).status,
         StreamHealthStatus::Healthy,
         "a producer-only process has nothing to grade"
     );
@@ -772,21 +772,21 @@ async fn the_health_check_reports_what_the_core_grading_decided() {
     m.mark_running();
     m.set_tail(tail);
 
-    let before = StreamHealth::check(None, 0, 0).await;
+    let before = check(None, 0, 0).await;
     assert_ne!(before.status, StreamHealthStatus::Unhealthy);
 
     clock.advance(secs(30));
     m.set_tail(tail);
 
-    let core = StreamHealth::evaluate(&StreamStatus::partitions(), &StreamHealthContext::default());
-    let result = StreamHealth::check(None, 0, 0).await;
+    let core = evaluate(&partitions(), &StreamHealthContext::default());
+    let result = check(None, 0, 0).await;
 
     assert_eq!(core.rule, StreamHealthRule::BehindTail);
     assert_eq!(result.status, StreamHealthStatus::Unhealthy);
     assert_eq!(result.description, core.description);
     assert_eq!(
-        result.data["behindPartition"],
-        HealthValue::Text("orders[0]/billing".to_owned())
+        result.details.behind_partition.as_deref(),
+        Some("orders[0]/billing")
     );
     monitor::forget(&m);
 }
@@ -840,7 +840,7 @@ async fn s6b_health_is_degraded_when_the_ownership_registry_shows_a_gap() {
     .expect("track");
     m.mark_running();
 
-    let report = StreamHealth::check(Some(&conn), 0, 0).await;
+    let report = check(Some(&conn), 0, 0).await;
     assert_eq!(report.status, StreamHealthStatus::Degraded);
     assert_eq!(report.rule, StreamHealthRule::OwnershipDegraded);
     assert!(
@@ -848,7 +848,7 @@ async fn s6b_health_is_degraded_when_the_ownership_registry_shows_a_gap() {
             .description
             .contains("ownership registry shows a gap or an overlap")
     );
-    assert_eq!(report.data["ownershipDegraded"], HealthValue::Bool(true));
+    assert_eq!(report.details.ownership_degraded, Some(true));
 
     monitor::forget(&m);
     pod0.dispose().await;
@@ -889,7 +889,7 @@ async fn s6c_health_is_degraded_when_two_instances_claim_the_same_partitions() {
     .expect("track");
     m.mark_running();
 
-    let report = StreamHealth::check(Some(&conn), 0, 0).await;
+    let report = check(Some(&conn), 0, 0).await;
     assert_eq!(report.status, StreamHealthStatus::Degraded);
     assert_eq!(report.rule, StreamHealthRule::OwnershipDegraded);
     assert!(
@@ -897,7 +897,7 @@ async fn s6c_health_is_degraded_when_two_instances_claim_the_same_partitions() {
             .description
             .contains("ownership registry shows a gap or an overlap")
     );
-    assert_eq!(report.data["ownershipDegraded"], HealthValue::Bool(true));
+    assert_eq!(report.details.ownership_degraded, Some(true));
 
     monitor::forget(&m);
     pod_a.dispose().await;

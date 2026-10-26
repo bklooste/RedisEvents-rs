@@ -29,7 +29,7 @@ use crate::wire::StreamId;
 /// not as a rival writer.
 pub const ADMIN_INSTANCE_ID: Uuid = Uuid::from_u128(0x6f72_616e_6765_4164_6d69_6e52_6573_6574);
 
-/// One stored position: `<streamId>|<instanceId>` (C# `PositionRecord`).
+/// One stored position: `<streamId>|<instanceId>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct PositionRecord {
@@ -73,7 +73,7 @@ impl PositionRecord {
     }
 }
 
-/// Where a partition's read starts (C# `StartPosition`).
+/// Where a partition's read starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum StartPosition {
@@ -83,7 +83,7 @@ pub enum StartPosition {
     Now,
 }
 
-/// Loads and saves positions (C# `IPositionStore`).
+/// Loads and saves positions.
 ///
 /// Partitions are `u32`; fields of the positions hash that are not decimal partition numbers
 /// (reset markers, anything else) are skipped by [`PositionStore::load`].

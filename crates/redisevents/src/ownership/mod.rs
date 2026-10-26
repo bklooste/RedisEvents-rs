@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::config::instance::InstanceResolver;
 
-/// The owner of one partition, as stored in the ownership hash (C# `PartitionOwner`).
+/// The owner of one partition, as stored in the ownership hash.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct PartitionOwner {
@@ -76,7 +76,7 @@ impl PartitionOwner {
     }
 }
 
-/// A partition this instance expected to own that someone else holds (C# `ContestedPartition`).
+/// A partition this instance expected to own that someone else holds.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ContestedPartition {
     /// The partition.
@@ -87,7 +87,7 @@ pub struct ContestedPartition {
     pub actual: PartitionOwner,
 }
 
-/// A snapshot of a topic's ownership (C# `OwnershipMap`).
+/// A snapshot of a topic's ownership.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OwnershipMap {
     /// Owners by partition.
@@ -107,8 +107,7 @@ impl OwnershipMap {
 }
 
 /// The instance id a pod named `pod_name` runs under: deterministic, so the same name yields the
-/// same id in any process and in C#. A blank name yields the per-process random id
-/// (C# `OwnershipRegistry.InstanceIdFor`).
+/// same id in any process and in C#. A blank name yields the per-process random id.
 #[must_use]
 pub fn instance_id_for(pod_name: Option<&str>) -> Uuid {
     match pod_name {
@@ -117,14 +116,14 @@ pub fn instance_id_for(pod_name: Option<&str>) -> Uuid {
     }
 }
 
-/// This process's instance id, resolved once from the environment (C# `StableInstanceId`).
+/// This process's instance id, resolved once from the environment.
 #[must_use]
 pub fn stable_instance_id() -> Uuid {
     static STABLE: OnceLock<Uuid> = OnceLock::new();
     *STABLE.get_or_init(|| resolve_instance_id(|name| std::env::var(name).ok()))
 }
 
-/// The per-process random id (C# `ProcessInstanceId`).
+/// The per-process random id.
 pub(crate) fn process_instance_id() -> Uuid {
     static PROCESS: OnceLock<Uuid> = OnceLock::new();
     *PROCESS.get_or_init(Uuid::new_v4)

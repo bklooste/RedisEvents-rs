@@ -5,15 +5,15 @@
 //! Every method here is an adapter onto [`ConsumerBuilder::handler`]; this file never touches the
 //! host's internals.
 //!
-//! | C# overload | Rust |
+//! | You want | Use |
 //! | --- | --- |
-//! | `AddStream<THandler>(topic)` with a `IBatchHandler` / `IMessageHandler` | [`ConsumerBuilder::handler`] / [`ConsumerBuilder::message_handler`] (DI-resolved handler: not ported, pass the instance) |
-//! | `AddStream<THandler, TMessage>(topic, JsonTypeInfo<TMessage>)` | [`ConsumerBuilder::typed_handler`] / [`ConsumerBuilder::typed_batch_handler`] (JSON, the default codec) |
-//! | `AddStream<THandler, TMessage>(topic, Func<ReadOnlyMemory<byte>, TMessage?>)` | the `_with::<C, _, _>` forms: the codec is a type parameter, so a custom decoder is a [`PayloadCodec`] |
-//! | `AddStream<THandler, TMessage>(topic, MessagePackSerializerOptions)` | `typed_handler_with::<MessagePack, _, _>` (`redisevents-msgpack`) |
-//! | `AddStream(topic, Func<ReadOnlyMemory<StreamMsg>, CancellationToken, ValueTask>)` | [`ConsumerBuilder::batch_fn`] |
-//! | `AddStream(index)` / `AddStream(configure)` | [`StreamsBuilder::consumer_at`] / [`StreamsBuilder::sole_consumer`]; `ConsumerBuilder::configure` |
-//! | `AddStreamPublisher` | not ported: a DI registration. Publishers are built directly with `StreamPublisher::new` |
+//! | a handler type (batch or per message) | [`ConsumerBuilder::handler`] / [`ConsumerBuilder::message_handler`] (pass the instance) |
+//! | typed JSON bodies (the default codec) | [`ConsumerBuilder::typed_handler`] / [`ConsumerBuilder::typed_batch_handler`] |
+//! | another codec (custom decoder, MessagePack) | the `_with::<C, _, _>` forms: the codec is a type parameter implementing [`PayloadCodec`]; `typed_handler_with::<MessagePack, _, _>` (`redisevents-msgpack`) |
+//! | a closure over a batch or a message | [`ConsumerBuilder::batch_fn`] / [`ConsumerBuilder::message_fn`] |
+//! | a consumer from configuration | [`StreamsBuilder::consumer_at`] / [`StreamsBuilder::sole_consumer`]; `ConsumerBuilder::configure` |
+//!
+//! Publishers are built directly with `StreamPublisher::new`.
 //!
 //! ```no_run
 //! # use redisevents::{Connection, StreamMsg, PartitionContext, HandleResult, BatchHandler};
@@ -37,8 +37,7 @@
 //!
 //! [`ConsumerBuilder::batch_fn`] and [`ConsumerBuilder::message_fn`] take an async closure that
 //! receives the messages **by value** (`Vec<StreamMsg>` / `StreamMsg`) and a [`PartitionContext`]
-//! by value, and returns a [`HandleResult`]. The C# delegate borrows `ReadOnlyMemory<StreamMsg>`,
-//! but a closure cannot return a `Send` future that borrows its arguments on stable Rust: the
+//! by value, and returns a [`HandleResult`]. A closure cannot return a `Send` future that borrows its arguments on stable Rust: the
 //! only spelling (`F(..): Send`, return-type notation) is unstable (rust#109417), and boxing each
 //! call would force every closure into `Box::pin(async move { .. })`. Owned arguments cost one
 //! `Vec` of cloned messages per batch (the body is a cheap `Bytes` clone; the strings are small)
@@ -85,7 +84,7 @@ where
     }
 }
 
-/// The configured consumer at `index` (C# `AddStream(index)`).
+/// The configured consumer at `index`.
 fn configured_at(consumers: &[ConsumerOptions], index: usize) -> Result<&ConsumerOptions> {
     consumers.get(index).ok_or_else(|| {
         Error::config(format!(
@@ -108,8 +107,7 @@ fn configured_sole(consumers: &[ConsumerOptions]) -> Result<&ConsumerOptions> {
 }
 
 impl StreamsBuilder {
-    /// Starts the registration of the configured consumer at `index` in `Streams:Consumers`
-    /// (C# `AddStream<THandler>(index)`). Its options are that entry, unchanged.
+    /// Starts the registration of the configured consumer at `index` in `Streams:Consumers`. Its options are that entry, unchanged.
     ///
     /// # Errors
     /// [`Error::Config`] when `index` is out of range.
@@ -118,7 +116,7 @@ impl StreamsBuilder {
         Ok(self.topic(options.topic.clone()).options(options))
     }
 
-    /// Starts the registration of the only configured consumer (C# `AddStream<THandler>()`).
+    /// Starts the registration of the only configured consumer.
     ///
     /// # Errors
     /// [`Error::Config`] unless `Streams:Consumers` has exactly one entry.
@@ -130,7 +128,7 @@ impl StreamsBuilder {
 
 impl ConsumerBuilder {
     /// Completes the registration with a per-message handler; the host calls it once per message,
-    /// in order (C# `IMessageHandler`). See [`PerMessage`] for how errors are handled.
+    /// in order. See [`PerMessage`] for how errors are handled.
     #[must_use]
     pub fn message_handler<H: MessageHandler>(self, handler: H) -> StreamsBuilder {
         self.handler(PerMessage(handler))
@@ -183,7 +181,7 @@ impl ConsumerBuilder {
         self.message_handler(Typed::<H, T, C>::new(handler))
     }
 
-    /// Completes the registration with a typed batch handler, JSON bodies (C# `IBatchHandler<T>`).
+    /// Completes the registration with a typed batch handler, JSON bodies.
     #[must_use]
     pub fn typed_batch_handler<T, H>(self, handler: H) -> StreamsBuilder
     where

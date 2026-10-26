@@ -1380,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "interop-rust-host"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -1393,7 +1393,7 @@ dependencies = [
 
 [[package]]
 name = "inventory-command"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "bytes",
@@ -1412,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "inventory-domain"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1421,7 +1421,7 @@ dependencies = [
 
 [[package]]
 name = "inventory-views"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "inventory-domain",
@@ -2181,7 +2181,7 @@ dependencies = [
 
 [[package]]
 name = "redisevents"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -2206,12 +2206,13 @@ dependencies = [
 
 [[package]]
 name = "redisevents-axum"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "redis",
  "redisevents",
  "redisevents-test-support",
+ "serde",
  "serde_json",
  "time",
  "tokio",
@@ -2220,7 +2221,7 @@ dependencies = [
 
 [[package]]
 name = "redisevents-eventsourcing"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "inventory-domain",
@@ -2240,7 +2241,7 @@ dependencies = [
 
 [[package]]
 name = "redisevents-msgpack"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -2258,7 +2259,7 @@ dependencies = [
 
 [[package]]
 name = "redisevents-projections"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "inventory-domain",
@@ -2278,7 +2279,7 @@ dependencies = [
 
 [[package]]
 name = "redisevents-restate"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2292,7 +2293,7 @@ dependencies = [
 
 [[package]]
 name = "redisevents-test-support"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "redis",

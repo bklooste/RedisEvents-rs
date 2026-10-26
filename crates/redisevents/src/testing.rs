@@ -45,8 +45,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// A message recorded by [`InMemoryPublisher`] or [`InMemoryBufferedPublisher`] (C#
-/// `PublishedMessage`).
+/// A message recorded by [`InMemoryPublisher`] or [`InMemoryBufferedPublisher`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct PublishedMessage {
     /// The synthetic id this double assigned: unique and increasing per publisher, from `1-0`.
@@ -74,7 +73,7 @@ struct PublisherState {
 }
 
 /// An in-memory [`Publisher`] that records every message and routes it the way the live publisher
-/// does (C# `InMemoryStreamPublisher`).
+/// does.
 ///
 /// Routing: an explicit partition wins and is range-checked; a non-empty key hashes with the wire
 /// router; an empty key round-robins. Ids are per instance. Batches share one partition and are
@@ -251,7 +250,7 @@ struct BufferState {
     fail_next_flush: Option<Error>,
 }
 
-/// An in-memory [`BufferedPublisher`] (C# `InMemoryBufferedStreamPublisher`). Direct publishes go
+/// An in-memory [`BufferedPublisher`]. Direct publishes go
 /// straight to the recording, bypassing the buffer. Enqueued messages become visible only on
 /// [`flush`](BufferedPublisher::flush), so a test that forgets to flush fails here as it would lose
 /// messages in production.
@@ -401,14 +400,13 @@ impl BufferedPublisher for InMemoryBufferedPublisher {
 }
 
 /// An in-memory [`PositionStore`] with the real load / save / reset semantics, held in a map
-/// instead of a Redis hash (C# `MemoryPositionStore`). One instance serves every topic and consumer
+/// instead of a Redis hash. One instance serves every topic and consumer
 /// that shares it. Reset of a single partition creates it; reset of all partitions touches only
 /// the positions already stored.
 /// Positions by topic, then consumer, then partition.
 type Positions = BTreeMap<String, BTreeMap<String, BTreeMap<u32, StreamId>>>;
 
-/// An in-memory position store: real load, save and reset semantics, held in a map (C#
-/// `MemoryPositionStore`). Positions are per topic, consumer and partition.
+/// An in-memory position store: real load, save and reset semantics, held in a map. Positions are per topic, consumer and partition.
 #[derive(Debug, Default)]
 pub struct MemoryPositionStore {
     topics: Mutex<Positions>,
@@ -481,7 +479,7 @@ impl PositionStore for MemoryPositionStore {
     }
 }
 
-/// Process-wide synthetic id sequence for harness messages (C# `StreamTestHarness.nextId`).
+/// Process-wide synthetic id sequence for harness messages.
 static NEXT_MS: AtomicU64 = AtomicU64::new(0);
 
 fn next_id() -> StreamId {
@@ -495,7 +493,7 @@ async fn guarded<F: Future<Output = HandleResult>>(future: F) -> HandleResult {
         .unwrap_or_else(|panic| Err(worker::panic_to_skip(panic.as_ref())))
 }
 
-/// Drives handlers directly, without a consumer host or Redis (C# `StreamTestHarness`).
+/// Drives handlers directly, without a consumer host or Redis.
 ///
 /// Each delivery builds the [`StreamMsg`] and [`PartitionContext`] the worker would pass, runs the
 /// handler once, and returns its [`HandleResult`] unchanged, so a test asserts `Ok`, `Skip` or
@@ -661,7 +659,7 @@ impl StreamTestHarness {
     }
 }
 
-/// Ports of the C# `TestDoubleTests` (26 cases), `snake_case`, same order. Not ported, with reasons:
+/// Tests for the test doubles. Cases that do not apply, with reasons:
 /// `body_is_copied` and `enqueue_copies_the_body` (`Bytes` is immutable and reference counted, so a
 /// caller cannot rewrite a buffer it has handed over and there is nothing to copy against) and
 /// `harness_sends_to_a_delegate` (closure handlers are C4b's shape; `MessageHandler` covers the

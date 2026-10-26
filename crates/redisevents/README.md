@@ -855,18 +855,18 @@ millisecond is delivered, not skipped.
 
 ## Health
 
-`StreamStatus::partitions()` is a snapshot of every partition this process reads, and
-`StreamHealth::grade` gives each one a verdict: `Healthy`, `Degraded` or `Unhealthy`, with the
+`health::partitions()` is a snapshot of every partition this process reads, and
+`health::grade` gives each one a verdict: `Healthy`, `Degraded` or `Unhealthy`, with the
 rule that fired. The host's own `health()` method runs the same rules with the connection and the
 consumer counts included.
 
 ```rust
-use redisevents::admin::health::{StreamHealth, StreamHealthStatus, StreamStatus};
+use redisevents::admin::health::{self, StreamHealthStatus};
 
 fn any_unhealthy() -> bool {
-    StreamStatus::partitions()
+    health::partitions()
         .iter()
-        .any(|p| StreamHealth::grade(p).status == StreamHealthStatus::Unhealthy)
+        .any(|p| health::grade(p).status == StreamHealthStatus::Unhealthy)
 }
 
 assert!(!any_unhealthy());
@@ -971,8 +971,7 @@ See the buffered section above. `flush()` is the only way to make a buffered pub
 
 ### Cancelling a publish
 
-Dropping a publish future before it resolves leaves it unknown whether the entry was written. As
-with a cancelled C# call, there is no retry.
+Dropping a publish future before it resolves leaves it unknown whether the entry was written. There is no retry.
 
 ---
 
