@@ -48,12 +48,8 @@ impl Views {
     /// [`redisevents::Error::InvalidArgument`] for a blank topic.
     pub fn new(conn: &Connection, keys: &Keys, topic: &str) -> Result<Self> {
         Ok(Self {
-            list: Arc::new(RedisViewStore::with_owner(
-                conn, keys, topic, "list", OWNER,
-            )?),
-            detail: Arc::new(RedisViewStore::with_owner(
-                conn, keys, topic, "detail", OWNER,
-            )?),
+            list: Arc::new(RedisViewStore::new(conn, keys, topic, OWNER, "list")?),
+            detail: Arc::new(RedisViewStore::new(conn, keys, topic, OWNER, "detail")?),
         })
     }
 }
@@ -81,9 +77,9 @@ pub fn registry() -> Result<EventTypeRegistry> {
 /// [`redisevents::Error::Config`] when the registry cannot decode the bound event type.
 pub fn projector(views: &Views, topic: &str) -> Result<Projector> {
     Projector::builder(topic, registry()?)
-        .projection::<InventoryEvent, _>(Arc::new(InventoryViews {
+        .projection::<InventoryEvent, _>(InventoryViews {
             views: views.clone(),
-        }))
+        })
         .build()
 }
 

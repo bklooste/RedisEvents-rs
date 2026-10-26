@@ -126,10 +126,10 @@ async fn the_inventory_domain_projects_both_views_and_ignores_redelivery() {
         Arc::new(InMemoryViewStore::new()),
     );
     let projector = Projector::builder(TOPIC, registry())
-        .projection::<InventoryEvent, _>(Arc::new(InventoryViews {
+        .projection::<InventoryEvent, _>(InventoryViews {
             list: list.clone(),
             detail: detail.clone(),
-        }))
+        })
         .build()
         .unwrap();
     let harness = StreamTestHarness::new(TOPIC);
@@ -165,10 +165,10 @@ async fn camel_case_event_bodies_from_a_wrong_producer_are_a_skipped_malformed_e
         Arc::new(InMemoryViewStore::new()),
     );
     let projector = Projector::builder(TOPIC, registry())
-        .projection::<InventoryEvent, _>(Arc::new(InventoryViews {
+        .projection::<InventoryEvent, _>(InventoryViews {
             list: list.clone(),
             detail,
-        }))
+        })
         .build()
         .unwrap();
     let id = Uuid::from_u128(8);
@@ -202,14 +202,13 @@ async fn the_inventory_views_run_against_redis_view_stores() {
         redis.keys(),
         redis.new_topic("inventory"),
     );
-    let list = Arc::new(RedisViewStore::with_owner(&conn, &keys, &topic, "list", "views").unwrap());
-    let detail =
-        Arc::new(RedisViewStore::with_owner(&conn, &keys, &topic, "detail", "views").unwrap());
+    let list = Arc::new(RedisViewStore::new(&conn, &keys, &topic, "views", "list").unwrap());
+    let detail = Arc::new(RedisViewStore::new(&conn, &keys, &topic, "views", "detail").unwrap());
     let projector = Projector::builder(topic.as_str(), registry())
-        .projection::<InventoryEvent, _>(Arc::new(InventoryViews {
+        .projection::<InventoryEvent, _>(InventoryViews {
             list: list.clone(),
             detail: detail.clone(),
-        }))
+        })
         .build()
         .unwrap();
     let id = Uuid::new_v4();

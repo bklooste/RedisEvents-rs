@@ -22,8 +22,8 @@ use redisevents::producer::{PublishOptions, PublisherExt, StreamPublisher};
 use redisevents::wire::{CODEC_VERSION, Keys, StreamId, StreamMsg, TypedMsg, codec};
 use redisevents::{Connection, Message, PayloadCodec};
 use redisevents_msgpack::{
-    Compression, Layout, MessagePack, MessagePackMapTyped, MessagePackMsgExt,
-    MessagePackPublisherExt, MessagePackTyped, Options, decompress, encode_plain,
+    Compression, Layout, MessagePack, MessagePackMapTyped, MessagePackPublisherExt,
+    MessagePackTyped, Options, decompress, encode_plain,
 };
 use redisevents_test_support::require_redis;
 use serde::{Deserialize, Serialize};
@@ -149,7 +149,10 @@ async fn round_trip(order: &Order, opts: Options) {
     assert_eq!(entries.len(), 1);
 
     // Hand decode.
-    assert_eq!(&entry.decode_msgpack::<Order>().unwrap(), order);
+    assert_eq!(
+        &redisevents_msgpack::decode::<Order>(entry.body()).unwrap(),
+        order
+    );
 
     // Through the Typed adapter (single-message path).
     let typed = MessagePackTyped::new(Recorder::default());
@@ -225,7 +228,10 @@ async fn disabled_compression_stores_large_body_plain() {
         entry.body().as_ref(),
         encode_plain(&order, Layout::Array).unwrap().as_slice()
     );
-    assert_eq!(&entry.decode_msgpack::<Order>().unwrap(), &order);
+    assert_eq!(
+        &redisevents_msgpack::decode::<Order>(entry.body()).unwrap(),
+        &order
+    );
 }
 
 #[tokio::test]
@@ -248,7 +254,10 @@ async fn lowered_threshold_compresses_a_small_body() {
         .unwrap();
     let entry = read_back(&conn, &key).await.remove(0);
     assert_ne!(entry.body().as_ref(), plain.as_slice());
-    assert_eq!(&entry.decode_msgpack::<Order>().unwrap(), &order);
+    assert_eq!(
+        &redisevents_msgpack::decode::<Order>(entry.body()).unwrap(),
+        &order
+    );
 }
 
 #[tokio::test]

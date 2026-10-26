@@ -1,4 +1,4 @@
-//! Ports of `BatchProjectionTests` and `ProjectionsTracingTests`.
+//! Batch projections (buffer per batch, flush once) and projector tracing.
 #![allow(
     missing_docs,
     clippy::unwrap_used,
@@ -17,8 +17,8 @@ use common::{Rig, json, msg, store_down};
 use redisevents::testing::StreamTestHarness;
 use redisevents::{HandleError, HandleResult, PartitionContext, StreamId, StreamMsg};
 use redisevents_projections::{
-    BatchError, BatchProjection, EventMeta, EventTypeRegistry, Projection, ProjectionBatch,
-    Projector, malformed_events_total,
+    BatchFlush, BatchProjection, EventMeta, EventTypeRegistry, Projection, Projector,
+    malformed_events_total,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -65,19 +65,16 @@ struct Buffering {
     gate: Option<Arc<Semaphore>>,
     timeline: Mutex<Vec<String>>,
     flushed: Mutex<Vec<Vec<String>>>,
-    scopes: Mutex<Vec<ProjectionBatch>>,
     flush_fails: Option<Failure>,
     throw_on: Option<(&'static str, Failure)>,
     cancel_on: Option<(&'static str, CancellationToken)>,
 }
 
 impl Buffering {
-    async fn buffer(&self, id: &str, meta: &EventMeta) -> HandleResult {
+    async fn buffer(&self, id: &str, rows: &mut Vec<String>) -> HandleResult {
         if let Some(gate) = &self.gate {
             gate.acquire().await.unwrap().forget();
         }
-        let scope = meta.batch.clone().unwrap();
-        self.scopes.lock().unwrap().push(scope.clone());
         self.timeline.lock().unwrap().push(format!("handle {id}"));
         if let Some((on, fail)) = &self.throw_on
             && *on == id
@@ -90,38 +87,42 @@ impl Buffering {
             token.cancel();
             return Err(HandleError::skip("cancelled"));
         }
-        scope
-            .with_state(self, Vec::<String>::new, |rows| rows.push(id.to_owned()))
-            .map_err(HandleError::skip)
+        rows.push(id.to_owned());
+        Ok(())
     }
 }
 
-impl Projection<OrderPlaced> for Buffering {
-    async fn handle(
+impl BatchProjection<OrderPlaced> for Buffering {
+    async fn buffer(
         &self,
         e: &OrderPlaced,
-        meta: &EventMeta,
+        rows: &mut Vec<String>,
+        _: &EventMeta,
         _: &PartitionContext,
     ) -> HandleResult {
-        self.buffer(&e.id, meta).await
+        Buffering::buffer(self, &e.id, rows).await
     }
 }
 
-impl Projection<OrderNoted> for Buffering {
-    async fn handle(&self, e: &OrderNoted, meta: &EventMeta, _: &PartitionContext) -> HandleResult {
-        self.buffer(&e.id, meta).await
+impl BatchProjection<OrderNoted> for Buffering {
+    async fn buffer(
+        &self,
+        e: &OrderNoted,
+        rows: &mut Vec<String>,
+        _: &EventMeta,
+        _: &PartitionContext,
+    ) -> HandleResult {
+        Buffering::buffer(self, &e.id, rows).await
     }
 }
 
-impl BatchProjection for Buffering {
-    async fn flush(&self, batch: &ProjectionBatch, _: &PartitionContext) -> HandleResult {
+impl BatchFlush for Buffering {
+    type Pending = Vec<String>;
+
+    async fn flush(&self, rows: Vec<String>, _: &PartitionContext) -> HandleResult {
         if let Some(fail) = self.flush_fails {
             return Err(fail());
         }
-        let rows = batch
-            .take_state::<_, Vec<String>>(self)
-            .map_err(HandleError::skip)?
-            .unwrap_or_default();
         self.timeline
             .lock()
             .unwrap()
@@ -144,8 +145,8 @@ fn projector_for(topic: &str, projections: &[&Arc<Buffering>]) -> Projector {
     let mut builder = Projector::builder(topic, registry());
     for p in projections {
         builder = builder
-            .batch_projection::<OrderPlaced, _>(Arc::clone(p))
-            .batch_projection::<OrderNoted, _>(Arc::clone(p));
+            .shared_batch_projection::<OrderPlaced, _>(Arc::clone(p))
+            .shared_batch_projection::<OrderNoted, _>(Arc::clone(p));
     }
     builder.build().unwrap()
 }
@@ -177,7 +178,7 @@ async fn the_flush_runs_once_after_every_event_is_dispatched_and_sees_them_all_i
 }
 
 #[tokio::test]
-async fn every_event_in_one_batch_shares_one_scope_and_the_next_batch_gets_a_new_one() {
+async fn each_batch_gets_a_fresh_buffer() {
     let p = Arc::new(Buffering::default());
     let projector = projector_for("orders", &[&p]);
 
@@ -186,48 +187,17 @@ async fn every_event_in_one_batch_shares_one_scope_and_the_next_batch_gets_a_new
         .unwrap();
     run(&projector, &batch(&[("a", "3")])).await.unwrap();
 
-    let scopes = p.scopes.lock().unwrap().clone();
-    assert_eq!(scopes.len(), 3);
-    assert_eq!(scopes[0], scopes[1]);
-    assert_ne!(scopes[2], scopes[0]);
-    assert_eq!(scopes[0].topic(), "orders");
-    assert_eq!(scopes[0].partition(), 3);
     assert_eq!(p.flushed(), vec![strings(&["1", "2"]), strings(&["3"])]);
-}
-
-#[tokio::test]
-async fn the_scope_is_closed_when_the_projector_returns_so_a_kept_reference_cannot_buffer() {
-    let p = Arc::new(Buffering::default());
-    let projector = projector_for("orders", &[&p]);
-
-    run(&projector, &batch(&[("a", "1")])).await.unwrap();
-
-    let kept = p.scopes.lock().unwrap()[0].clone();
-    assert!(kept.is_closed());
-    let buffer = kept.with_state(&*p, Vec::<String>::new, |_| ());
-    assert!(matches!(buffer, Err(BatchError::Closed { .. })));
-    assert!(buffer.unwrap_err().to_string().contains("closed"));
-    assert!(
-        kept.try_with_state::<_, Vec<String>, _>(&*p, |_| ())
-            .is_err()
-    );
 }
 
 #[derive(Default)]
 struct Plain {
     received: Mutex<Vec<String>>,
-    saw_batch: Mutex<Vec<bool>>,
 }
 
 impl Projection<OrderPlaced> for Plain {
-    async fn handle(
-        &self,
-        e: &OrderPlaced,
-        meta: &EventMeta,
-        _: &PartitionContext,
-    ) -> HandleResult {
+    async fn handle(&self, e: &OrderPlaced, _: &EventMeta, _: &PartitionContext) -> HandleResult {
         self.received.lock().unwrap().push(e.id.clone());
-        self.saw_batch.lock().unwrap().push(meta.batch.is_some());
         Ok(())
     }
 }
@@ -236,7 +206,7 @@ impl Projection<OrderPlaced> for Plain {
 async fn a_projection_that_does_not_opt_in_is_dispatched_as_before_and_never_flushed() {
     let plain = Arc::new(Plain::default());
     let projector = Projector::builder("orders", registry())
-        .projection::<OrderPlaced, _>(Arc::clone(&plain))
+        .shared_projection::<OrderPlaced, _>(Arc::clone(&plain))
         .build()
         .unwrap();
 
@@ -245,10 +215,6 @@ async fn a_projection_that_does_not_opt_in_is_dispatched_as_before_and_never_flu
         .unwrap();
 
     assert_eq!(*plain.received.lock().unwrap(), strings(&["1", "2"]));
-    assert!(
-        plain.saw_batch.lock().unwrap().iter().all(|b| *b),
-        "scope set on every event"
-    );
 }
 
 #[derive(Default)]
@@ -256,14 +222,22 @@ struct NotesOnly {
     flushes: Mutex<u32>,
 }
 
-impl Projection<OrderNoted> for NotesOnly {
-    async fn handle(&self, _: &OrderNoted, _: &EventMeta, _: &PartitionContext) -> HandleResult {
+impl BatchProjection<OrderNoted> for NotesOnly {
+    async fn buffer(
+        &self,
+        _: &OrderNoted,
+        (): &mut (),
+        _: &EventMeta,
+        _: &PartitionContext,
+    ) -> HandleResult {
         Ok(())
     }
 }
 
-impl BatchProjection for NotesOnly {
-    async fn flush(&self, _: &ProjectionBatch, _: &PartitionContext) -> HandleResult {
+impl BatchFlush for NotesOnly {
+    type Pending = ();
+
+    async fn flush(&self, (): (), _: &PartitionContext) -> HandleResult {
         *self.flushes.lock().unwrap() += 1;
         Ok(())
     }
@@ -273,7 +247,7 @@ impl BatchProjection for NotesOnly {
 async fn a_batch_projection_handed_no_event_in_the_batch_is_not_flushed() {
     let notes = Arc::new(NotesOnly::default());
     let projector = Projector::builder("orders", registry())
-        .batch_projection::<OrderNoted, _>(Arc::clone(&notes))
+        .shared_batch_projection::<OrderNoted, _>(Arc::clone(&notes))
         .build()
         .unwrap();
 
@@ -351,11 +325,6 @@ async fn a_block_from_the_flush_propagates_unchanged_so_core_blocks_the_batch() 
         .unwrap_err();
 
     assert!(error.is_block());
-    let scopes = p.scopes.lock().unwrap().clone();
-    assert!(
-        scopes.iter().all(ProjectionBatch::is_closed),
-        "a retry starts over in a new scope"
-    );
 }
 
 #[tokio::test]
@@ -501,8 +470,8 @@ async fn a_malformed_entry_is_skipped_and_the_rest_of_the_batch_is_still_project
     let buffering = Arc::new(Buffering::default());
     let plain = Arc::new(Plain::default());
     let projector = Projector::builder("orders", registry())
-        .batch_projection::<OrderPlaced, _>(Arc::clone(&buffering))
-        .projection::<OrderPlaced, _>(Arc::clone(&plain))
+        .shared_batch_projection::<OrderPlaced, _>(Arc::clone(&buffering))
+        .shared_projection::<OrderPlaced, _>(Arc::clone(&plain))
         .build()
         .unwrap();
     let mut entries = batch(&[("a", "1"), ("a", "2"), ("a", "3"), ("a", "4")]);
@@ -549,77 +518,7 @@ async fn each_flush_gets_its_own_span_named_for_the_projection() {
     assert_eq!(flushes[0].field("projections.partition"), Some("3"));
 }
 
-#[test]
-fn with_state_creates_once_per_owner_and_keeps_owners_apart() {
-    let batch = ProjectionBatch::new("t", 0);
-    let (owner_a, owner_b) = (1u8, 2u8);
-    let mut created = 0;
-
-    batch
-        .with_state(
-            &owner_a,
-            || {
-                created += 1;
-                vec![1]
-            },
-            |v| v.push(2),
-        )
-        .unwrap();
-    batch
-        .with_state(
-            &owner_a,
-            || {
-                created += 1;
-                vec![9]
-            },
-            |v| v.push(3),
-        )
-        .unwrap();
-    batch
-        .with_state(&owner_b, Vec::<i32>::new, |v| v.push(7))
-        .unwrap();
-
-    assert_eq!(created, 1);
-    assert_eq!(
-        batch
-            .try_with_state(&owner_a, |v: &mut Vec<i32>| v.clone())
-            .unwrap(),
-        Some(vec![1, 2, 3])
-    );
-    assert_eq!(
-        batch
-            .try_with_state(&owner_b, |v: &mut Vec<i32>| v.clone())
-            .unwrap(),
-        Some(vec![7])
-    );
-    assert_eq!(
-        batch
-            .try_with_state(&3u8, |v: &mut Vec<i32>| v.len())
-            .unwrap(),
-        None
-    );
-}
-
-#[test]
-fn asking_for_an_owners_state_as_another_type_is_an_error_not_a_default() {
-    let batch = ProjectionBatch::new("t", 0);
-    let owner = 1u8;
-    batch.with_state(&owner, Vec::<i32>::new, |_| ()).unwrap();
-
-    let error = batch
-        .with_state(&owner, Vec::<String>::new, |_| ())
-        .unwrap_err();
-
-    assert!(matches!(error, BatchError::WrongType { .. }));
-    assert!(error.to_string().contains("Vec"));
-    assert!(batch.take_state::<_, Vec<String>>(&owner).is_err());
-    assert_eq!(
-        batch.take_state::<_, Vec<i32>>(&owner).unwrap(),
-        Some(vec![])
-    );
-}
-
-// ---- ProjectionsTracingTests ----
+// ---- tracing ----
 
 #[derive(Serialize, Deserialize)]
 struct Touched {
@@ -664,8 +563,8 @@ async fn handle_batch_emits_one_project_span_per_dispatched_event() {
     let _guard = rig.install();
     let spy = Arc::new(TouchSpy::default());
     let projector = Projector::builder("orders", touch_registry())
-        .projection::<Touched, _>(Arc::clone(&spy))
-        .projection::<Touched, _>(Arc::new(TouchSpy::default()))
+        .shared_projection::<Touched, _>(Arc::clone(&spy))
+        .projection::<Touched, _>(TouchSpy::default())
         .build()
         .unwrap();
 
@@ -709,11 +608,11 @@ async fn a_failing_projection_marks_its_span_as_an_error_and_still_returns_the_e
     let _guard = rig.install();
     let spy = Arc::new(TouchSpy::default());
     let projector = Projector::builder("orders", touch_registry())
-        .projection::<Touched, _>(Arc::new(TouchSpy {
+        .projection::<Touched, _>(TouchSpy {
             fail: Some(|| HandleError::skip("boom")),
             ..TouchSpy::default()
-        }))
-        .projection::<Touched, _>(Arc::clone(&spy))
+        })
+        .shared_projection::<Touched, _>(Arc::clone(&spy))
         .build()
         .unwrap();
 
@@ -745,7 +644,7 @@ async fn a_failing_projection_marks_its_span_as_an_error_and_still_returns_the_e
 async fn with_no_subscriber_project_still_works() {
     let spy = Arc::new(TouchSpy::default());
     let projector = Projector::builder("orders", touch_registry())
-        .projection::<Touched, _>(Arc::clone(&spy))
+        .shared_projection::<Touched, _>(Arc::clone(&spy))
         .build()
         .unwrap();
 

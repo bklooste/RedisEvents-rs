@@ -22,6 +22,7 @@ opentelemetry = { version = "0.33.1", default-features = false, features = ["met
 redisevents = { path = "../redisevents", version = "0.3.0" }
 redisevents-projections = { path = "../redisevents-projections", version = "0.3.0" }
 thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["sync"] }
 tracing = "0.1.44"
 
 [dev-dependencies]

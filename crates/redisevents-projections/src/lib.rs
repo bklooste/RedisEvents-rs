@@ -1,5 +1,4 @@
-//! Typed event projections and view stores over a `redisevents` topic (port of
-//! `RedisEvents.Projections`).
+//! Typed event projections and view stores over a `redisevents` topic.
 //!
 //! # Shape
 //!
@@ -15,8 +14,7 @@
 //!
 //! # Dispatch without reflection
 //!
-//! C# finds the `IProjection<T>` implementations by reflection. Rust cannot list the trait
-//! impls of a value, so binding is explicit and checked at build time:
+//! Rust cannot list the trait impls of a value, so binding is explicit and checked at build time:
 //! `Projector::builder(..).projection::<T, _>(p)`. The registry decodes a message to a type-erased
 //! value; the projector looks the projections up by the decoded value's `TypeId`; each binding is
 //! a small generic shim that downcasts and calls `Projection<T>::handle`. There is no per-event
@@ -25,7 +23,7 @@
 //!
 //! # Error contract
 //!
-//! Identical to the C# projector:
+//! The projector's contract:
 //! * an unknown wire type is skipped (warned once per type, then debug);
 //! * a malformed entry (known type, body fails to decode) is skipped **per entry**: logged,
 //!   counted, and the rest of the batch is still projected;
@@ -34,9 +32,9 @@
 //!
 //! # JSON casing
 //!
-//! [`Json`] is `serde_json`, which keeps field names as written. C# events use
-//! System.Text.Json's default, **PascalCase**, and a mismatch is silent on the C# side (missing
-//! properties read as defaults). Types shared with C# normally need
+//! [`Json`] is `serde_json`, which keeps field names as written. A .NET service using
+//! System.Text.Json's default writes **PascalCase**, and a mismatch is silent on that side
+//! (missing properties read as defaults). Types shared with such a service need
 //! `#[serde(rename_all = "PascalCase")]`; per-type naming is just serde attributes on the type.
 //!
 //! # Example
@@ -45,8 +43,6 @@
 //! wire strings appear; the Rust type name is never used on the wire.
 //!
 //! ```no_run
-//! use std::sync::Arc;
-//!
 //! use redisevents::consumer::{HandleResult, PartitionContext, Streams};
 //! use redisevents::Connection;
 //! use redisevents_projections::{EventMeta, EventTypeRegistry, Projection, Projector};
@@ -75,7 +71,7 @@
 //! async fn run() -> redisevents::Result<()> {
 //!     let registry = EventTypeRegistry::new().register_json::<OrderPlaced>("Shop.OrderPlaced")?;
 //!     let projector = Projector::builder("orders", registry)
-//!         .projection::<OrderPlaced, _>(Arc::new(PrintOrders))
+//!         .projection::<OrderPlaced, _>(PrintOrders)
 //!         .build()?;
 //!     let conn = Connection::connect("redis://redis-db.infra:6379").await?;
 //!     let host = Streams::builder(conn)
@@ -98,8 +94,8 @@ mod registry;
 mod view_store;
 
 pub use diagnostics::{MALFORMED_EVENTS, SOURCE_NAME, malformed_events_total};
-pub use meta::{BatchError, EventMeta, ProjectionBatch};
-pub use projection::{BatchProjection, Projection};
+pub use meta::EventMeta;
+pub use projection::{BatchFlush, BatchProjection, Projection};
 pub use projector::{Projector, ProjectorBuilder};
 pub use registry::{Decoded, EventTypeRegistry};
-pub use view_store::{InMemoryViewStore, RedisViewStore, ViewStore, default_owner};
+pub use view_store::{InMemoryViewStore, RedisViewStore, ViewStore};

@@ -1,7 +1,6 @@
-//! Spans, logging helpers and the malformed-event counter (C# `ProjectionsDiagnostics` /
-//! `ProjectionsSpans`).
+//! Spans, logging helpers and the malformed-event counter.
 //!
-//! Spans are `tracing` spans named `projections.project` and `projections.flush`; the C# display
+//! Spans are `tracing` spans named `projections.project` and `projections.flush`; the display
 //! name (`projections.project <wire type>`) is in the `otel.name` field, which
 //! `tracing-opentelemetry` uses. A failed span gets `otel.status_code = "ERROR"` and
 //! `otel.status_description`.
@@ -11,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use redisevents::StreamId;
 use tracing::Span;
 
-/// The instrumentation scope of the C# package, also the meter name under the `otel` feature.
+/// The instrumentation scope, shared with the .NET package so dashboards line up; also the meter name under the `otel` feature.
 pub const SOURCE_NAME: &str = "RedisEvents.Projections";
 
 /// Counter name: events skipped because their body failed to decode.

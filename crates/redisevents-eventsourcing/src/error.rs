@@ -1,7 +1,7 @@
-//! Errors (C# `ConcurrencyException` plus the `InvalidOperationException`s of the repository).
+//! Errors.
 
 /// A save lost its version check: the aggregate changed since it was loaded, and nothing was
-/// written (C# `ConcurrencyException`). Reload, decide again and retry.
+/// written Reload, decide again and retry.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("'{aggregate_name}' '{id}': expected version {expected_version}, but it has changed.")]
 pub struct ConcurrencyError {
@@ -49,14 +49,24 @@ pub enum Error {
     #[error("{0}")]
     History(String),
 
-    /// The call is not valid in the current state (C# `InvalidOperationException`), for example a
-    /// refusal after events were raised.
-    #[error("{0}")]
-    InvalidOperation(String),
+    /// A decide closure refused a command (`AggregateDecision::Refused`) after it had already
+    /// emitted events. A command must decide before it emits; nothing was saved.
+    #[error(
+        "{aggregate} '{id}' refused a command after already emitting {emitted} event(s). \
+         A command must decide before it emits anything; nothing was saved."
+    )]
+    RefusedAfterEmitting {
+        /// The aggregate name.
+        aggregate: &'static str,
+        /// The aggregate id.
+        id: String,
+        /// How many events had been emitted.
+        emitted: usize,
+    },
 
-    /// An argument is invalid (C# `ArgumentException` / `ArgumentOutOfRangeException`).
-    #[error("{0}")]
-    InvalidArgument(String),
+    /// An aggregate id was blank.
+    #[error("An aggregate id must not be blank.")]
+    BlankId,
 }
 
 impl Error {

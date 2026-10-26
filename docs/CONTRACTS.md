@@ -168,7 +168,7 @@ pub trait PayloadCodec: Send + Sync + 'static {
 }
 pub struct Json;   // serde_json
 ```
-LZ4 MessagePack bodies use MessagePack-CSharp's `Lz4BlockArray` framing (ext 98), which C#
+LZ4 MessagePack bodies use MessagePack-CSharp's `Lz4BlockArray` framing (ext 98), which the .NET
 `Standard` options and plain MessagePack decoders cannot read; the MessagePack codec must decode
 `Lz4BlockArray` (and `Lz4Block`, ext 99) itself.
 E1 (`redisevents-msgpack`, done) adds `MessagePack` and `MessagePackMap` implementing `PayloadCodec`
@@ -180,11 +180,10 @@ pub trait MessagePackPublisherExt: Publisher {                   // blanket for 
     fn publish_msgpack<M: Message + Serialize + Sync>(&self, key, &M, &Options, &PublishOptions) -> Result<StreamId>;
     fn publish_msgpack_batch<M: ...>(&self, key, &[M], &Options, &PublishOptions) -> Result<()>;
 }
-pub trait MessagePackMsgExt { fn decode_msgpack<T>(&self) -> Result<T, CodecError>; }  // impl for StreamMsg
 ```
+Decode one `StreamMsg` by hand with `redisevents_msgpack::decode::<T>(msg.body())`.
 `Options` (layout, `Compression` threshold/disable) is passed per call; core's
-`PublisherExt::publish_message::<MessagePack, _>` covers the defaults. Not ported: the C#
-`AddStream<THandler, TMessage>` registrations (C4b).
+`PublisherExt::publish_message::<MessagePack, _>` covers the defaults.
 
 ### `error` (W0.2)
 ```rust
@@ -538,7 +537,7 @@ contract are core's.
 EventTypeRegistry::new()
     .register_json::<T>("wire.type")?                    // serde + Json (T: Serialize + DeserializeOwned)
     .register::<T, C: PayloadCodec>("wire.type")?        // any codec
-    .register_with::<T>("wire.type", encode_fn, decode_fn)?   // hand-rolled pair (C# Register)
+    .register_with::<T>("wire.type", encode_fn, decode_fn)?   // hand-rolled pair 
     .register_family::<E, _>(&["w1", "w2"], |wire, body| -> Result<Option<E>, _>)?  // many wires -> one enum, decode-only
 // encode::<T>(&T) -> (&str, Bytes); decode::<T>(wire, body) -> Result<Option<T>, BoxError>; try_decode -> Decoded
 // duplicate wire / same type under two wires / blank wire -> Error::Config; encode of unregistered -> InvalidArgument
@@ -546,29 +545,31 @@ EventTypeRegistry::new()
 pub trait Projection<T>: Send + Sync + 'static {
     fn handle(&self, event: &T, meta: &EventMeta, ctx: &PartitionContext) -> impl Future<Output = HandleResult> + Send;
 }
-pub trait BatchProjection: Send + Sync + 'static {       // buffer in meta.batch, write once in flush
-    fn flush(&self, batch: &ProjectionBatch, ctx: &PartitionContext) -> impl Future<Output = HandleResult> + Send;
+pub trait BatchFlush: Send + Sync + 'static {            // write once per batch
+    type Pending: Default + Send + 'static;              // the batch's buffer, one per batch per projection
+    fn flush(&self, pending: Self::Pending, ctx: &PartitionContext) -> impl Future<Output = HandleResult> + Send;
+}
+pub trait BatchProjection<T>: BatchFlush {              // buffer one event type into Pending
+    fn buffer(&self, event: &T, pending: &mut Self::Pending, meta: &EventMeta, ctx: &PartitionContext) -> impl Future<Output = HandleResult> + Send;
 }
 Projector::builder(topic, registry)                      // registry: EventTypeRegistry or Arc<..>
-    .projection::<T, _>(Arc<P: Projection<T>>)
-    .batch_projection::<T, _>(Arc<P: Projection<T> + BatchProjection>)
+    .projection::<T, _>(P: Projection<T>)                // .shared_projection::<T, _>(Arc<P>) to bind one instance for several T
+    .batch_projection::<T, _>(P: BatchProjection<T>)     // .shared_batch_projection::<T, _>(Arc<P>)
     .build()? -> Projector                               // Config error if T is not decodable by the registry
 // Projector: BatchHandler. Register it with the consumer like any batch handler.
 
-pub struct EventMeta { partition_key, id: StreamId, correlation_id, partition: u32, batch: Option<ProjectionBatch> }
-ProjectionBatch::{with_state(owner, create, f), try_with_state(owner, f), take_state(owner), topic(), partition(), is_closed()}
+pub struct EventMeta { partition_key, id: StreamId, correlation_id, partition: u32 }
 pub trait ViewStore<T> { get(&str) -> Option<T>; set(&str, &T); delete(&str); list() -> Vec<T> }   // all async, Result<_, redisevents::Error>
 InMemoryViewStore::<T>::new()                            // T: Clone
-RedisViewStore::<T>::new(&Connection, &Keys, topic, view_name)?            // owner = default_owner()
-RedisViewStore::<T>::with_owner(&Connection, &Keys, topic, view_name, owner)?
+RedisViewStore::<T>::new(&Connection, &Keys, topic, owner, view_name)?     // owner is explicit (it is in the key)
 ```
 - **Dispatch (no reflection).** Rust cannot enumerate a type's trait impls, so binding is explicit:
   `.projection::<T, _>(p)` once per event type. Decoding yields a type-erased value tagged with its
   `TypeId`; the projector looks the bound projections up by that id and a generic shim downcasts and
-  calls `Projection<T>::handle`. Two shapes fit: one `T` per wire type (as C#), or **one enum `E` for
+  calls `Projection<T>::handle`. Two shapes fit: one `T` per wire type, or **one enum `E` for
   the topic** via `register_family` (the inventory sample: `InventoryEvent::decode` plugs in as is and
   the projection `match`es the enum).
-- **Errors** (C# `EventProjector`): unknown wire type skipped (warn once per type, then debug); known
+- **Errors:** unknown wire type skipped (warn once per type, then debug); known
   type without a bound projection skipped; a **malformed entry is skipped per entry** (error log with
   id and type, `redisevents.projections.events.malformed` counter, `malformed_events_total()`) and the
   rest of the batch is still projected; a projection error ends the batch and is returned unchanged.
@@ -576,17 +577,18 @@ RedisViewStore::<T>::with_owner(&Connection, &Keys, topic, view_name, owner)?
   event error the events before it are still flushed and the original error returned (a `Block` from
   that flush wins); on `Block` or shutdown (`ctx.is_cancelled()`) nothing is flushed; several failing
   flushes all run and the first error is returned.
-- **Batch scope.** `ProjectionBatch` is keyed by the owner's address (pass `self`), is closed when the
-  projector returns, and misuse is `BatchError::{Closed, WrongType}`.
+- **Batch buffer.** A batch projection's buffer is its `BatchFlush::Pending` value, created per
+  `handle_batch` call, lent `&mut` to `buffer` for every event and moved into `flush`. The projector
+  owns it, so there is nothing to look up, lock or close (no owner-address keying).
 - **Diagnostics.** `tracing` spans `projections.project` (one per dispatched event) and
-  `projections.flush`, with C# names in `otel.name` and failures as `otel.status_code = "ERROR"`.
+  `projections.flush`, with the display name in `otel.name` and failures as `otel.status_code = "ERROR"`.
   Feature `otel` exports the malformed counter on meter `RedisEvents.Projections`.
 - **View key** `<prefix>{<topic>}:view:<owner>:<view_name>` (`Keys::view`), a hash of id to JSON.
-  `default_owner()` is the executable's file stem (C#: entry assembly name). `list` is an `HSCAN` loop.
-- **JSON casing.** `Json` keeps Rust field names. C# events are PascalCase, so types shared with C#
-  normally need `#[serde(rename_all = "PascalCase")]` (a mismatch is silent on the C# side); per-type
+  The owner is an explicit argument (a .NET service uses its entry assembly name unless
+  configured, so a Rust reader of its views passes that name). `list` is an `HSCAN` loop.
+- **JSON casing.** `Json` keeps Rust field names. .NET events are PascalCase, so types shared with
+  a .NET service normally need `#[serde(rename_all = "PascalCase")]` (a mismatch is silent on the .NET side); per-type
   naming is plain serde attributes. A wrong-cased body fails to decode and is skipped as malformed.
-- **Not ported**: DI/builder registration (`AddEventProjector`, `AddRedisViewStore`): C4b.
 
 ```rust
 // Inventory view service (E5c): both read models from one projection over the domain's event enum.
@@ -609,26 +611,26 @@ impl Projection<InventoryEvent> for InventoryViews {
     }
 }
 let projector = Projector::builder(TOPIC, registry)
-    .projection::<InventoryEvent, _>(Arc::new(views))
+    .projection::<InventoryEvent, _>(views)
     .build()?;      // hand to the consumer as a BatchHandler
 ```
 The full, tested version is `crates/redisevents-projections/tests/inventory.rs`. Tests use D4's
 `StreamTestHarness::deliver_batch`.
 
 ### E3 event sourcing (`redisevents-eventsourcing`, public)
-Port of `RedisEvents.EventSourcing`. Wire-compatible with C#: state stream
+Wire-compatible with the .NET package: state stream
 `<prefix>{<topic>}:state:es:<Aggregate>:<id>` (entries `b` + `t` only), version = its `XLEN`, every
 event also published to the topic with the aggregate id as partition key. Tested both ways against
-the C# golden bodies (`tests/inventory.rs`).
+the .NET golden bodies (`tests/inventory.rs`).
 
 **Design.** `Aggregate` is implemented on a **marker type** that names a `State`, an `Event`, the
 wire `NAME` and a pure `apply(&mut State, &Event)`. `AggregateRoot<A>` is the instance: id, version,
-state, uncommitted events (C# `AggregateRoot`: `raise` = apply + record, `uncommitted_changes`,
-`mark_changes_as_committed`, `load_from_history`, `version`), and it **derefs to the state**. Why: a
+state, pending events (`emit` = apply + queue, `pending`, `commit`, `from_history`, `version`),
+and it **derefs to the state**. Why: a
 pure decide/apply domain such as `inventory_domain::InventoryItem` needs no change and no wrapper
 struct; the marker is local to the service crate, so the orphan rule is no obstacle (a trait impl
 on `InventoryItem` from a third crate would be); id and version live outside the domain state, as
-the repository owns them; C#'s `On<T>` handler table is replaced by one total `apply`.
+the repository owns them; one total `apply` replaces per-event handler tables.
 ```rust
 pub trait Aggregate: Send + Sync + 'static {
     type State: Default + Send + Sync + 'static;  type Event: Send + Sync + 'static;
@@ -637,34 +639,34 @@ pub trait Aggregate: Send + Sync + 'static {
     // default: registry.encode(event). Override for an enum Event over several wire types.
     fn encode(registry: &EventTypeRegistry, event: &Self::Event) -> Result<(String, Bytes)>;
 }
-AggregateRoot::<A>::new(id)? ; .id() .version() -> u64 .state() .raise(e) .uncommitted_changes() ...
+AggregateRoot::<A>::new(id)? ; .id() .version() -> u64 .state() .emit(e) .pending() .commit() ; AggregateRoot::from_history(id, events)?
 
-pub trait EventRepository {   // load / save / save_unchecked (C# IEventRepository)
+pub trait EventRepository {   // load / save / save_unchecked
     async fn load<A>(&self, id) -> Result<Option<AggregateRoot<A>>>;     // pages of 1000, registry decode
     async fn save<A>(&self, &mut AggregateRoot<A>, expected_version: Option<u64>, &PublishOptions) -> Result<u64>;
     async fn save_unchecked<A>(&self, &mut AggregateRoot<A>, &PublishOptions) -> Result<u64>;
 }
 RedisEventRepository::new(StreamStore, EventTypeRegistry /* or Arc */)   // generic over `EventStore` for fakes
 ```
-- `save` with nothing uncommitted writes nothing and returns the version. A lost check is
-  `Error::Concurrency(ConcurrencyError { aggregate_name, id, expected_version })` (C#
-  `ConcurrencyException`); nothing was written and the root keeps its uncommitted events.
+- `save` with nothing pending writes nothing and returns the version. A lost check is
+  `Error::Concurrency(ConcurrencyError { aggregate_name, id, expected_version })`; nothing was
+  written and the root keeps its pending events.
 - `Error` = `Concurrency | Store(redisevents::Error) | History(unknown or undecodable wire type in
-  an aggregate's own history: never skipped) | InvalidOperation | InvalidArgument`.
-- Runners (C# `ExecuteAsync`, `CachedAggregate.RunAsync`, `AggregateDecision`):
+  an aggregate's own history: never skipped) | RefusedAfterEmitting | BlankId`.
+- Runners:
 ```rust
 execute(&repo, id, &ExecuteOptions, async move |root: &mut AggregateRoot<A>| -> Result<AggregateDecision<T>, E>)
     -> Result<CommandResult<T> /* {value, version} */, ExecuteError<E> /* Decide(E) | Repository(Error) */>
 CachedAggregate::<A>::new().with_expected_version(fn).run(&repo, id, &ExecuteOptions, async |root, from_cache| ..)
-    -> Result<T, ExecuteError<E>>        // &mut self: share via tokio::sync::Mutex; evict()
-ExecuteOptions::default().max_attempts(n) /*default 1*/ .concurrency_check(bool) /*false = save_unchecked*/
+    -> Result<T, ExecuteError<E>>        // &self: owns its lock, so share it directly; async evict(), is_cached()
+ExecuteOptions::default().max_attempts(NonZeroU32) /*default 1*/ .concurrency_check(bool) /*false = save_unchecked*/
     .publish_options(PublishOptions) .on_conflict(|attempt, ConcurrencyError| async {..})
-AggregateDecision::{Done(T), Refused(T) /* must raise nothing */, Redo /* reload, uncounted */}
+AggregateDecision::{Done(T), Refused(T) /* must emit nothing */, Redo /* reload, uncounted */}
 ```
-  Nothing raised: no save. Retry only on `Concurrency`, up to `max_attempts` (0 is `InvalidArgument`);
+  Nothing emitted: no save. Retry only on `Concurrency`, up to `max_attempts`;
   `on_conflict` runs before each retry, not after the final loss. `ExecuteError::is_concurrency()`
   is the 409 test. `Decide(E)` carries the domain error (400 in E5b) and saves nothing.
-- Spans (`tracing`; C# names in `otel.name`, `otel.kind=client`): `eventsourcing.save <Name>`
+- Spans (`tracing`; display name in `otel.name`, `otel.kind=client`): `eventsourcing.save <Name>`
   (`eventsourcing.aggregate`, `.aggregate_id`, `.expected_version`, `.version`, `.event_count`),
   `eventsourcing.load <Name>` (`.found`, `.version`); a lost check sets `otel.status_code=ERROR` with a
   "Concurrency conflict" description. Counters `eventsourcing.saves|save.conflicts|loads` on meter
@@ -672,8 +674,7 @@ AggregateDecision::{Done(T), Refused(T) /* must raise nothing */, Redo /* reload
 - **Send gotcha.** The futures are `Send` (a handler can be `tokio::spawn`ed), but a closure that
   *borrows* a local (`async |root| tick(root, n)`) trips rustc's "Send is not general enough";
   write `async move |root| ..` when the closure captures anything.
-- **Not ported**: DI/builder registration (`AddEventSourcing`), benchmarks; `BindId` and the `On<T>`
-  handler table (see above); the C# `Id` override (the id is the root's).
+- **Not provided**: benchmarks, `BindId`, a per-event handler table, an `Id` override (the id is the root's).
 
 ```rust
 // E5b command service: the pure InventoryItem on the abstraction.
@@ -694,11 +695,26 @@ let out = execute(&repo, &id.to_string(), &ExecuteOptions::default().max_attempt
     async move |item: &mut AggregateRoot<Inventory>| {
         if item.version() == 0 { return Ok(AggregateDecision::Refused(NotFound)); }
         let e = item.check_in(count, price)?;       // &InventoryItem via Deref; DomainError via `?`
-        item.raise(e);
+        item.emit(e);
         Ok::<_, DomainError>(AggregateDecision::Done(Ok))
     }).await   // Err(ExecuteError::Decide(DomainError)) | Err(e) if e.is_concurrency()
-// create: item.raise(InventoryItem::create(id, &name)?)
+// create: item.emit(InventoryItem::create(id, &name)?)
 ```
+
+### E4 Restate starts (`redisevents-restate`, public)
+```rust
+RestateStartOptions::new(ingress: Url)          // pub fields: handler ("run"), max_parallelism: NonZeroUsize (8),
+                                                // max_attempts: NonZeroU32 (5), initial/max_retry_delay, attempt_timeout
+RestateStart::new(workflow, key)                // .with_input(&T) -> Result<Self, serde_json::Error>
+RestateStartHandler::new(Client, options, keep: Fn(&TypedMsg<T>) -> bool,
+                         map: Fn(&TypedMsg<T>) -> Result<RestateStart, BoxError>) -> Result<_, RestateConfigError>
+// a TypedBatchHandler<T>: wrap in `Typed`. Ok only when every kept start was accepted, else
+// Err(Block(RestateStartBlocked)); never Skip.
+```
+The ingress request is unchanged: `POST {ingress}/{workflow}/{key}/{handler}/send`, JSON body,
+`traceparent`, no `Idempotency-Key`; 2xx accepted, timeout / transport / 408 / 425 / 429 / 5xx
+retried in place with doubling delay, anything else fails the item and blocks the batch. There are
+no per-handler counters: observe through the `restate.start` debug span and the ingress itself.
 
 ## 5. Positions, ownership, admin, diagnostics
 

@@ -1,4 +1,4 @@
-//! Ports of `AggregateRootTests`, `ConcurrencyExceptionTests`, `CachedAggregateTests`,
+//! Tests of `AggregateRoot`, `ConcurrencyExceptionTests`, `CachedAggregateTests`,
 //! `EventRepositoryExtensionsTests` and `EventSourcingTracingTests` (no Redis needed).
 //!
 //! Skipped: `Raise_with_no_registered_handler_throws`, `Registering_the_same_event_type_twice_throws`,
@@ -67,11 +67,15 @@ impl Aggregate for Counter {
 }
 
 fn increment(root: &mut AggregateRoot<Counter>, by: i32) -> i32 {
-    root.raise(Incremented { by });
+    root.emit(Incremented { by });
     root.value
 }
 
 type Decision = Result<AggregateDecision<i32>, Infallible>;
+
+fn attempts(n: u32) -> std::num::NonZeroU32 {
+    std::num::NonZeroU32::new(n).unwrap()
+}
 
 fn done(value: i32) -> Decision {
     Ok(AggregateDecision::Done(value))
@@ -110,13 +114,13 @@ impl FakeRepository {
     fn append<A: Aggregate>(&self, root: &mut AggregateRoot<A>) -> u64 {
         let mut streams = self.streams.lock().unwrap();
         let history = streams.entry(root.id().to_owned()).or_default();
-        for event in root.uncommitted_changes() {
+        for event in root.pending() {
             let event = (event as &dyn Any)
                 .downcast_ref::<Incremented>()
                 .expect("the fake only stores counter events");
             history.push(event.clone());
         }
-        root.mark_changes_as_committed();
+        root.commit();
         root.version()
     }
 }
@@ -131,13 +135,15 @@ impl EventRepository for FakeRepository {
         let Some(history) = history else {
             return Ok(None);
         };
-        let mut root = AggregateRoot::<A>::new(id)?;
-        root.load_from_history(history.into_iter().map(|e| {
-            *(Box::new(e) as Box<dyn Any>)
-                .downcast::<A::Event>()
-                .expect("the fake only stores counter events")
-        }));
-        Ok(Some(root))
+        AggregateRoot::<A>::from_history(
+            id,
+            history.into_iter().map(|e| {
+                *(Box::new(e) as Box<dyn Any>)
+                    .downcast::<A::Event>()
+                    .expect("the fake only stores counter events")
+            }),
+        )
+        .map(Some)
     }
 
     async fn save<A: Aggregate>(
@@ -179,37 +185,37 @@ fn raise_applies_the_event_immediately_and_records_it_as_uncommitted() {
     increment(&mut counter, 3);
 
     assert_eq!(counter.value, 3);
-    assert_eq!(counter.uncommitted_changes(), [Incremented { by: 3 }]);
+    assert_eq!(counter.pending(), [Incremented { by: 3 }]);
 }
 
 #[test]
-fn load_from_history_applies_every_event_sets_version_and_adds_nothing_uncommitted() {
-    let mut counter = AggregateRoot::<Counter>::new(ID).unwrap();
-
-    counter.load_from_history([Incremented { by: 2 }, Incremented { by: 5 }]);
+fn from_history_applies_every_event_sets_version_and_leaves_nothing_pending() {
+    let counter =
+        AggregateRoot::<Counter>::from_history(ID, [Incremented { by: 2 }, Incremented { by: 5 }])
+            .unwrap();
 
     assert_eq!(counter.value, 7);
     assert_eq!(counter.version(), 2);
-    assert!(counter.uncommitted_changes().is_empty());
+    assert!(counter.pending().is_empty());
 }
 
 #[test]
-fn mark_changes_as_committed_advances_version_by_uncommitted_count_and_clears_them() {
+fn commit_advances_version_by_the_pending_count_and_clears_them() {
     let mut counter = AggregateRoot::<Counter>::new(ID).unwrap();
     increment(&mut counter, 1);
     increment(&mut counter, 1);
 
-    counter.mark_changes_as_committed();
+    counter.commit();
 
     assert_eq!(counter.version(), 2);
-    assert!(counter.uncommitted_changes().is_empty());
+    assert!(counter.pending().is_empty());
 }
 
 #[test]
 fn a_blank_id_is_rejected() {
     assert!(matches!(
         AggregateRoot::<Counter>::new("  "),
-        Err(Error::InvalidArgument(_))
+        Err(Error::BlankId)
     ));
 }
 
@@ -332,7 +338,7 @@ async fn a_lost_version_check_reloads_and_redecides_against_the_new_state() {
     let result = execute(
         &repository,
         ID,
-        &ExecuteOptions::default().max_attempts(3),
+        &ExecuteOptions::default().max_attempts(attempts(3)),
         async |c: &mut AggregateRoot<Counter>| {
             decisions += 1;
             done(increment(c, 1))
@@ -352,7 +358,7 @@ async fn exhausting_max_attempts_propagates_the_concurrency_error_and_calls_on_c
     let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
     let hook_seen = seen.clone();
     let options = ExecuteOptions::default()
-        .max_attempts(3)
+        .max_attempts(attempts(3))
         .on_conflict(move |attempt, _| {
             hook_seen.lock().unwrap().push(attempt);
             async {}
@@ -407,10 +413,10 @@ async fn a_refusal_after_raising_fails_and_saves_nothing() {
     .await
     .unwrap_err();
 
-    let ExecuteError::Repository(Error::InvalidOperation(message)) = err else {
-        panic!("expected InvalidOperation");
+    let ExecuteError::Repository(Error::RefusedAfterEmitting { emitted, .. }) = err else {
+        panic!("expected RefusedAfterEmitting");
     };
-    assert!(message.contains("refused a command after already raising 1 event"));
+    assert_eq!(emitted, 1);
     assert_eq!(repository.saves(), 0);
 }
 
@@ -422,7 +428,7 @@ async fn redo_reloads_and_decides_again_uncounted() {
     let result = execute(
         &repository,
         ID,
-        &ExecuteOptions::default().max_attempts(1),
+        &ExecuteOptions::default().max_attempts(attempts(1)),
         async |c: &mut AggregateRoot<Counter>| {
             calls += 1;
             if calls == 1 {
@@ -455,25 +461,6 @@ async fn without_a_concurrency_check_the_unchecked_save_is_used() {
     assert_eq!((result.value, result.version), (1, 1));
     assert_eq!(repository.unchecked(), 1);
     assert_eq!(repository.saves(), 0);
-}
-
-#[tokio::test]
-async fn max_attempts_below_one_is_rejected() {
-    let repository = FakeRepository::default();
-
-    let err = execute(
-        &repository,
-        ID,
-        &ExecuteOptions::default().max_attempts(0),
-        async |c: &mut AggregateRoot<Counter>| done(c.value),
-    )
-    .await
-    .unwrap_err();
-
-    assert!(matches!(
-        err,
-        ExecuteError::Repository(Error::InvalidArgument(_))
-    ));
 }
 
 #[tokio::test]
@@ -519,7 +506,7 @@ fn opts() -> ExecuteOptions {
 #[tokio::test]
 async fn first_run_loads_and_the_next_reuses_the_cached_instance() {
     let repository = FakeRepository::default();
-    let mut runner = CachedAggregate::<Counter>::new();
+    let runner = CachedAggregate::<Counter>::new();
 
     for _ in 0..2 {
         runner
@@ -539,7 +526,7 @@ async fn first_run_loads_and_the_next_reuses_the_cached_instance() {
 #[tokio::test]
 async fn a_cached_decision_that_raises_nothing_is_not_saved_but_is_still_cached() {
     let repository = FakeRepository::default();
-    let mut runner = CachedAggregate::<Counter>::new();
+    let runner = CachedAggregate::<Counter>::new();
 
     let result = runner
         .run(&repository, ID, &opts(), async |c, _| done(c.value))
@@ -558,12 +545,15 @@ async fn a_cached_decision_that_raises_nothing_is_not_saved_but_is_still_cached(
 #[tokio::test]
 async fn a_cached_lost_concurrency_check_reloads_and_redecides_against_the_new_state() {
     let repository = FakeRepository::conflicts(1);
-    let mut runner = CachedAggregate::<Counter>::new();
+    let runner = CachedAggregate::<Counter>::new();
 
     let result = runner
-        .run(&repository, ID, &opts().max_attempts(3), async |c, _| {
-            done(increment(c, 1))
-        })
+        .run(
+            &repository,
+            ID,
+            &opts().max_attempts(attempts(3)),
+            async |c, _| done(increment(c, 1)),
+        )
         .await
         .unwrap();
 
@@ -575,12 +565,15 @@ async fn a_cached_lost_concurrency_check_reloads_and_redecides_against_the_new_s
 #[tokio::test]
 async fn a_cached_run_exhausting_max_attempts_lets_the_concurrency_error_propagate() {
     let repository = FakeRepository::conflicts(i64::MAX);
-    let mut runner = CachedAggregate::<Counter>::new();
+    let runner = CachedAggregate::<Counter>::new();
 
     let err = runner
-        .run(&repository, ID, &opts().max_attempts(3), async |c, _| {
-            done(increment(c, 1))
-        })
+        .run(
+            &repository,
+            ID,
+            &opts().max_attempts(attempts(3)),
+            async |c, _| done(increment(c, 1)),
+        )
         .await
         .unwrap_err();
 
@@ -592,13 +585,15 @@ async fn a_cached_run_exhausting_max_attempts_lets_the_concurrency_error_propaga
 async fn on_conflict_runs_once_per_lost_attempt_with_its_one_based_number_and_not_on_the_final_loss()
  {
     let repository = FakeRepository::conflicts(i64::MAX);
-    let mut runner = CachedAggregate::<Counter>::new();
+    let runner = CachedAggregate::<Counter>::new();
     let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
     let hook_seen = seen.clone();
-    let options = opts().max_attempts(3).on_conflict(move |attempt, _| {
-        hook_seen.lock().unwrap().push(attempt);
-        async {}
-    });
+    let options = opts()
+        .max_attempts(attempts(3))
+        .on_conflict(move |attempt, _| {
+            hook_seen.lock().unwrap().push(attempt);
+            async {}
+        });
 
     let _ = runner
         .run(&repository, ID, &options, async |c, _| {
@@ -613,15 +608,18 @@ async fn on_conflict_runs_once_per_lost_attempt_with_its_one_based_number_and_no
 #[tokio::test]
 async fn a_failed_save_evicts_the_cache_so_the_next_run_reloads() {
     let repository = FakeRepository::conflicts(i64::MAX);
-    let mut runner = CachedAggregate::<Counter>::new();
+    let runner = CachedAggregate::<Counter>::new();
 
     runner
-        .run(&repository, ID, &opts().max_attempts(1), async |c, _| {
-            done(increment(c, 1))
-        })
+        .run(
+            &repository,
+            ID,
+            &opts().max_attempts(attempts(1)),
+            async |c, _| done(increment(c, 1)),
+        )
         .await
         .unwrap_err();
-    assert!(!runner.is_cached());
+    assert!(!runner.is_cached().await);
 
     repository.conflicts_to_force.store(0, Ordering::SeqCst);
     runner
@@ -639,7 +637,7 @@ async fn a_failed_save_evicts_the_cache_so_the_next_run_reloads() {
 #[tokio::test]
 async fn decide_failing_evicts_the_cache_rather_than_leaving_a_half_decided_instance() {
     let repository = FakeRepository::default();
-    let mut runner = CachedAggregate::<Counter>::new();
+    let runner = CachedAggregate::<Counter>::new();
 
     runner
         .run(&repository, ID, &opts(), async |c, _| {
@@ -663,18 +661,23 @@ async fn decide_failing_evicts_the_cache_rather_than_leaving_a_half_decided_inst
 #[tokio::test]
 async fn cached_redo_discards_the_instance_and_tries_again_uncounted() {
     let repository = FakeRepository::default();
-    let mut runner = CachedAggregate::<Counter>::new();
+    let runner = CachedAggregate::<Counter>::new();
     let mut calls = 0;
 
     let result = runner
-        .run(&repository, ID, &opts().max_attempts(1), async |c, _| {
-            calls += 1;
-            if calls == 1 {
-                Ok::<_, Infallible>(AggregateDecision::Redo)
-            } else {
-                done(increment(c, 1))
-            }
-        })
+        .run(
+            &repository,
+            ID,
+            &opts().max_attempts(attempts(1)),
+            async |c, _| {
+                calls += 1;
+                if calls == 1 {
+                    Ok::<_, Infallible>(AggregateDecision::Redo)
+                } else {
+                    done(increment(c, 1))
+                }
+            },
+        )
         .await
         .unwrap();
 
@@ -690,7 +693,7 @@ async fn cached_redo_discards_the_instance_and_tries_again_uncounted() {
 #[tokio::test]
 async fn decide_learns_whether_its_instance_came_from_the_cache() {
     let repository = FakeRepository::default();
-    let mut runner = CachedAggregate::<Counter>::new();
+    let runner = CachedAggregate::<Counter>::new();
     let mut seen = Vec::new();
 
     for _ in 0..2 {
@@ -709,7 +712,7 @@ async fn decide_learns_whether_its_instance_came_from_the_cache() {
 #[tokio::test]
 async fn without_an_expected_version_selector_the_save_defaults_to_the_aggregates_own_version() {
     let repository = FakeRepository::default();
-    let mut runner = CachedAggregate::<Counter>::new();
+    let runner = CachedAggregate::<Counter>::new();
 
     runner
         .run(&repository, ID, &opts(), async |c, _| done(increment(c, 1)))
@@ -722,7 +725,7 @@ async fn without_an_expected_version_selector_the_save_defaults_to_the_aggregate
 #[tokio::test]
 async fn an_expected_version_selector_overrides_the_aggregates_own_version() {
     let repository = FakeRepository::default();
-    let mut runner = CachedAggregate::<Counter>::new().with_expected_version(|_| 41);
+    let runner = CachedAggregate::<Counter>::new().with_expected_version(|_| 41);
 
     runner
         .run(&repository, ID, &opts(), async |c, _| done(increment(c, 1)))
@@ -733,27 +736,9 @@ async fn an_expected_version_selector_overrides_the_aggregates_own_version() {
 }
 
 #[tokio::test]
-async fn cached_max_attempts_below_one_is_rejected() {
-    let repository = FakeRepository::default();
-    let mut runner = CachedAggregate::<Counter>::new();
-
-    let err = runner
-        .run(&repository, ID, &opts().max_attempts(0), async |c, _| {
-            done(c.value)
-        })
-        .await
-        .unwrap_err();
-
-    assert!(matches!(
-        err,
-        ExecuteError::Repository(Error::InvalidArgument(_))
-    ));
-}
-
-#[tokio::test]
 async fn without_a_concurrency_check_a_conflict_cannot_happen_and_the_instance_stays_cached() {
     let repository = FakeRepository::conflicts(i64::MAX);
-    let mut runner = CachedAggregate::<Counter>::new();
+    let runner = CachedAggregate::<Counter>::new();
     let options = opts().concurrency_check(false);
 
     runner
@@ -781,7 +766,7 @@ async fn without_a_concurrency_check_a_conflict_cannot_happen_and_the_instance_s
 #[tokio::test]
 async fn cached_aggregate_applies_the_same_refusal_guard_and_drops_the_instance() {
     let repository = FakeRepository::default();
-    let mut runner = CachedAggregate::<Counter>::new();
+    let runner = CachedAggregate::<Counter>::new();
 
     let err = runner
         .run(&repository, ID, &opts(), async |c, _| {
@@ -792,7 +777,7 @@ async fn cached_aggregate_applies_the_same_refusal_guard_and_drops_the_instance(
         .unwrap_err();
     assert!(matches!(
         err,
-        ExecuteError::Repository(Error::InvalidOperation(_))
+        ExecuteError::Repository(Error::RefusedAfterEmitting { .. })
     ));
 
     runner
@@ -811,7 +796,7 @@ async fn cached_aggregate_applies_the_same_refusal_guard_and_drops_the_instance(
 async fn the_cached_futures_are_send() {
     let repository = std::sync::Arc::new(FakeRepository::default());
     let handle = tokio::spawn(async move {
-        let mut runner = CachedAggregate::<Counter>::new();
+        let runner = CachedAggregate::<Counter>::new();
         runner
             .run(
                 &*repository,
@@ -951,11 +936,7 @@ async fn save_that_loses_its_version_check_marks_the_span_as_a_conflict() {
         .unwrap_err();
 
     assert!(err.as_concurrency().is_some());
-    assert_eq!(
-        aggregate.uncommitted_changes().len(),
-        1,
-        "nothing was committed"
-    );
+    assert_eq!(aggregate.pending().len(), 1, "nothing was committed");
     let spans = spans_for(&rig, &id);
     assert_eq!(spans.len(), 1);
     assert_eq!(spans[0].field("otel.status_code"), Some("ERROR"));
