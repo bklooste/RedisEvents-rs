@@ -130,6 +130,23 @@ internal static class Cli
                 cfg["Streams:Consumers:0:UnhealthyStalledSeconds"] = stall;
                 cfg["Streams:Consumers:0:ShutdownTimeoutSeconds"] = "1";
             }
+            if (a.Opt("batch-size") is { } batchSize) cfg["Streams:Consumers:0:BatchSize"] = batchSize;
+            // The work-queue scenarios: XREADGROUP competing consumers. Static ownership so every
+            // instance reads (and competes on) every partition; the group member is POD_NAME.
+            if (a.Opt("delivery") is { } delivery)
+            {
+                switch (delivery)
+                {
+                    case "ordered":
+                        break;
+                    case "work_queue":
+                        cfg["Streams:Consumers:0:Delivery"] = "WorkQueue";
+                        cfg["Streams:Consumers:0:Instances:Mode"] = "Static";
+                        break;
+                    default:
+                        throw new CliException($"--delivery must be ordered or work_queue, got '{delivery}'");
+                }
+            }
         }
         b.Configuration.AddInMemoryCollection(cfg);
         return b;
@@ -236,7 +253,15 @@ internal static class Cli
             return 3;
         }
 
+        // --delivery work_queue needs a RedisEvents with the Delivery enum (0.2.26+).
+        if (a.Opt("delivery") == "work_queue" && typeof(ConsumerOptions).GetProperty("Delivery") is null)
+        {
+            Emit(new() { ["event"] = "not_implemented", ["what"] = "ConsumerOptions.Delivery" });
+            return 3;
+        }
+
         var wedge = a.Flag("wedge");
+        var delayMs = a.Int("delay-ms", 0);
         var builder = NewBuilder(a, topic, a.Int("partitions", 1), consumer);
         builder.AddStream(topic, (batch, _) =>
         {
@@ -268,7 +293,8 @@ internal static class Cli
                 });
                 if (Interlocked.Increment(ref seen) >= expect && expect > 0) reached.TrySetResult();
             }
-            return ValueTask.CompletedTask;
+            // Simulated work per batch, after printing it.
+            return delayMs > 0 ? new ValueTask(Task.Delay(delayMs)) : ValueTask.CompletedTask;
         });
 
         using var host = builder.Build();

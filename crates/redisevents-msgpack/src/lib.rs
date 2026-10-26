@@ -27,7 +27,7 @@
 //! # Ok(()) }
 //! ```
 //!
-//! Wire rules (`wire-spec/WIRE.md` section 11):
+//! Wire rules (`wire-spec/WIRE.md` section 12):
 //! - Structs are MessagePack arrays by default (what .NET `[Key(int)]` types write);
 //!   [`Layout::Map`] gives the map form (`[Key("name")]`).
 //! - A body whose uncompressed encoding exceeds the threshold (default 1024 bytes) is written as

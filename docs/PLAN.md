@@ -1,6 +1,6 @@
 # Plan: RedisEvents for Rust (`bklooste/RedisEvents-rs`)
 
-Status: all work packages done except the deferred C6; 0.2 prepared for release (F3; published by CI, see docs/PUBLISHING.md), 2026-10-25. Source of truth for the port is this repo at `f34c43a`.
+Status: all work packages done (C6, work-queue delivery, landed after 0.4.0); 0.2 prepared for release (F3; published by CI, see docs/PUBLISHING.md), 2026-10-25. Source of truth for the port is this repo at `f34c43a`.
 
 ## 1. Goal
 
@@ -362,7 +362,7 @@ behavioural spec.
 | F1 | Benchmarks & perf ✅ **done** | criterion mirrors of `StreamsMicroBenchmarks` / `PerfBenchmarkTests` | perf suites | C4, B2 | L | 4 | Finding and fixing bottlenecks needs profiling judgment, not porting. | Opus/med |
 | F2 | Docs & compiled samples ✅ **done** | README samples as doctests (mirrors `ReadmeSamples` 298/5), core crate docs. Each package WP (E1–E4) writes its own crate docs. | — | C4 | M | 1 | Writing over a finished API. | Haiku |
 | F3 | Release ✅ **done** | `cargo-semver-checks`, crates.io metadata, `publish = true` | — | D3, E1, E3, E4, F1, F2 (not E5: the sample is not published) | S | 1 | Checklist. | Haiku |
-| C6 | Work-queue fetch (**deferred**) | `WorkQueueFetch` 310 | work-queue cases | C2 | M | 4 | `XREADGROUP` claim and redelivery rules. | Opus/med |
+| C6 | Work-queue fetch (**done**) | `WorkQueueFetch` 310 | work-queue cases | C2 | M | 4 | `XREADGROUP` claim and redelivery rules. | Opus/med |
 
 **Not ported (proposed):** `RedisEvents/Compat/*` (155 lines), an EventHubs migration shim for .NET
 apps with no Rust audience. `RedisEvents.Tracing`'s StackExchange.Redis profiling hook has no

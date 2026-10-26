@@ -19,7 +19,7 @@ use crate::connection::Connection;
 use crate::error::{Error, Result};
 use crate::wire::{Keys, StreamId};
 
-/// .NET `"O"`: seven fractional digits and a numeric offset (`WIRE.md` §9).
+/// .NET `"O"`: seven fractional digits and a numeric offset (`WIRE.md` §10).
 const O_FORMAT: &[FormatItem<'static>] = format_description!(
     "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:7][offset_hour sign:mandatory]:[offset_minute]"
 );

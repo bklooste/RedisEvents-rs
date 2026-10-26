@@ -5,6 +5,25 @@ and the crates follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added: work-queue delivery (`delivery = "work_queue"`, C6)
+
+Additive (0.4.x): no existing item changes shape.
+
+- `delivery = "work_queue"` now runs instead of being refused at startup: competing consumers over a
+  Redis consumer group per partition stream (group = consumer name, member = pod name, else the host
+  name), `XACK` after each handled batch (success, `best_effort` skip, filtered; never on `Block`,
+  `stop_partition` or `fail`), and `XAUTOCLAIM` recovery of entries another member left idle for
+  30 s. Per-key order is not preserved in this mode. See the README, "Work-queue delivery".
+- `config::WorkQueueOptions` (claim threshold, claim interval, member name) and
+  `ConsumerBuilder::work_queue`. The defaults are the C# library's.
+- Wire: `WIRE.md` §9 documents the consumer-group contract, so C# and Rust members can share one
+  group (former §9–§12 are now §10–§13). The interop runner gains `work_queue_competing_consumers`
+  and `work_queue_dead_member_claimed`; both hosts gain `consume --delivery work_queue
+  [--batch-size N] [--delay-ms MS]`.
+- Beyond C#, on the Rust side only (nothing extra on the wire): blocking `XREADGROUP` on the
+  reader connection in `read_mode = block` (C# always polls), a restarted member re-reads its own
+  pending entries at once, a claim sweep also runs under load, and a failed `XACK` is retried.
+
 ### Added: a stalled Lease owner hands its partitions on (port of C# RedisEvents#52)
 
 Released as 0.4: `ConsumerOptions` gains a public field, which breaks exhaustive struct literals

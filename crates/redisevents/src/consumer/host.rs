@@ -39,7 +39,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::admin::health::{self, StreamHealthReport};
-use crate::config::{ConsumerOptions, StreamOptions, TopicOptions};
+use crate::config::{ConsumerOptions, StreamOptions, TopicOptions, WorkQueueOptions};
 use crate::connection::Connection;
 use crate::consumer::handler::BatchHandler;
 use crate::error::Result;
@@ -80,6 +80,7 @@ pub(crate) struct Registration {
     pub(crate) options: ConsumerOptions,
     pub(crate) store: Option<Arc<dyn StoreDyn>>,
     pub(crate) instance_id: Option<uuid::Uuid>,
+    pub(crate) work_queue: WorkQueueOptions,
     pub(crate) runner: Arc<dyn RunnerFactory>,
 }
 
@@ -141,6 +142,7 @@ impl StreamsBuilder {
             options,
             store: None,
             instance_id: None,
+            work_queue: WorkQueueOptions::default(),
         }
     }
 
@@ -148,7 +150,7 @@ impl StreamsBuilder {
     ///
     /// # Errors
     /// [`Error::Config`](crate::Error::Config) for invalid options, a partition shrink, an unknown
-    /// codec version, a server without `HEXPIRE`, or `Delivery = WorkQueue` (not supported yet);
+    /// codec version, or a server without `HEXPIRE`;
     /// [`Error::Redis`](crate::Error::Redis) / [`Error::Transport`](crate::Error::Transport) when
     /// Redis fails during startup.
     pub async fn spawn(self) -> Result<StreamsHost> {
@@ -163,6 +165,7 @@ pub struct ConsumerBuilder {
     options: ConsumerOptions,
     store: Option<Arc<dyn StoreDyn>>,
     instance_id: Option<uuid::Uuid>,
+    work_queue: WorkQueueOptions,
 }
 
 impl ConsumerBuilder {
@@ -215,6 +218,15 @@ impl ConsumerBuilder {
         self
     }
 
+    /// Tuning for `delivery = work_queue` (claim threshold, member name); ignored for ordered
+    /// delivery. The defaults match the C# library and should stay that way in a group shared
+    /// with C# consumers.
+    #[must_use]
+    pub fn work_queue(mut self, options: WorkQueueOptions) -> Self {
+        self.work_queue = options;
+        self
+    }
+
     /// Completes the registration with a batch handler. Every other handler shape is an adapter
     /// onto this ([`PerMessage`](crate::consumer::PerMessage), [`Typed`](crate::consumer::Typed),
     /// C4b's closures).
@@ -225,11 +237,13 @@ impl ConsumerBuilder {
             options,
             store,
             instance_id,
+            work_queue,
         } = self;
         parent.registrations.push(Registration {
             options,
             store,
             instance_id,
+            work_queue,
             runner: Arc::new(HandlerRunner::new(handler)),
         });
         parent

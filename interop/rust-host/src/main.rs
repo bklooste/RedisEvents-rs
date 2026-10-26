@@ -20,7 +20,8 @@ use clap::{Parser, Subcommand};
 use redisevents::Connection;
 use redisevents::admin::stream_admin::{ResetOptions, ResetTarget, StreamAdmin};
 use redisevents::config::{
-    ConsumerOptions, InstanceMode, InstanceOptions, ProducerOptions, StreamOptions, TopicOptions,
+    ConsumerOptions, DeliveryMode, InstanceMode, InstanceOptions, ProducerOptions, StreamOptions,
+    TopicOptions,
 };
 use redisevents::consumer::Streams;
 use redisevents::producer::{
@@ -99,6 +100,29 @@ struct StallArgs {
     wedge: bool,
 }
 
+/// The work-queue scenarios' knobs on `consume`.
+#[derive(clap::Args, Clone, Copy, Default)]
+struct DeliveryArgs {
+    /// `ordered` (default) or `work_queue` (`XREADGROUP`; also selects static ownership so every
+    /// instance competes on every partition). The member name is `POD_NAME`, as in C#.
+    #[arg(long, value_enum, default_value_t = Delivery::Ordered)]
+    delivery: Delivery,
+    /// `batch_size`.
+    #[arg(long)]
+    batch_size: Option<u32>,
+    /// The handler sleeps this long per batch, after printing it (simulated work).
+    #[arg(long, default_value_t = 0)]
+    delay_ms: u64,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Default, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+enum Delivery {
+    #[default]
+    Ordered,
+    WorkQueue,
+}
+
 #[derive(Subcommand)]
 enum Verb {
     /// Publish messages to a topic.
@@ -118,6 +142,8 @@ enum Verb {
         timeout: u32,
         #[command(flatten)]
         stall: StallArgs,
+        #[command(flatten)]
+        delivery: DeliveryArgs,
     },
     /// Print the stored positions of a consumer.
     Positions {
@@ -170,14 +196,15 @@ fn main() -> ExitCode {
             expect,
             timeout,
             stall,
+            delivery,
         } => run_consume(
             redis,
             topic,
             consumer,
             *partitions,
-            *expect,
-            *timeout,
+            (*expect, *timeout),
             *stall,
+            *delivery,
         ),
         Verb::Positions { topic, consumer } => run_positions(redis, topic, consumer),
     }
@@ -410,6 +437,7 @@ fn run_admin_reset(
 /// Prints one JSON line per delivered message, and signals when `expect` were seen.
 struct Emitter {
     wedge: bool,
+    delay: Duration,
     seen: AtomicU32,
     expect: u32,
     reached: Notify,
@@ -427,6 +455,16 @@ impl BatchHandler for Emitter {
             }
             std::future::pending::<()>().await;
         }
+        self.emit(batch);
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        Ok(())
+    }
+}
+
+impl Emitter {
+    fn emit(&self, batch: &[StreamMsg]) {
         let mut out = std::io::stdout().lock();
         for m in batch {
             let headers: Vec<[String; 2]> = m
@@ -454,7 +492,6 @@ impl BatchHandler for Emitter {
             }
         }
         let _ = out.flush();
-        Ok(())
     }
 }
 
@@ -465,13 +502,14 @@ fn run_consume(
     topic: &str,
     consumer: &str,
     partitions: u32,
-    expect: u32,
-    timeout: u32,
+    (expect, timeout): (u32, u32),
     stall: StallArgs,
+    delivery: DeliveryArgs,
 ) -> ExitCode {
     let url = redis_url(redis);
     let emitter = Arc::new(Emitter {
         wedge: stall.wedge,
+        delay: Duration::from_millis(delivery.delay_ms),
         seen: AtomicU32::new(0),
         expect,
         reached: Notify::new(),
@@ -505,6 +543,16 @@ fn run_consume(
         if let Some(seconds) = stall.stall_seconds {
             consumer_options.unhealthy_stalled_seconds = seconds;
             consumer_options.shutdown_timeout_seconds = 1;
+        }
+        if let Some(n) = delivery.batch_size {
+            consumer_options.batch_size = n;
+        }
+        if delivery.delivery == Delivery::WorkQueue {
+            consumer_options.delivery = DeliveryMode::WorkQueue;
+            consumer_options.instances = Some(InstanceOptions {
+                mode: InstanceMode::Static,
+                ..InstanceOptions::default()
+            });
         }
         options.consumers.push(consumer_options);
         let host = Streams::builder(conn)

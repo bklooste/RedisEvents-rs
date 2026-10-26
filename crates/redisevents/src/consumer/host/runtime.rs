@@ -20,18 +20,20 @@ use tokio_util::sync::CancellationToken;
 
 use super::Registration;
 use super::StreamsHost;
-use super::erased::{FlusherDyn, RunnerFactory, StoreDyn, StoreHolder, WorkerRun};
+use super::erased::{FlusherDyn, ReadSource, RunnerFactory, StoreDyn, StoreHolder, WorkerRun};
 use crate::admin::health;
 use crate::admin::health::monitor::{self, PartitionMonitor, StreamLagSampler, Thresholds};
 use crate::admin::meta::ensure_topic_meta;
 use crate::config::instance::InstanceIdentity;
 use crate::config::{
-    ConsumerOptions, DeliveryMode, InstanceMode, PersistMode, ReadMode, StreamOptions, TopicOptions,
+    ConsumerOptions, DeliveryMode, InstanceMode, PersistMode, ReadMode, StreamOptions,
+    TopicOptions, WorkQueueOptions,
 };
 use crate::connection::Connection;
 use crate::consumer::fetch::{Fetch, ReaderConnection, StreamStart};
 use crate::consumer::shared::{BoxFuture, NoPositions, PartitionStop, PositionSink, ResetSignal};
 use crate::consumer::trimmer::{BackgroundTrimmer, StartedTrimmer};
+use crate::consumer::work_queue::{self, GroupSettings, WorkQueueFetch};
 use crate::consumer::worker::{PartitionSlot, WorkerConfig, WorkerError, block_delay};
 use crate::diagnostics::names;
 use crate::error::{Error, Result};
@@ -260,6 +262,7 @@ async fn start_consumer(
         options: consumer,
         store,
         instance_id,
+        work_queue,
         runner,
     } = registration;
     let name = options.consumer_name(&consumer);
@@ -274,12 +277,7 @@ async fn start_consumer(
             "Streams: consumer '{name}' is registered twice on topic '{topic}'. One host runs one handler per (topic, consumer)."
         )));
     }
-    if consumer.delivery == DeliveryMode::WorkQueue {
-        return Err(Error::config(format!(
-            "Streams: consumer '{name}' on topic '{topic}' has delivery = work_queue, which this version does not support yet. \
-             Use delivery = ordered."
-        )));
-    }
+    let group_mode = consumer.delivery == DeliveryMode::WorkQueue;
 
     let topic_options = options.topic(&topic);
     // Creates the topic when new, refuses a shrink and an unknown codec version.
@@ -304,7 +302,9 @@ async fn start_consumer(
         identity.owned(partitions).iter().collect()
     };
 
-    let use_positions = consumer.persist != PersistMode::None;
+    // Work queue: Redis owns the cursor (the group) and the PEL, so the position store is bypassed
+    // entirely and an XACK per handled batch takes its place (C#).
+    let use_positions = !group_mode && consumer.persist != PersistMode::None;
     let instance_options = consumer.instances.clone().unwrap_or_default();
     let instance_id = instance_id.unwrap_or_else(crate::ownership::stable_instance_id);
     let store: Arc<dyn StoreDyn> = store.unwrap_or_else(|| {
@@ -336,9 +336,22 @@ async fn start_consumer(
             identity.describe_ownership(partitions)
         },
         read_mode = ?consumer.read_mode, persist = ?consumer.persist, batch_size = consumer.batch_size,
-        backpressure = consumer.backpressure.enabled,
+        backpressure = consumer.backpressure.enabled, delivery = ?consumer.delivery,
         "Streams: starting consumer."
     );
+    let work_queue = group_mode.then(|| {
+        let member = work_queue::member_name(
+            work_queue.member_name.as_deref(),
+            identity.pod_name.as_deref(),
+        );
+        tracing::info!(
+            consumer = %name, topic = %topic, group = %name, member = %member,
+            claim_min_idle_ms = work_queue.claim_min_idle_ms,
+            "Streams: delivery = work_queue: reading with XREADGROUP as a member of consumer group '{name}'. Per-key \
+             order is not preserved in this mode."
+        );
+        (work_queue, member)
+    });
 
     let state = Arc::new(ConsumerState {
         topic: topic.clone(),
@@ -409,6 +422,7 @@ async fn start_consumer(
             runner,
             store,
             readers,
+            work_queue,
             held: registry.as_ref().map(OwnershipRegistry::subscribe),
             events: events_tx,
         }),
@@ -473,6 +487,8 @@ struct Ctx {
     runner: Arc<dyn RunnerFactory>,
     store: Arc<dyn StoreDyn>,
     readers: Vec<ReaderConnection>,
+    /// `delivery = work_queue`: the options and this instance's member name.
+    work_queue: Option<(WorkQueueOptions, String)>,
     /// The registry's held set (the flusher writes only these).
     held: Option<watch::Receiver<Arc<[u32]>>>,
     events: mpsc::UnboundedSender<Event>,
@@ -618,6 +634,9 @@ impl Ctx {
         if owned.is_empty() {
             return Ok(generation);
         }
+        if let Some((wq, member)) = &self.work_queue {
+            return self.start_group_generation(generation, wq, member).await;
+        }
         let topic = self.topic().to_owned();
         let use_positions = self.options.persist != PersistMode::None;
 
@@ -712,7 +731,7 @@ impl Ctx {
                 let run = self.runner.worker(
                     cfg,
                     slots,
-                    fetch,
+                    ReadSource::Stream(fetch),
                     sink.clone(),
                     generation.resets.clone(),
                 )?;
@@ -736,6 +755,127 @@ impl Ctx {
         tracing::debug!(
             topic = %topic, consumer = %self.name, generation = number, ?owned,
             "Streams: read side started."
+        );
+        Ok(generation)
+    }
+
+    /// The work-queue read side: per partition, its group created (idempotently) at the resolved
+    /// start; one worker per read loop over a [`WorkQueueFetch`], acknowledging through its
+    /// [`GroupAcker`](work_queue::GroupAcker). No position store, no flusher, no reset markers.
+    #[allow(clippy::too_many_lines)] // one sequence, as start_generation
+    async fn start_group_generation(
+        self: &Arc<Self>,
+        mut generation: Generation,
+        wq: &WorkQueueOptions,
+        member: &str,
+    ) -> Result<Generation> {
+        let topic = self.topic().to_owned();
+        let co_locate = self.topic_options.co_locate_partitions;
+        // C# resolves the start with no stored position: the group's cursor is authoritative once
+        // it exists, and this is only where it is created.
+        let start = StartPosition::resolve(&self.options, None)?;
+        let mut streams: Vec<(u32, String)> = Vec::with_capacity(generation.owned.len());
+        for &partition in &generation.owned {
+            let key = self.keys.stream(&topic, partition, co_locate);
+            let from = match start {
+                StartPosition::After(id) => id,
+                StartPosition::Now => resolve_now(&self.conn, &key).await?,
+            };
+            // Members share a partition, so "this partition is behind / silent" says nothing about
+            // this instance (C# zeroes both rules in group mode).
+            let thresholds = Thresholds {
+                unhealthy_behind_seconds: 0,
+                degraded_silence_seconds: 0,
+                ..self.thresholds()
+            };
+            let monitor = monitor::track(&topic, &self.name, partition, &key, thresholds, from)?;
+            generation.monitors.insert(partition, monitor);
+            streams.push((partition, key));
+        }
+        let groups: Vec<Vec<(u32, String)>> = if co_locate && streams.len() > 1 {
+            vec![streams]
+        } else {
+            streams.into_iter().map(|s| vec![s]).collect()
+        };
+        let token = CancellationToken::new();
+        let mut runs: Vec<(Vec<u32>, WorkerRun)> = Vec::with_capacity(groups.len());
+        let mut built: Result<()> = Ok(());
+        for (i, group) in groups.into_iter().enumerate() {
+            let partitions: Vec<u32> = group.iter().map(|s| s.0).collect();
+            let settings = GroupSettings::new(
+                self.name.clone(),
+                member.to_owned(),
+                start,
+                self.options.batch_size,
+                self.codec_version,
+                self.options.max_idle_delay_ms,
+                wq,
+            );
+            let fetch = match self.options.read_mode {
+                ReadMode::Block => WorkQueueFetch::block(
+                    &self.conn,
+                    self.readers[i % self.readers.len()].clone(),
+                    group,
+                    settings,
+                ),
+                ReadMode::Poll => WorkQueueFetch::poll(&self.conn, group, settings),
+            };
+            let mut fetch = match fetch {
+                Ok(f) => f,
+                Err(e) => {
+                    built = Err(e);
+                    break;
+                }
+            };
+            if let Err(e) = fetch.ensure_groups().await {
+                built = Err(e);
+                break;
+            }
+            let sink: Arc<dyn PositionSink> = Arc::new(MonitoredSink {
+                inner: fetch.acker(),
+                monitors: generation
+                    .monitors
+                    .iter()
+                    .filter(|(p, _)| partitions.contains(p))
+                    .map(|(p, m)| (*p, m.clone()))
+                    .collect(),
+            });
+            let mut slots = Vec::with_capacity(partitions.len());
+            for &p in &partitions {
+                let stop = PartitionStop::new(&token);
+                generation.stops.insert(p, stop.clone());
+                slots.push(PartitionSlot::new(p, stop));
+            }
+            let mut cfg = WorkerConfig::from_options(&self.options, &self.name);
+            // XACK is this mode's position write, after every handled batch (C#: SyncBatch).
+            cfg.persist = PersistMode::SyncBatch;
+            match self
+                .runner
+                .worker(cfg, slots, ReadSource::Group(fetch), sink, None)
+            {
+                Ok(run) => runs.push((partitions, run)),
+                Err(e) => {
+                    built = Err(e);
+                    break;
+                }
+            }
+        }
+        if let Err(e) = built {
+            drop(runs);
+            self.stop_generation(generation, false).await;
+            return Err(e);
+        }
+        for monitor in generation.monitors.values() {
+            monitor.mark_running();
+        }
+        for (partitions, run) in runs {
+            generation
+                .workers
+                .spawn(async move { (partitions, run.await) });
+        }
+        tracing::debug!(
+            topic = %topic, consumer = %self.name, member, generation = generation.number,
+            owned = ?generation.owned, "Streams: work-queue read side started."
         );
         Ok(generation)
     }

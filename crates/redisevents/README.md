@@ -399,7 +399,7 @@ async fn run() -> redisevents::Result<()> {
 | `consumers[n].start_from` | `stored` | `stored` falls back to `start_from_when_missing`, then `beginning`. `date` needs `start_from_date` |
 | `consumers[n].reset_on_start` | `false` | Refused at startup. Use `StreamAdmin::reset_position` instead |
 | `consumers[n].backpressure.capacity` | `4` | Batches in flight per partition |
-| `consumers[n].delivery` | `ordered` | `work_queue` is refused at startup in this version (see below) |
+| `consumers[n].delivery` | `ordered` | `work_queue` gives up per-key order, see [Work-queue delivery](#work-queue-delivery) |
 | `consumers[n].instances.mode` | `lease` | `static` needs an index and count, see [Ownership](#ownership-lease-and-static) |
 | `consumers[n].instances.pod_name` | `POD_NAME` | Only used for the `StatefulSet` ordinal and in logs |
 | `consumers[n].unhealthy_behind_seconds` | `0` (off) | Health: the only threshold safe to restart on |
@@ -863,8 +863,90 @@ which on a lone instance is the partition itself. Health reports the partition U
 `Stalled`) until this instance reads it again or restarts. Under `Static` there is no lease to hand
 on: the partition is only graded Unhealthy, and the orchestrator's restart moves it.
 
-`Delivery: WorkQueue` (competing consumers over `XREADGROUP`) is refused at startup in this version.
-The default, `Ordered`, is one owner per partition, in order.
+The default, `delivery = ordered`, is one owner per partition, in order. `work_queue` (below) is
+competing consumers instead.
+
+---
+
+## Work-queue delivery
+
+`delivery = "work_queue"` reads with Redis consumer groups (`XREADGROUP`): every instance of a
+consumer is a member of one group, and each entry goes to whichever member asks first.
+
+```rust,no_run
+# use redisevents::config::{DeliveryMode, InstanceMode, InstanceOptions, WorkQueueOptions};
+# use redisevents::consumer::{BatchHandler, HandleResult, PartitionContext, Streams};
+# use redisevents::StreamMsg;
+# struct SendEmail;
+# impl BatchHandler for SendEmail {
+#     async fn handle_batch(&self, _: &[StreamMsg], _: &PartitionContext) -> HandleResult { Ok(()) }
+# }
+# async fn run(conn: redisevents::Connection) -> redisevents::Result<()> {
+let host = Streams::builder(conn)
+    .topic("emails")
+    .consumer("mailer")
+    .configure(|o| {
+        o.delivery = DeliveryMode::WorkQueue;
+        // Every instance reads every partition, so they compete on all of them.
+        o.instances = Some(InstanceOptions { mode: InstanceMode::Static, ..Default::default() });
+    })
+    // Optional: the defaults match C#. Keep them in a group shared with C# members.
+    .work_queue(WorkQueueOptions::new())
+    .handler(SendEmail)
+    .spawn()
+    .await?;
+# host.shutdown().await
+# }
+```
+
+**When to use it.** Order-independent commands that may be rejected and retried, where an item must
+survive the instance working on it dying and be picked up by a sibling: sending email, calling a
+webhook, rendering a file. **Never for a projection or read model**: applying two events of one key
+out of order corrupts it silently.
+
+| | `ordered` (default) | `work_queue` |
+| --- | --- | --- |
+| Reads with | `XREAD` | `XREADGROUP` |
+| Readers per partition | one owner | every member competes (with `instances.mode = static`) |
+| Per-key order | preserved | **lost**: two members interleave a key's entries |
+| Cursor | `p:{topic}:{consumer}`, ours | the group's last-delivered id and pending list, Redis's |
+| Cost per batch | one coalesced `HSET` per flush interval | one `XACK` round trip, plus Redis's per-entry bookkeeping |
+| A pod dies mid-batch | the next owner re-reads from the last flushed position | a sibling claims its entries (`XAUTOCLAIM`) after 30 s idle |
+
+**Ownership still applies.** Under the `lease` default each partition is held by one instance, so
+members only compete through recovery. Set `instances.mode = static` (one instance count, the
+default) to have every instance read every partition, as C# requires too.
+
+**At-least-once, and redelivery.**
+
+- An entry is acknowledged (`XACK`) only after its batch was handled: on success, on a `best_effort`
+  skip, and when the type filter dropped it. Exactly where an ordered consumer would record its
+  position.
+- `Block` keeps the entry pending and retries it in this instance with the usual back-off.
+  `stop_partition`, `fail`, a lost partition and a shutdown that interrupts a batch leave entries
+  pending as well.
+- Pending entries come back in two ways. A restarted member (same name, see below) re-reads its own
+  pending entries first. Entries of a member that does not come back are claimed by a live member
+  once they have been idle for `claim_min_idle_ms` (default 30 000), in sweeps of up to 100.
+- So a handler can see an entry twice: after a crash, after a failed `XACK`, or when a handler takes
+  longer than the threshold (a sibling then claims it as dead). Make handlers idempotent, and keep
+  a batch well under 30 s, including `Block` retries.
+- There is no delivery-count limit or dead-letter step: an entry that always fails under
+  `stop_partition` stays pending.
+
+**Member names.** A member is named by `WorkQueueOptions::member`, else the pod name
+(`instances.pod_name`, else `POD_NAME`), else the host name. Give each instance a stable, unique
+name: a stable one finds its own pending entries again after a restart; two live instances with one
+name share a pending list.
+
+**No positions.** Nothing is written to `p:{topic}:{consumer}`, `persist` is ignored (each batch is
+acknowledged synchronously), and `StreamAdmin::reset_position` does not move a group. To move one,
+stop the consumers and run `XGROUP SETID s:{topic}:<p> <consumer> <id>`. `start_from` is used only
+when the group is created; once it exists its cursor wins.
+
+**Mixed C# and Rust groups** work: both sides use the same group name, the same claim threshold and
+the same ack rule (`wire-spec/WIRE.md` section 9). The C# library always polls; Rust blocks in
+`read_mode = block` (the default) and polls in `read_mode = poll`.
 
 ---
 
@@ -1028,7 +1110,6 @@ Dropping a publish future before it resolves leaves it unknown whether the entry
 
 - **Cluster.** `Connection` wraps a single node. Hash tags are written so that a cluster port needs
   no key changes, but the transport is not there yet.
-- **`Delivery: WorkQueue`.** Refused at startup. It is planned, behind the `XREADGROUP` work.
 - **The outbox's `conditions`.** The C# outbox takes conditions and returns `null` on a failed one.
   The Rust `Outbox` does not have them. Use `StreamStore::append_and_publish` for version checks.
 - **Host-managed DI.** Build the `Connection` yourself (`Connection::from_options` does the
