@@ -1,16 +1,19 @@
 //! [`Keys`], the Redis key layout (`WIRE.md` §1–2). **API: W0.2. Bodies: A1** (port of
 //! `Config/KeyNamespace.cs` and `Wire/StreamKeys.cs`).
 //!
-//! Unlike C#, the prefix is a value rather than a process-wide static: [`Keys::from_env`] resolves it
-//! by the Rust rule (which differs from C# when nothing is configured), and tests use [`Keys::with_prefix`] instead of setting environment variables.
+//! The prefix is the fixed `re:`, or `STREAMS_KEY_PREFIX` verbatim, the same rule as C#. The library
+//! knows nothing about environments: topic and consumer names are opaque, and they are the only
+//! isolation. An application running several environments on one Redis composes them itself (topic
+//! `np.mult_feed_events`, consumers `dev.my-service` / `tst.my-service`).
+//!
+//! Unlike C#, the prefix is a value rather than a process-wide static: [`Keys::from_env`] reads the
+//! override, and tests use [`Keys::with_prefix`] instead of setting environment variables.
 
 use std::sync::Arc;
 
 const OVERRIDE_VARIABLE: &str = "STREAMS_KEY_PREFIX";
-const ENVIRONMENT_VARIABLE: &str = "STREAMS_ENVIRONMENT";
-/// Used when neither variable is set. Deliberately not `production`; C# defaults to `production`.
-const DEFAULT_ENVIRONMENT: &str = "local";
-const MARKER: &str = "re";
+/// The prefix when `STREAMS_KEY_PREFIX` is unset or blank; the same as C#.
+const DEFAULT_PREFIX: &str = "re:";
 
 /// Builds every key the library touches, under one prefix. Cheap to clone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -19,42 +22,23 @@ pub struct Keys {
 }
 
 impl Keys {
-    /// The prefix from the environment: `STREAMS_KEY_PREFIX` verbatim when set and not blank;
-    /// otherwise `"<env>:re:"` with `<env>` the lowercased `STREAMS_ENVIRONMENT`; otherwise
-    /// `"local:re:"`. `ASPNETCORE_ENVIRONMENT` and `DOTNET_ENVIRONMENT` are never read, and there
-    /// is no `production` default (C# has both), so a cross-language deployment must set
-    /// `STREAMS_KEY_PREFIX` on both sides. Logs the result at info, and the fallback with the
-    /// variable names.
+    /// The prefix from the environment: `STREAMS_KEY_PREFIX` verbatim when set and not blank,
+    /// otherwise the fixed `"re:"`. No environment name is read
+    /// (`ASPNETCORE_ENVIRONMENT`, `DOTNET_ENVIRONMENT`, `STREAMS_ENVIRONMENT` are all ignored), so
+    /// C# and Rust agree with nothing configured. Logs the result at info.
     #[must_use]
     pub fn from_env() -> Self {
         let keys = Self::from_lookup(|name| std::env::var(name).ok());
-        if Self::is_fallback(|name| std::env::var(name).ok()) {
-            tracing::info!(
-                prefix = keys.prefix(),
-                "no {OVERRIDE_VARIABLE} or {ENVIRONMENT_VARIABLE} set: using the default key prefix `{}`",
-                keys.prefix()
-            );
-        } else {
-            tracing::info!(prefix = keys.prefix(), "redis key prefix resolved");
-        }
+        tracing::info!(prefix = keys.prefix(), "redis key prefix resolved");
         keys
-    }
-
-    fn is_fallback(var: impl Fn(&str) -> Option<String>) -> bool {
-        var(OVERRIDE_VARIABLE).is_none_or(|p| p.trim().is_empty())
-            && var(ENVIRONMENT_VARIABLE).is_none_or(|e| e.trim().is_empty())
     }
 
     /// Resolves the prefix from `var` instead of the process environment (for tests).
     #[must_use]
     pub fn from_lookup(var: impl Fn(&str) -> Option<String>) -> Self {
-        if let Some(prefix) = var(OVERRIDE_VARIABLE).filter(|p| !p.trim().is_empty()) {
-            return Self::with_prefix(prefix);
-        }
-        let environment = var(ENVIRONMENT_VARIABLE)
-            .filter(|e| !e.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_ENVIRONMENT.to_owned());
-        Self::with_prefix(format!("{}:{MARKER}:", environment.trim().to_lowercase()))
+        var(OVERRIDE_VARIABLE)
+            .filter(|p| !p.trim().is_empty())
+            .map_or_else(|| Self::with_prefix(DEFAULT_PREFIX), Self::with_prefix)
     }
 
     /// Uses `prefix` verbatim, as `STREAMS_KEY_PREFIX` would.
@@ -161,49 +145,42 @@ mod tests {
     }
 
     #[test]
-    fn key_prefix_is_used_verbatim_and_wins() {
-        let k = Keys::from_lookup(lookup(&[
-            ("STREAMS_KEY_PREFIX", "custom:"),
-            ("STREAMS_ENVIRONMENT", "Staging"),
-        ]));
+    fn key_prefix_is_used_verbatim() {
+        let k = Keys::from_lookup(lookup(&[("STREAMS_KEY_PREFIX", "custom:")]));
         assert_eq!(k.prefix(), "custom:");
     }
 
     #[test]
     fn blank_key_prefix_is_ignored() {
-        let k = Keys::from_lookup(lookup(&[
-            ("STREAMS_KEY_PREFIX", "   "),
-            ("STREAMS_ENVIRONMENT", "QA"),
-        ]));
-        assert_eq!(k.prefix(), "qa:re:");
+        let k = Keys::from_lookup(lookup(&[("STREAMS_KEY_PREFIX", "   ")]));
+        assert_eq!(k.prefix(), "re:");
     }
 
     #[test]
-    fn streams_environment_is_lowercased() {
-        let k = Keys::from_lookup(lookup(&[("STREAMS_ENVIRONMENT", "Staging")]));
-        assert_eq!(k.prefix(), "staging:re:");
+    fn nothing_set_is_the_fixed_prefix() {
+        assert_eq!(Keys::from_lookup(lookup(&[])).prefix(), "re:");
     }
 
     #[test]
-    fn nothing_set_is_local_not_production() {
-        let k = Keys::from_lookup(lookup(&[]));
-        assert_eq!(k.prefix(), "local:re:");
-        assert!(Keys::is_fallback(lookup(&[])));
-        assert!(!Keys::is_fallback(lookup(&[("STREAMS_ENVIRONMENT", "x")])));
-        assert!(!Keys::is_fallback(lookup(&[("STREAMS_KEY_PREFIX", "x:")])));
-    }
-
-    #[test]
-    fn dotnet_variables_are_ignored() {
+    fn environment_names_are_ignored() {
         let k = Keys::from_lookup(lookup(&[
             ("ASPNETCORE_ENVIRONMENT", "Development"),
             ("DOTNET_ENVIRONMENT", "QA"),
-        ]));
-        assert_eq!(k.prefix(), "local:re:");
-        let k = Keys::from_lookup(lookup(&[
-            ("ASPNETCORE_ENVIRONMENT", "Development"),
             ("STREAMS_ENVIRONMENT", "prod"),
         ]));
-        assert_eq!(k.prefix(), "prod:re:");
+        assert_eq!(k.prefix(), "re:");
+    }
+
+    #[test]
+    fn composed_names_are_opaque() {
+        let k = Keys::from_lookup(lookup(&[]));
+        assert_eq!(
+            k.positions("np.mult_feed_events", "dev.svc"),
+            "re:p:{np.mult_feed_events}:dev.svc"
+        );
+        assert_eq!(
+            k.positions("np.mult_feed_events", "tst.svc"),
+            "re:p:{np.mult_feed_events}:tst.svc"
+        );
     }
 }

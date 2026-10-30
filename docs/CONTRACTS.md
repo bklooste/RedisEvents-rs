@@ -130,9 +130,8 @@ pub struct Header<'a> { pub key_utf8: &'a [u8], pub value_utf8: &'a [u8] }  // k
 Everyone else goes through this API. Malformed input → `Error::Transport`.
 
 ### `wire::Keys` (W0.2 API; A1 bodies)
-The prefix is a **value**, not a global: `Keys::from_env()` (Rust rule:
-`STREAMS_KEY_PREFIX`, else `STREAMS_ENVIRONMENT` -> `<env>:re:`, else `local:re:`; the .NET variables are
-never read), `Keys::from_lookup(fn)` for tests, `Keys::with_prefix(p)`.
+The prefix is a **value**, not a global: `Keys::from_env()` (the shared rule:
+`STREAMS_KEY_PREFIX` verbatim, else `re:`; no environment name is read), `Keys::from_lookup(fn)` for tests, `Keys::with_prefix(p)`.
 Methods return `String`: `stream(topic, p, co_locate)`, `positions`, `positions_meta`, `ownership`,
 `topic_meta`, `state(topic, name)`, `view(topic, owner, view)`, `dedupe(scope, id) -> Result<String>`,
 `positions_pattern`, `stream_pattern(topic, co_locate)`.

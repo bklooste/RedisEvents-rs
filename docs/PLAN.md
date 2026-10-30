@@ -24,12 +24,8 @@ idioms wherever the bytes in Redis stay identical.
 Taken from the code. Phase 0 turns this list into `WIRE.md` plus golden vectors.
 
 ### 2.1 Key namespace (`Config/KeyNamespace.cs`)
-- C# prefix = `STREAMS_KEY_PREFIX` if set. Otherwise`"{env}:re:"`, where `env` is the lowercased
-  `ASPNETCORE_ENVIRONMENT`, then `DOTNET_ENVIRONMENT`, defaulting to `production`.
-- **Rust differs on purpose.** Rust uses `STREAMS_KEY_PREFIX` verbatim, else `"{STREAMS_ENVIRONMENT}:re:"`,
-  else `local:re:`; it never reads the .NET variables and never defaults to `production`. With nothing
-  set, C# (`production:re:`) and Rust (`local:re:`) use different namespaces, so mixed deployments must
-  set `STREAMS_KEY_PREFIX` on both (or `STREAMS_ENVIRONMENT` on Rust equal to the C# environment).
+- Prefix = `STREAMS_KEY_PREFIX` verbatim if set, otherwise the fixed `re:`, in both languages. No
+  environment name is read. Topic and consumer names are opaque and are the only isolation.
 
 ### 2.2 Keys (`Wire/StreamKeys.cs`, `Outbox.StateKey`, `Idempotency`, `RedisViewStore`)
 | Key | Shape |
@@ -275,7 +271,7 @@ in both directions:
 | `t` defaults to C# `FullName` | Rust requires `Message::TYPE`; the C# docs recommend explicit types for cross-language topics |
 | JSON property casing (silent in C#: wrong casing reads as defaults) | match C# (PascalCase by default); golden bodies from the real C# types; Rust rejects mismatches |
 | MessagePack array vs map | document the mapping; vectors for both forms |
-| Different key prefix per runtime | Rust and C# defaults differ on purpose (`local:re:` vs `production:re:`): set `STREAMS_KEY_PREFIX` on both; Rust logs the resolved prefix and the fallback at startup |
+| Different key prefix per runtime | Both default to `re:`; a `STREAMS_KEY_PREFIX` set on only one side splits them. Rust logs the resolved prefix at startup |
 | GUID / timestamp text formats | `uuid` hyphenated lowercase; timestamps with 7 fractional digits + `Z`/offset, and the parser accepts both |
 | `HEXPIRE` availability | same startup probe (`__hexpire-probe:<id>`); refuse Lease mode without it, as C# does |
 | Lua drift | one shared script text, plus a CI diff |
