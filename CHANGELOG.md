@@ -5,6 +5,18 @@ and the crates follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed: one fixed key prefix, no environments (breaking: keys move)
+
+- `Keys::from_env` now resolves `STREAMS_KEY_PREFIX` verbatim, else the fixed `re:`, which is the same
+  rule as the C# library (bklooste/RedisEvents#57). `STREAMS_ENVIRONMENT` is no longer read, and the
+  `local:re:` default is gone. With nothing configured, C# and Rust now share keys.
+- Topic and consumer names are opaque and are the only isolation. An application running several
+  environments on one Redis composes them (topic `np.mult_feed_events`, consumers `dev.my-service`).
+- A service that relied on `STREAMS_ENVIRONMENT` or `local:re:` no longer sees its old keys. Nothing
+  migrates them.
+- `wire-spec/vectors/keys.json` is re-synced from C#: prefix `re:`, environment variables ignored, and
+  new cases for composed consumer names. Every `prefix_resolution` case is now asserted in Rust too.
+
 ### Added: work-queue delivery (`delivery = "work_queue"`, C6)
 
 Additive (0.4.x): no existing item changes shape.
