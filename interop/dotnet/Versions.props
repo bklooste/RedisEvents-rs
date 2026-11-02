@@ -1,7 +1,8 @@
 <Project>
-  <!-- The single place the RedisEvents NuGet version is pinned. CI's `nuget` leg overrides it with the
-       latest published version (-p:RedisEventsVersion=...); its `main` leg sets UseLocalRedisEvents. -->
+  <!-- The single place the RedisEvents NuGet version is pinned: the version lode pins, for CI's `pinned`
+       leg. The `nuget` leg overrides it with the latest published version (-p:RedisEventsVersion=...);
+       the `main` leg sets UseLocalRedisEvents. -->
   <PropertyGroup>
-    <RedisEventsVersion Condition="'$(RedisEventsVersion)' == ''">0.2.37</RedisEventsVersion>
+    <RedisEventsVersion Condition="'$(RedisEventsVersion)' == ''">0.2.46</RedisEventsVersion>
   </PropertyGroup>
 </Project>

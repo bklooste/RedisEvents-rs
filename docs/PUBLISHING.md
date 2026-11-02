@@ -1,6 +1,7 @@
 # Publishing to crates.io
 
-Every push to `main` that passes `test` publishes the six library crates (`redisevents`,
+Every push to `main` whose CI is green (`lint`, `test`, `semver-checks`, `wire-drift`, `interop`,
+`sample-matrix`) publishes the six library crates (`redisevents`,
 `-msgpack`, `-projections`, `-restate`, `-axum`, `-eventsourcing`), in that dependency order, from the
 `publish` job in `.github/workflows/ci.yml`. It mirrors the C# repo's NuGet job.
 

@@ -5,6 +5,17 @@ and the crates follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed: `Outbox` takes conditions (breaking: 0.5)
+
+- `Outbox::write_and_publish` and `write_and_publish_many` take `conditions: &[Condition]` and return
+  `Result<Option<_>>`: `None` means a condition failed and nothing was applied, as C#
+  `WriteAndPublishAsync` returning `null`. Callers with no conditions pass `&[]` and always get `Some`.
+- `producer::Condition`: `hash_equal`, `hash_not_exists`, `key_not_exists`. A conditional call runs as
+  a script on the shared connection; see the README for what differs from `MULTI`/`EXEC`.
+- Interop: gates G4 (`typed_json_payload`) and G5 (`guarded_outbox`, `guarded_outbox_race`), and a
+  `pinned` CI leg on the RedisEvents version lode pins (0.2.46).
+- CI: `publish` now needs all of CI, interop included, not only `test`.
+
 ### Changed: one fixed key prefix, no environments (breaking: keys move)
 
 - `Keys::from_env` now resolves `STREAMS_KEY_PREFIX` verbatim, else the fixed `re:`, which is the same

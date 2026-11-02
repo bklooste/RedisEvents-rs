@@ -23,6 +23,11 @@ consume --topic T --consumer C --partitions N --expect N --timeout SECONDS
 positions --topic T --consumer C
 admin-reset --topic T --consumer C [--partition P] --to-id ID
 meta --topic T
+publish-typed --topic T --partitions N --key K
+consume-typed --topic T --consumer C --partitions N --expect N --timeout SECONDS
+outbox --topic T --partitions N --key K --type TYPE --body-b64 B64 [--correlation C] --state NAME
+       --set FIELD=VALUE [--if-equal FIELD=VALUE ...] [--if-field-absent FIELD ...] [--if-key-absent]
+outbox-race --topic T --key K --state NAME --count N --start-at-ms EPOCH_MS
 ```
 
 Exit codes: `0` ok, `1` usage/unexpected, `2` timeout, `3` not implemented (the runner SKIPs),
@@ -51,7 +56,9 @@ and same-language pairs are the `baseline`. A pair is SKIPPED when a host return
 | G3 | `admin_reset` (pair = admin language x consumer language) | admin-reset (D1, Rust side implemented), positions, consume |
 | ownership | `stalled_owner_handover` (pair = stalled owner's language x rival's language): a Lease owner whose handler never returns (`--wedge`) gives its leases up after `--stall-seconds` and leaves the fair share, so the rival reads both partitions | consume with the stall flags. A C# host whose RedisEvents predates the stall rule exits 3 and the pair is skipped |
 | work_queue | `work_queue_competing_consumers` (pair = the two members' languages): one consumer group, one topic, members compete; every message processed exactly once across both, both members did work, group = consumer name, members = `POD_NAME`, no position hash. `work_queue_dead_member_claimed` (pair = dying member's language x survivor's language): the first member takes the entries and is killed unacknowledged; the other claims them (`XAUTOCLAIM`) no earlier than the 30 s threshold, processes each once and stops by itself, leaving nothing unacknowledged (C# needs RedisEvents ≥ 0.2.44) (~31 s per pair) | consume `--delivery work_queue`. A C# host without `ConsumerOptions.Delivery` exits 3 |
-| G4, G5 | not yet: JSON/MessagePack/LZ4 payloads, outbox/ES (E1, E3); the CQRS-ES sample matrix runs separately (E5d) | later WPs add verbs/scenarios |
+| G4 | `typed_json_payload`: two messages through each language's typed API (C# `PublishAsync<T>` with a source-generated `JsonTypeInfo` and the default type string; Rust `publish_message::<Json, _>`), decoded by the other's typed API. Every field is compared, because a casing mismatch reads as defaults rather than failing | publish-typed, consume-typed |
+| G5 | `guarded_outbox`: two writers on one state key, with `HashEqual`, `HashNotExists` and `KeyNotExists` passing and failing; a failed call changes neither the state nor the stream. `guarded_outbox_race`: both writers start together and compare-and-set one version, 3000 wins each, and each writer must lose at least once; the stream holds every version once, in order (C# guards with `WATCH`, Rust with a script) | outbox, outbox-race |
+| not yet | MessagePack/LZ4 payloads and event sourcing (E1, E3); the CQRS-ES sample matrix runs separately (E5d). `docs/PLAN.md` section 7 groups the gates differently | later WPs add verbs/scenarios |
 
 `buffered_publish_cold_order` checks that a cold buffered publisher keeps per-key order on its first
 flush. It was an expected failure for C# producers until RedisEvents #49 fixed it.

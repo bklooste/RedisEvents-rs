@@ -107,8 +107,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # nuget = latest published RedisEvents package; main = bklooste/RedisEvents@main built from source.
-        csharp: [nuget, main]
+        # pinned = interop/dotnet/Versions.props, the version lode pins; nuget = latest published
+        # RedisEvents package; main = bklooste/RedisEvents@main built from source.
+        csharp: [pinned, nuget, main]
     services:
       redis:
         image: redis:8-alpine
@@ -170,7 +171,8 @@ jobs:
         run: CSHARP_SAMPLE_DIR=$PWD/csharp-sample samples/inventory/matrix.sh
 
   publish:
-    needs: test
+    # Nothing is published unless all of CI is green, the interop legs above all.
+    needs: [lint, test, semver-checks, wire-drift, interop, sample-matrix]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: production

@@ -274,9 +274,11 @@ pub trait PublisherExt: Publisher {   // blanket for every Publisher, complete
       fn new(Connection, Keys) -> Self; fn with_response_timeout(self, Duration) -> Self;
       fn state_key(&Keys, topic, name) -> Result<String>;                 // <prefix>{topic}:state:<name>
       fn ensure_same_slot(&Keys, topic, state_keys: &[&str], co_locate: bool, partition: u32) -> Result<()>;
-      async fn write_and_publish(&self, FnOnce(&mut redis::Pipeline), &OutboxPublish, state_keys: &[&str]) -> Result<StreamId>;
-      async fn write_and_publish_many(&self, FnOnce(&mut redis::Pipeline), &[OutboxPublish], state_keys: &[&str]) -> Result<Vec<StreamId>>;
+      // None: a Condition failed and nothing was applied. Conditional calls run as GUARDED_SCRIPT on the shared connection.
+      async fn write_and_publish(&self, FnOnce(&mut redis::Pipeline), &OutboxPublish, conditions: &[Condition], state_keys: &[&str]) -> Result<Option<StreamId>>;
+      async fn write_and_publish_many(&self, FnOnce(&mut redis::Pipeline), &[OutboxPublish], conditions: &[Condition], state_keys: &[&str]) -> Result<Option<Vec<StreamId>>>;
   }
+  pub enum Condition { HashEqual { key, field, value }, HashNotExists { key, field }, KeyNotExists { key } } // hash_equal(), hash_not_exists(), key_not_exists()
   pub struct StateEvent { pub body: Bytes, pub msg_type: String, pub options: PublishOptions } // new(), with_options()
   impl StreamStore {   // E3's event store
       fn new(Connection, Keys, topic, TopicOptions) -> Result<Self>;    // Config error unless co-located
