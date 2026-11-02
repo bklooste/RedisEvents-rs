@@ -15,16 +15,21 @@ this document has a bug.
 
 ## 1. Key namespace
 
-Every key below starts with a **prefix**, a literal string such as `prod:re:`. It goes *outside* any
-`{…}` hash tag, so it never changes a key's cluster slot.
+Every key below starts with a **prefix**: the fixed `re:`, or `STREAMS_KEY_PREFIX` verbatim when it is
+set and not blank. Both libraries use exactly this rule and read no environment name
+(`ASPNETCORE_ENVIRONMENT`, `DOTNET_ENVIRONMENT`, `STREAMS_ENVIRONMENT`), so C# and Rust agree with
+nothing configured. The prefix goes *outside* any `{…}` hash tag, so it never changes a key's cluster
+slot.
 
-- Services that share a topic MUST use the same prefix. Different prefixes are separate namespaces,
-  so two environments can share one Redis.
-- Both libraries take the prefix verbatim from `STREAMS_KEY_PREFIX` when it is set. That is the
-  recommended way to configure a deployment that mixes C# and Rust services.
-- Without it, each library derives a prefix in its own way, and the two derivations do **not** agree
-  (see each library's docs). A mixed deployment that relies on them reads and writes different keys
-  without any error.
+- Topic and consumer names are opaque, and they are the only isolation. Streams, topic meta and state
+  belong to the topic; positions, ownership leases and the work-queue group belong to the consumer.
+- Several environments on one Redis are the application's to compose: a shared feed is one topic
+  (`np.mult_feed_events`), and each environment's service is its own consumer (`dev.my-service`,
+  `tst.my-service`). Two consumer names on one topic never share a key.
+- A dedupe scope used by a consumer must include the consumer name; a view owner must be distinct per
+  deployment. Neither is derived from an environment.
+- `STREAMS_KEY_PREFIX` is for the rare case of unrelated applications sharing one Redis. Services that
+  share a topic MUST use the same prefix.
 
 ## 2. Keys
 *Source: `Wire/StreamKeys.cs`, `Producer/Outbox.cs` (`StateKey`), `Producer/Idempotency.cs`, `RedisEvents.Projections/RedisViewStore.cs`*

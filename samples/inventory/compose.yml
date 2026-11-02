@@ -5,8 +5,8 @@
 # C# images build from a checkout of bklooste/cqrs-simple-micro-service (CSHARP_SAMPLE_DIR).
 # Rust images (E5b/E5c) are expected as ${RUST_COMMAND_IMAGE} / ${RUST_VIEWS_IMAGE}; matrix.sh skips a
 # pairing whose image is not present locally.
-# Every service sets STREAMS_KEY_PREFIX: C# defaults to `production:re:`, Rust to `local:re:`, so without it
-# the two sides would not share keys.
+# Every service sets the same STREAMS_KEY_PREFIX so the sample's keys stay apart from anything else on the
+# Redis; C# and Rust would share keys without it too (both default to `re:`).
 name: inventory
 services:
   redis:

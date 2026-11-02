@@ -410,7 +410,7 @@ running on defaults, Block mode without co-located partitions). A wrong type or 
 a deserialize error from your config source.
 
 Environment variables the library itself reads are the ones shared with the C# library or chosen
-for the cross-language deployment: `STREAMS_KEY_PREFIX` / `STREAMS_ENVIRONMENT` (the key prefix,
+for the cross-language deployment: `STREAMS_KEY_PREFIX` (the key prefix override,
 see [Interop](#interop-rules)) and, for Static ownership only when the options leave them unset,
 `STREAMS_INSTANCE_COUNT`, `STREAMS_INSTANCE_INDEX` and `POD_NAME`.
 
@@ -1044,15 +1044,13 @@ These are the rules that keep a Rust service and a C# service talking to each ot
   field names. A type shared with C# needs `#[serde(rename_all = "PascalCase")]`. The mismatch is
   silent on the C# side: a wrongly cased body fails to decode there, and in Rust it is skipped as
   malformed, so nothing is raised.
-- **Set `STREAMS_KEY_PREFIX` on every service: the C# and Rust defaults differ.** Stream keys are
-  `<prefix>s:{topic}:<p>` (the braces are the hash tag, present by default). Rust resolves the prefix as
-  `STREAMS_KEY_PREFIX` verbatim, else `<STREAMS_ENVIRONMENT lowercased>:re:`, else `local:re:`. Rust never
-  reads `ASPNETCORE_ENVIRONMENT` or `DOTNET_ENVIRONMENT` and never defaults to `production`. C# uses
-  `STREAMS_KEY_PREFIX`, else `ASPNETCORE_ENVIRONMENT` / `DOTNET_ENVIRONMENT`, defaulting to `production:re:`.
-  With nothing configured the two use different namespaces (`production:re:` vs `local:re:`) and do
-  not see each other's topics. Set `STREAMS_KEY_PREFIX` on both, or `STREAMS_ENVIRONMENT` on Rust equal to
-  the C# environment name. Rust logs the resolved prefix at startup (info), and says so when it fell
-  back to `local:re:`.
+- **The key prefix is the same in both languages.** Stream keys are `<prefix>s:{topic}:<p>` (the braces
+  are the hash tag, present by default), and `<prefix>` is the fixed `re:`, or `STREAMS_KEY_PREFIX`
+  verbatim when set. Neither library reads an environment name. Topic and consumer names are opaque and
+  are the only isolation: an application running several environments on one Redis composes them
+  (topic `np.mult_feed_events`, consumers `dev.my-service` / `tst.my-service`). Set
+  `STREAMS_KEY_PREFIX` only to keep unrelated applications on one Redis apart, and then on every service
+  that shares a topic. Rust logs the resolved prefix at startup (info).
 - **Redis 7.4 or later** in Lease mode (for `HEXPIRE`), the same requirement as C#.
 - **Stream ids and positions are the same bytes.** A position written by one language is read by the
   other. A Rust consumer resumes at a C# consumer's position and the reverse.

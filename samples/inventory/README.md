@@ -130,7 +130,7 @@ string in a Rust service, translate it with `redisevents::connection::stackexcha
 
 ## Key prefix (read this when mixing C# and Rust)
 
-C# defaults to the key prefix `production:re:` and Rust to `local:re:`, so with no configuration the
-two sides do not see each other's topics. `compose.yml` therefore sets `STREAMS_KEY_PREFIX` (default
+C# and Rust both default to the key prefix `re:`, so they share keys with no configuration.
+`compose.yml` still sets `STREAMS_KEY_PREFIX` (default
 `inventory:re:`, override by exporting it) on every service, and `matrix.sh` exports the same value so the
 Scenarify test processes, which publish through the C# event store, use the same prefix.

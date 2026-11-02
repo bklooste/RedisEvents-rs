@@ -667,17 +667,17 @@ fn partition_router_for_key_empty_key_is_stable_but_not_spread() {
 
 // ----------------------------------------------------------------- StreamKeys
 
-fn production_keys() -> Keys {
-    // The C# tests read `KeyNamespace.Prefix()` from the ambient environment (default `production`).
-    // Rust's own default is `local:re:`, so the C# prefix is pinned here to assert C#'s key shapes.
-    Keys::with_prefix("production:re:")
+fn default_keys() -> Keys {
+    // The C# tests read `KeyNamespace.Prefix()`, the fixed `re:` with nothing configured; Rust's
+    // default is the same.
+    Keys::from_lookup(|_| None)
 }
 
 #[test]
 fn stream_keys_use_literal_braces_around_the_topic_as_hash_tag() {
-    let keys = production_keys();
+    let keys = default_keys();
     let ns = keys.prefix().to_owned();
-    assert_eq!(ns, "production:re:");
+    assert_eq!(ns, "re:");
 
     assert_eq!(
         keys.stream("offer_odds", 0, true),
@@ -715,7 +715,7 @@ fn stream_keys_use_literal_braces_around_the_topic_as_hash_tag() {
 
 #[test]
 fn stream_keys_co_locate_false_drops_the_hash_tag() {
-    let keys = production_keys();
+    let keys = default_keys();
     let ns = keys.prefix().to_owned();
 
     assert_eq!(
@@ -730,7 +730,7 @@ fn stream_keys_co_locate_false_drops_the_hash_tag() {
 
 #[test]
 fn stream_keys_colocated_keys_share_one_hash_tag() {
-    let keys = production_keys();
+    let keys = default_keys();
     let all = [
         keys.stream("bet_state", 1, true),
         keys.positions("bet_state", "bet-processing"),
@@ -746,7 +746,7 @@ fn stream_keys_colocated_keys_share_one_hash_tag() {
 
 #[test]
 fn stream_keys_long_topic_name_exceeding_the_stack_buffer_still_builds() {
-    let keys = production_keys();
+    let keys = default_keys();
     let topic = "t".repeat(400);
 
     assert_eq!(

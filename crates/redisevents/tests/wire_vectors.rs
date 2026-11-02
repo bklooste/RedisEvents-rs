@@ -327,6 +327,8 @@ fn keys_names_match_vector() {
             "positions" => keys.positions(topic, "svc"),
             "positions-meta" => keys.positions_meta(topic, "svc"),
             "ownership" => keys.ownership(topic, "svc"),
+            "positions:dev.svc" => keys.positions(topic, "dev.svc"),
+            "ownership:dev.svc" => keys.ownership(topic, "dev.svc"),
             "topic-meta" => keys.topic_meta(topic),
             "state" => keys.state(topic, "es:Order:42"),
             "dedupe" => keys.dedupe(topic, "evt-1").expect("valid scope"),
@@ -336,24 +338,17 @@ fn keys_names_match_vector() {
     }
 }
 
-/// keys.json `prefix_resolution` documents C#'s rule (ASPNETCORE/DOTNET/production). Rust resolves
-/// differently on purpose (WIRE.md section 1), so only the cases both rules agree on are asserted
-/// against the vector; the rest are asserted against the Rust rule in `wire/keys.rs` unit tests.
+/// keys.json `prefix_resolution`: C# and Rust share one rule (`STREAMS_KEY_PREFIX` verbatim, else
+/// `re:`; environment names ignored), so every case is asserted, including the ones that set
+/// `ASPNETCORE_ENVIRONMENT`/`DOTNET_ENVIRONMENT` and expect them to make no difference.
 #[test]
-fn keys_prefix_resolution_agrees_with_vector_where_rules_overlap() {
+fn keys_prefix_resolution_matches_vector() {
     let v = vectors("keys.json");
     let cases = cases(&v, "prefix_resolution");
     assert_ne!(cases.len(), 0);
     for case in cases {
         let name = s(case, "name");
         let env = &case["env"];
-        if env["STREAMS_KEY_PREFIX"]
-            .as_str()
-            .is_none_or(|p| p.trim().is_empty())
-        {
-            // C#-only resolution via ASPNETCORE_/DOTNET_ENVIRONMENT or the production default.
-            continue;
-        }
         let keys = Keys::from_lookup(|var| env[var].as_str().map(str::to_owned));
         assert_eq!(keys.prefix(), s(case, "prefix"), "prefix case `{name}`");
     }
