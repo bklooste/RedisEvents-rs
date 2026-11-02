@@ -25,8 +25,11 @@
 //!   as `EXEC`. The argument checks here make that a caller-bug-only path.
 //!
 //! The plain [`Outbox`] keeps `MULTI`/`EXEC` because its state writes are arbitrary caller
-//! commands on a [`redis::Pipeline`] (the agreed API shape, `docs/PLAN.md` §3).
+//! commands on a [`redis::Pipeline`] (the agreed API shape, `docs/PLAN.md` §3). An [`Outbox`] call
+//! with [`Condition`]s takes the script path, for the reasons above: the pipeline's commands are
+//! replayed inside the script after the checks.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -49,6 +52,83 @@ use crate::wire::{HeaderBlock, Keys, RoundRobin, StreamId, StreamMsg};
 // ------------------------------------------------------------------------------------------------
 // Outbox
 // ------------------------------------------------------------------------------------------------
+
+/// A check an outbox call makes before it writes anything (C# `Condition`). If any fails, nothing is
+/// applied, neither the state writes nor the publish, and the call returns `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Condition {
+    /// Hash field `field` of `key` holds exactly `value` (C# `Condition.HashEqual`). A missing
+    /// field or key fails it.
+    HashEqual {
+        /// The hash key.
+        key: String,
+        /// The field.
+        field: String,
+        /// The value it must hold, compared byte for byte.
+        value: Vec<u8>,
+    },
+    /// Hash field `field` of `key` is absent (C# `Condition.HashNotExists`). A missing key passes.
+    HashNotExists {
+        /// The hash key.
+        key: String,
+        /// The field.
+        field: String,
+    },
+    /// `key` does not exist (C# `Condition.KeyNotExists`).
+    KeyNotExists {
+        /// The key.
+        key: String,
+    },
+}
+
+impl Condition {
+    /// [`Condition::HashEqual`].
+    pub fn hash_equal(
+        key: impl Into<String>,
+        field: impl Into<String>,
+        value: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self::HashEqual {
+            key: key.into(),
+            field: field.into(),
+            value: value.into(),
+        }
+    }
+
+    /// [`Condition::HashNotExists`].
+    pub fn hash_not_exists(key: impl Into<String>, field: impl Into<String>) -> Self {
+        Self::HashNotExists {
+            key: key.into(),
+            field: field.into(),
+        }
+    }
+
+    /// [`Condition::KeyNotExists`].
+    pub fn key_not_exists(key: impl Into<String>) -> Self {
+        Self::KeyNotExists { key: key.into() }
+    }
+
+    fn key(&self) -> &str {
+        match self {
+            Self::HashEqual { key, .. }
+            | Self::HashNotExists { key, .. }
+            | Self::KeyNotExists { key } => key,
+        }
+    }
+
+    fn add_to(&self, script: &mut Guarded) {
+        match self {
+            Self::HashEqual { key, field, value } => {
+                script.cond("heq", key, vec![field.clone().into_bytes(), value.clone()]);
+            }
+            Self::HashNotExists { key, field } => {
+                script.cond("hnil", key, vec![field.clone().into_bytes()]);
+            }
+            Self::KeyNotExists { key } => script.cond("nokey", key, Vec::new()),
+        }
+    }
+}
 
 /// One publish inside an outbox transaction.
 #[derive(Debug, Clone, Copy)]
@@ -80,6 +160,13 @@ pub struct OutboxPublish<'a> {
 /// **Same slot.** Every key of the transaction must share the stream's hash tag `{topic}`; declared
 /// state keys are checked before anything is sent ([`Outbox::ensure_same_slot`]); build them with
 /// [`Outbox::state_key`].
+///
+/// **Conditions.** Passing [`Condition`]s makes the call conditional, as in C#: "publish this only
+/// if the version is still N". The checks and the writes run as one server-side script on the shared
+/// connection, which a concurrent C# `WATCH` on the same key sees as an ordinary write. Conditional
+/// state writes must name their key as the command's first argument, and that key must share the
+/// stream's hash tag. A conditional state write that fails at run time stops the script there: the
+/// commands before it stay applied, and the publish does not happen.
 pub struct Outbox {
     conn: Connection,
     keys: Keys,
@@ -158,80 +245,120 @@ impl Outbox {
     /// Queues `state_writes` and one `XADD` in one `MULTI`/`EXEC`.
     /// `state_writes` adds commands to a pipeline already in atomic mode; it must not run them.
     ///
+    /// Returns the assigned id, or `None` when one of `conditions` failed, in which case **nothing
+    /// was applied** (C# `WriteAndPublishAsync` returning `null`). With no conditions it is always
+    /// `Some`; every other failure is an error.
+    ///
     /// # Errors
     /// As [`Outbox::write_and_publish_many`].
     pub async fn write_and_publish<F>(
         &self,
         state_writes: F,
         publish: &OutboxPublish<'_>,
+        conditions: &[Condition],
         state_keys: &[&str],
-    ) -> Result<StreamId>
+    ) -> Result<Option<StreamId>>
     where
         F: FnOnce(&mut redis::Pipeline),
     {
         let ids = self
-            .write_and_publish_many(state_writes, std::slice::from_ref(publish), state_keys)
+            .write_and_publish_many(
+                state_writes,
+                std::slice::from_ref(publish),
+                conditions,
+                state_keys,
+            )
             .await?;
-        ids.into_iter()
-            .next()
-            .ok_or_else(|| Error::transport("The outbox transaction returned no entry id."))
+        ids.map(|ids| {
+            ids.into_iter()
+                .next()
+                .ok_or_else(|| Error::transport("The outbox transaction returned no entry id."))
+        })
+        .transpose()
     }
 
     /// Queues `state_writes` and one `XADD` per publish, in order, in one `MULTI`/`EXEC` (C#
-    /// `WriteAndPublishManyAsync`). Returns the ids in publish order.
+    /// `WriteAndPublishManyAsync`). Returns the ids in publish order, or `None` when one of
+    /// `conditions` failed and nothing was applied.
     ///
     /// Cancel-safety: dropping the future after `EXEC` was sent leaves it unknown whether it ran
     /// (it ran completely or not at all).
     ///
     /// # Errors
-    /// [`Error::InvalidArgument`] for no publishes, a publish with no topic or type, or a partition
-    /// out of range; [`Error::Config`] when the keys span slots or the topic options are unusable;
+    /// [`Error::InvalidArgument`] for no publishes, a publish with no topic or type, a partition out
+    /// of range, or a conditional state write with no key; [`Error::Config`] when the keys (condition
+    /// keys and conditional state writes included) span slots or the topic options are unusable;
     /// [`Error::Transport`] when Redis fails the transaction.
     pub async fn write_and_publish_many<F>(
         &self,
         state_writes: F,
         publishes: &[OutboxPublish<'_>],
+        conditions: &[Condition],
         state_keys: &[&str],
-    ) -> Result<Vec<StreamId>>
+    ) -> Result<Option<Vec<StreamId>>>
     where
         F: FnOnce(&mut redis::Pipeline),
     {
         let trace = current_traceparent();
+        let declared: Vec<&str> = state_keys
+            .iter()
+            .copied()
+            .chain(conditions.iter().map(Condition::key))
+            .collect();
         let plans = plan_publishes(
             &self.keys,
             &self.round_robin,
             publishes,
-            state_keys,
+            &declared,
             trace.as_deref(),
         )?;
         let first = &plans[0];
+        let (topic, count) = (publishes[0].topic, plans.len());
         let mut pipe = redis::pipe();
         pipe.atomic();
         state_writes(&mut pipe);
-        for (plan, publish) in plans.iter().zip(publishes) {
-            let fields = plan.fields(publish);
-            pipe.add_command(xadd(&plan.stream, &plan.trim, &fields));
-        }
-
-        let count = u64::try_from(plans.len()).unwrap_or(u64::MAX);
-        let msg_type = (plans.len() == 1).then_some(publishes[0].msg_type);
-        let mut span = start_publish(publishes[0].topic, first.partition, msg_type, count);
-        let result = match self.exec(&pipe).await {
-            Ok(values) => last_ids(&values, plans.len(), publishes[0].topic, first.partition),
-            Err(e) => Err(outbox_failure(
-                publishes[0].topic,
-                first.partition,
-                plans.len(),
-                e,
-            )),
+        let script = if conditions.is_empty() {
+            for (plan, publish) in plans.iter().zip(publishes) {
+                let fields = plan.fields(publish);
+                pipe.add_command(xadd(&plan.stream, &plan.trim, &fields));
+            }
+            None
+        } else {
+            Some(guarded_outbox(conditions, &pipe, &plans, publishes)?)
         };
+
+        let msg_type = (count == 1).then_some(publishes[0].msg_type);
+        let mut span = start_publish(
+            topic,
+            first.partition,
+            msg_type,
+            u64::try_from(count).unwrap_or(u64::MAX),
+        );
+        let replies = match &script {
+            None => self
+                .exec(&pipe)
+                .await
+                .map(Some)
+                .map_err(|e| outbox_failure(topic, first.partition, count, e)),
+            Some(script) => script
+                .run(&self.conn)
+                .await
+                .map_err(|e| guarded_outbox_failure(topic, first.partition, count, e)),
+        };
+        let result = replies.and_then(|replies| {
+            replies
+                .map(|values| last_ids(&values, count, topic, first.partition))
+                .transpose()
+        });
         match &result {
-            Ok(ids) => {
+            Ok(Some(ids)) => {
                 span.set_message_id(ids[0]);
                 for (plan, publish) in plans.iter().zip(publishes) {
                     record_published(publish.topic, plan.partition, 1);
                 }
             }
+            // A failed condition is a normal outcome, not an error on the span.
+            Ok(None) => {}
             Err(e) => span.set_error(&e.to_string()),
         }
         result
@@ -257,6 +384,72 @@ impl Outbox {
             }
         }
     }
+}
+
+/// The script for a conditional outbox call: the checks, the caller's commands in order, the `XADD`s.
+fn guarded_outbox(
+    conditions: &[Condition],
+    pipe: &redis::Pipeline,
+    plans: &[Planned],
+    publishes: &[OutboxPublish<'_>],
+) -> Result<Guarded> {
+    let mut script = Guarded::new();
+    for condition in conditions {
+        condition.add_to(&mut script);
+    }
+    let stream_tag = hash_tag(&plans[0].stream);
+    for (i, cmd) in pipe.cmd_iter().enumerate() {
+        let (name, key, args) = split_state_write(cmd, i)?;
+        if hash_tag(&key) != stream_tag {
+            return Err(Error::config(format!(
+                "Outbox: conditional state write {i} ({name}) has first argument '{key}', which is not in the slot of stream key '{}'. A conditional state write runs in a script, so it must name a key sharing the stream's hash tag first: build it with Outbox::state_key.",
+                plans[0].stream
+            )));
+        }
+        script.cmd(name, &key, args);
+    }
+    for (plan, p) in plans.iter().zip(publishes) {
+        script.xadd(
+            &plan.stream,
+            plan.trim.clone(),
+            OwnedFields {
+                body: Bytes::copy_from_slice(p.body),
+                msg_type: p.msg_type.to_owned(),
+                partition_key: Some(p.partition_key.to_owned()),
+                correlation_id: p.options.correlation_id.clone(),
+                trace_parent: plan.trace_parent.clone(),
+                headers: plan.headers.clone(),
+            },
+        );
+    }
+    Ok(script)
+}
+
+/// Splits a queued state write into its command name, its key and the remaining arguments.
+fn split_state_write(cmd: &redis::Cmd, index: usize) -> Result<(String, String, Vec<Vec<u8>>)> {
+    let unusable = |why: &str| {
+        Error::invalid_argument(format!(
+            "Outbox: conditional state write {index} {why}. It runs in a script, as `command key args...`."
+        ))
+    };
+    let mut args = Vec::with_capacity(cmd.args_iter().len());
+    for arg in cmd.args_iter() {
+        match arg {
+            redis::Arg::Simple(bytes) => args.push(bytes.to_vec()),
+            _ => return Err(unusable("uses a cursor argument")),
+        }
+    }
+    if args.len() < 2 {
+        return Err(unusable("names no key"));
+    }
+    let mut args = args.into_iter();
+    let mut text = || {
+        String::from_utf8(args.next().unwrap_or_default())
+            .map_err(|_| unusable("has a command name or key that is not UTF-8"))
+    };
+    let name = text()?;
+    let key = text()?;
+    Ok((name, key, args.collect()))
 }
 
 fn plan_publishes(
@@ -405,6 +598,15 @@ fn outbox_failure(topic: &str, partition: u32, count: usize, source: Error) -> E
     Error::transport_with(
         format!(
             "The outbox transaction failed: {count} message(s) to topic '{topic}' partition {partition}, plus its state writes. MULTI/EXEC hands the whole batch to the server as one unit, so it either never ran or ran completely; retrying the call is safe as long as the handler is idempotent. The outbox does not retry for you — a silent retry would hide the outage."
+        ),
+        source,
+    )
+}
+
+fn guarded_outbox_failure(topic: &str, partition: u32, count: usize, source: Error) -> Error {
+    Error::transport_with(
+        format!(
+            "The conditional outbox call failed: {count} message(s) to topic '{topic}' partition {partition}, plus its state writes. A command failing inside the script stops it there: state writes before that command stay applied and the publish did not happen. The outbox does not retry for you."
         ),
         source,
     )
@@ -575,7 +777,7 @@ struct Guarded {
 }
 
 enum GuardedCmd {
-    Plain(&'static str, usize, Vec<Vec<u8>>),
+    Plain(Cow<'static, str>, usize, Vec<Vec<u8>>),
     Xadd {
         key: usize,
         trim: Vec<String>,
@@ -629,9 +831,9 @@ impl Guarded {
         self.conds.push((name, k, args));
     }
 
-    fn cmd(&mut self, name: &'static str, key: &str, args: Vec<Vec<u8>>) {
+    fn cmd(&mut self, name: impl Into<Cow<'static, str>>, key: &str, args: Vec<Vec<u8>>) {
         let k = self.key(key);
-        self.cmds.push(GuardedCmd::Plain(name, k, args));
+        self.cmds.push(GuardedCmd::Plain(name.into(), k, args));
     }
 
     fn xadd(&mut self, key: &str, trim: Vec<String>, fields: OwnedFields) {
@@ -660,7 +862,7 @@ impl Guarded {
         for c in &self.cmds {
             match c {
                 GuardedCmd::Plain(name, k, args) => {
-                    cmd.arg(*name).arg(*k).arg(args.len());
+                    cmd.arg(name.as_ref()).arg(*k).arg(args.len());
                     for a in args {
                         cmd.arg(a.as_slice());
                     }

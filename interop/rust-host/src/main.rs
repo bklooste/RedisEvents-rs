@@ -11,7 +11,7 @@ use std::io::Write as _;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -25,10 +25,15 @@ use redisevents::config::{
 };
 use redisevents::consumer::Streams;
 use redisevents::producer::{
-    BufferedPublisher, BufferedStreamPublisher, PublishOptions, Publisher, StreamPublisher,
+    BufferedPublisher, BufferedStreamPublisher, Condition, Outbox, OutboxPublish, PublishOptions,
+    Publisher, StreamPublisher,
 };
 use redisevents::wire::{Keys, StreamId};
-use redisevents::{BatchHandler, HandleResult, PartitionContext, StreamMsg};
+use redisevents::{
+    BatchHandler, HandleResult, Json, Message, PartitionContext, PublisherExt, StreamMsg,
+    TypedHandler, TypedMsg,
+};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 #[derive(Parser)]
@@ -168,6 +173,408 @@ enum Verb {
         #[arg(long)]
         topic: String,
     },
+    /// Publish the two typed JSON messages of gate G4.
+    PublishTyped {
+        #[arg(long)]
+        topic: String,
+        #[arg(long, default_value_t = 1)]
+        partitions: u32,
+        #[arg(long)]
+        key: String,
+    },
+    /// Consume typed JSON messages, printing one `typed` line with the decoded fields.
+    ConsumeTyped {
+        #[arg(long)]
+        topic: String,
+        #[arg(long)]
+        consumer: String,
+        #[arg(long, default_value_t = 1)]
+        partitions: u32,
+        #[arg(long, default_value_t = 1)]
+        expect: u32,
+        #[arg(long, default_value_t = 30)]
+        timeout: u32,
+    },
+    /// One outbox call: set a state hash field and publish, guarded by the `--if-*` conditions.
+    Outbox(OutboxArgs),
+    /// Move the state field `version` up by one, `--count` times, each guarded on the value read.
+    OutboxRace {
+        #[arg(long)]
+        topic: String,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        state: String,
+        #[arg(long, default_value_t = 1)]
+        count: u32,
+        /// Start at this Unix time in milliseconds, so two writers really race.
+        #[arg(long)]
+        start_at_ms: u64,
+    },
+}
+
+#[derive(clap::Args)]
+struct OutboxArgs {
+    #[arg(long)]
+    topic: String,
+    #[arg(long, default_value_t = 1)]
+    partitions: u32,
+    #[arg(long)]
+    key: String,
+    #[arg(long = "type")]
+    type_: String,
+    #[arg(long, default_value = "")]
+    body_b64: String,
+    #[arg(long)]
+    correlation: Option<String>,
+    /// The state name; the key is `Outbox::state_key(topic, name)`.
+    #[arg(long)]
+    state: String,
+    /// `field=value`, the hash field to write.
+    #[arg(long)]
+    set: String,
+    /// `field=value`; repeatable.
+    #[arg(long)]
+    if_equal: Vec<String>,
+    /// Repeatable.
+    #[arg(long)]
+    if_field_absent: Vec<String>,
+    #[arg(long)]
+    if_key_absent: bool,
+}
+
+/// The typed payload of gate G4: twin of `TypedOrder.cs`, the default `System.Text.Json` shape.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct TypedOrder {
+    order_id: String,
+    quantity: i64,
+    price: f64,
+    status: u8,
+    placed_at: String,
+    tags: Vec<String>,
+    customer: TypedCustomer,
+    note: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct TypedCustomer {
+    name: String,
+}
+
+impl Message for TypedOrder {
+    /// C#'s default type string for this type, its CLR full name.
+    const TYPE: &'static str = "Interop.TypedOrder";
+}
+
+/// Twin of `Orders()` in the C# host.
+fn orders() -> [TypedOrder; 2] {
+    [
+        TypedOrder {
+            order_id: "order-Zoë-注文".to_owned(),
+            quantity: 9_007_199_254_740_993,
+            price: 12.5,
+            status: 2,
+            placed_at: "2026-11-02T03:04:05+00:00".to_owned(),
+            tags: vec!["a".to_owned(), "b".to_owned()],
+            customer: TypedCustomer {
+                name: "Ann".to_owned(),
+            },
+            note: None,
+        },
+        TypedOrder {
+            order_id: "order-2".to_owned(),
+            quantity: 0,
+            price: 0.25,
+            status: 0,
+            placed_at: "2026-11-02T03:04:06+00:00".to_owned(),
+            tags: Vec::new(),
+            customer: TypedCustomer {
+                name: String::new(),
+            },
+            note: Some("with a note".to_owned()),
+        },
+    ]
+}
+
+struct TypedEmitter {
+    seen: AtomicU32,
+    expect: u32,
+    reached: Notify,
+}
+
+impl TypedHandler<TypedOrder> for Arc<TypedEmitter> {
+    #[allow(clippy::unused_async_trait_impl)] // the trait's shape
+    async fn handle(&self, msg: &TypedMsg<TypedOrder>, _ctx: &PartitionContext) -> HandleResult {
+        let order = &msg.value;
+        let placed_at = order.placed_at.replace("+00:00", "Z");
+        println!(
+            "{}",
+            serde_json::json!({
+                "event": "typed",
+                "key": msg.envelope.partition_key(),
+                "type": msg.envelope.msg_type(),
+                "order_id": order.order_id,
+                "quantity": order.quantity,
+                "price": order.price,
+                "status": order.status,
+                "placed_at": placed_at,
+                "tags": order.tags,
+                "customer": order.customer.name,
+                "note": order.note,
+            })
+        );
+        let _ = std::io::stdout().flush();
+        if self.seen.fetch_add(1, Ordering::SeqCst) + 1 >= self.expect {
+            self.reached.notify_one();
+        }
+        Ok(())
+    }
+}
+
+fn run_publish_typed(redis: Option<&str>, topic: &str, partitions: u32, key: &str) -> ExitCode {
+    let url = redis_url(redis);
+    let result = run(async {
+        let conn = Connection::connect(&url).await?;
+        let options = TopicOptions {
+            partitions,
+            ..TopicOptions::default()
+        };
+        let publisher = StreamPublisher::new(conn, Keys::from_env(), topic, options).await?;
+        let all = orders();
+        for order in &all {
+            let id = publisher
+                .publish_message::<Json, _>(key, order, &PublishOptions::new())
+                .await?;
+            println!(
+                "{}",
+                serde_json::json!({"event": "published", "key": key, "id": id.to_string()})
+            );
+        }
+        Ok(all.len())
+    });
+    match result {
+        Ok(published) => {
+            println!(
+                "{}",
+                serde_json::json!({"event": "done", "published": published})
+            );
+            ExitCode::SUCCESS
+        }
+        Err(code) => code,
+    }
+}
+
+fn run_consume_typed(
+    redis: Option<&str>,
+    topic: &str,
+    consumer: &str,
+    partitions: u32,
+    (expect, timeout): (u32, u32),
+) -> ExitCode {
+    let url = redis_url(redis);
+    let emitter = Arc::new(TypedEmitter {
+        seen: AtomicU32::new(0),
+        expect,
+        reached: Notify::new(),
+    });
+    let handler = emitter.clone();
+    let result = run(async {
+        let conn = Connection::connect(&url).await?;
+        let mut options = StreamOptions::default();
+        options.topics.insert(
+            topic.to_owned(),
+            TopicOptions {
+                partitions,
+                ..TopicOptions::default()
+            },
+        );
+        options.consumers.push(ConsumerOptions {
+            topic: topic.to_owned(),
+            consumer: Some(consumer.to_owned()),
+            persist_interval_ms: 100,
+            ..ConsumerOptions::default()
+        });
+        let host = Streams::builder(conn)
+            .options(options)
+            .topic(topic)
+            .typed_handler::<TypedOrder, _>(handler)
+            .spawn()
+            .await?;
+        let reached = tokio::time::timeout(
+            Duration::from_secs(u64::from(timeout)),
+            emitter.reached.notified(),
+        )
+        .await
+        .is_ok()
+            || emitter.seen.load(Ordering::SeqCst) >= expect;
+        host.shutdown().await?;
+        Ok(reached)
+    });
+    match result {
+        Ok(reached) => {
+            let seen = emitter.seen.load(Ordering::SeqCst);
+            println!(
+                "{}",
+                serde_json::json!({"event": "done", "consumed": seen, "timed_out": !reached})
+            );
+            if reached {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(2)
+            }
+        }
+        Err(code) => code,
+    }
+}
+
+fn run_outbox(redis: Option<&str>, args: &OutboxArgs) -> ExitCode {
+    let body = match STANDARD.decode(&args.body_b64) {
+        Ok(body) => body,
+        Err(e) => return fail("FormatException", &e.to_string(), 1),
+    };
+    let Some((field, value)) = args.set.split_once('=') else {
+        return usage(&format!("--set needs field=value, got '{}'", args.set));
+    };
+    let url = redis_url(redis);
+    let result = run(async {
+        let keys = Keys::from_env();
+        let state = Outbox::state_key(&keys, &args.topic, &args.state)?;
+        let mut conditions = Vec::new();
+        for raw in &args.if_equal {
+            let (f, v) = raw.split_once('=').ok_or_else(|| {
+                redisevents::Error::invalid_argument(format!(
+                    "--if-equal needs field=value, got '{raw}'"
+                ))
+            })?;
+            conditions.push(Condition::hash_equal(state.as_str(), f, v));
+        }
+        for f in &args.if_field_absent {
+            conditions.push(Condition::hash_not_exists(state.as_str(), f.as_str()));
+        }
+        if args.if_key_absent {
+            conditions.push(Condition::key_not_exists(state.as_str()));
+        }
+        let mut options = PublishOptions::new();
+        if let Some(c) = &args.correlation {
+            options = options.correlation_id(c.clone());
+        }
+        let topic_options = TopicOptions {
+            partitions: args.partitions,
+            ..TopicOptions::default()
+        };
+        let outbox = Outbox::new(Connection::connect(&url).await?, keys);
+        outbox
+            .write_and_publish(
+                |pipe| {
+                    pipe.cmd("HSET").arg(&state).arg(field).arg(value);
+                },
+                &OutboxPublish {
+                    topic: &args.topic,
+                    partition_key: &args.key,
+                    body: &body,
+                    msg_type: &args.type_,
+                    options: &options,
+                    topic_options: &topic_options,
+                },
+                &conditions,
+                &[&state],
+            )
+            .await
+    });
+    match result {
+        Ok(id) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "outbox",
+                    "applied": id.is_some(),
+                    "id": id.map(|i| i.to_string()),
+                })
+            );
+            ExitCode::SUCCESS
+        }
+        Err(code) => code,
+    }
+}
+
+fn run_outbox_race(
+    redis: Option<&str>,
+    topic: &str,
+    key: &str,
+    state_name: &str,
+    count: u32,
+    start_at_ms: u64,
+) -> ExitCode {
+    let url = redis_url(redis);
+    let result = run(async {
+        let keys = Keys::from_env();
+        let state = Outbox::state_key(&keys, topic, state_name)?;
+        let conn = Connection::connect(&url).await?;
+        let mut shared = conn.shared();
+        let outbox = Outbox::new(conn, keys);
+        let options = PublishOptions::new();
+        let topic_options = TopicOptions {
+            partitions: 1,
+            ..TopicOptions::default()
+        };
+        let (mut wins, mut losses) = (0_u32, 0_u32);
+        let start_at = UNIX_EPOCH + Duration::from_millis(start_at_ms);
+        if let Ok(wait) = start_at.duration_since(SystemTime::now()) {
+            tokio::time::sleep(wait).await;
+        }
+        while wins < count {
+            let current: Option<String> = redis::cmd("HGET")
+                .arg(&state)
+                .arg("version")
+                .query_async(&mut shared)
+                .await?;
+            let next = current
+                .as_deref()
+                .map_or(Ok(0), str::parse::<u64>)
+                .map_err(|e| redisevents::Error::invalid_argument(e.to_string()))?
+                + 1;
+            let guard = match current {
+                None => Condition::hash_not_exists(state.as_str(), "version"),
+                Some(v) => Condition::hash_equal(state.as_str(), "version", v),
+            };
+            let body = next.to_string();
+            let id = outbox
+                .write_and_publish(
+                    |pipe| {
+                        pipe.cmd("HSET").arg(&state).arg("version").arg(next);
+                    },
+                    &OutboxPublish {
+                        topic,
+                        partition_key: key,
+                        body: body.as_bytes(),
+                        msg_type: "Interop.Versioned",
+                        options: &options,
+                        topic_options: &topic_options,
+                    },
+                    &[guard],
+                    &[&state],
+                )
+                .await?;
+            if id.is_some() {
+                wins += 1;
+            } else {
+                losses += 1;
+            }
+        }
+        Ok((wins, losses))
+    });
+    match result {
+        Ok((wins, losses)) => {
+            println!(
+                "{}",
+                serde_json::json!({"event": "done", "wins": wins, "losses": losses})
+            );
+            ExitCode::SUCCESS
+        }
+        Err(code) => code,
+    }
 }
 
 fn main() -> ExitCode {
@@ -207,6 +614,26 @@ fn main() -> ExitCode {
             *delivery,
         ),
         Verb::Positions { topic, consumer } => run_positions(redis, topic, consumer),
+        Verb::PublishTyped {
+            topic,
+            partitions,
+            key,
+        } => run_publish_typed(redis, topic, *partitions, key),
+        Verb::ConsumeTyped {
+            topic,
+            consumer,
+            partitions,
+            expect,
+            timeout,
+        } => run_consume_typed(redis, topic, consumer, *partitions, (*expect, *timeout)),
+        Verb::Outbox(args) => run_outbox(redis, args),
+        Verb::OutboxRace {
+            topic,
+            key,
+            state,
+            count,
+            start_at_ms,
+        } => run_outbox_race(redis, topic, key, state, *count, *start_at_ms),
     }
 }
 

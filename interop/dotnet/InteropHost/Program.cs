@@ -10,6 +10,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using RedisEvents.Admin;
+using RedisEvents.Consumer;
 using RedisEvents.Extensions;
 using RedisEvents.Config;
 using RedisEvents.Errors;
@@ -55,7 +56,7 @@ internal sealed class Args
             var a = argv[i];
             if (!a.StartsWith("--", StringComparison.Ordinal)) throw new CliException($"unexpected argument '{a}'");
             var name = a[2..];
-            if (name is "batch" or "buffered" or "seq" or "no-warmup" or "wedge") { flags.Add(name); continue; }
+            if (name is "batch" or "buffered" or "seq" or "no-warmup" or "wedge" or "if-key-absent") { flags.Add(name); continue; }
             if (i + 1 >= argv.Length) throw new CliException($"--{name} needs a value");
             if (!values.TryGetValue(name, out var list)) values[name] = list = [];
             list.Add(argv[++i]);
@@ -90,6 +91,10 @@ internal static class Cli
             "positions" => await Positions(a),
             "admin-reset" => await AdminReset(a),
             "meta" => await Meta(a),
+            "publish-typed" => await PublishTyped(a),
+            "consume-typed" => await ConsumeTyped(a),
+            "outbox" => await GuardedOutbox(a),
+            "outbox-race" => await OutboxRace(a),
             _ => throw new CliException($"unknown verb '{a.Verb}'"),
         };
     }
@@ -305,6 +310,169 @@ internal static class Cli
         var timedOut = winner != reached.Task;
         Emit(new() { ["event"] = "done", ["consumed"] = seen, ["timed_out"] = timedOut && expect > 0 });
         return timedOut && expect > 0 ? 2 : 0;
+    }
+
+    // The two messages of gate G4, one with the optional field null and one with it set. Rust's
+    // `orders()` is the twin; the type string is left to the library's default, the CLR full name.
+    private static Interop.TypedOrder[] Orders() =>
+    [
+        new()
+        {
+            OrderId = "order-Zoë-注文",
+            Quantity = 9007199254740993,
+            Price = 12.5m,
+            Status = Interop.OrderStatus.Settled,
+            PlacedAt = new DateTimeOffset(2026, 11, 2, 3, 4, 5, TimeSpan.Zero),
+            Tags = ["a", "b"],
+            Customer = new() { Name = "Ann" },
+            Note = null,
+        },
+        new()
+        {
+            OrderId = "order-2",
+            Quantity = 0,
+            Price = 0.25m,
+            Status = Interop.OrderStatus.Pending,
+            PlacedAt = new DateTimeOffset(2026, 11, 2, 3, 4, 6, TimeSpan.Zero),
+            Tags = [],
+            Customer = new() { Name = "" },
+            Note = "with a note",
+        },
+    ];
+
+    private static async Task<int> PublishTyped(Args a)
+    {
+        var topic = a.Req("topic");
+        var key = a.Req("key");
+        var builder = NewBuilder(a, topic, a.Int("partitions", 1), null);
+        builder.AddStreamPublisher(topic, false);
+        using var host = builder.Build();
+        await host.StartAsync();
+        var pub = host.Services.GetRequiredKeyedService<IStreamPublisher>(topic);
+        var orders = Orders();
+        foreach (var order in orders)
+        {
+            var id = await pub.PublishAsync(key, order, Interop.TypedOrderJson.Default.TypedOrder);
+            Emit(new() { ["event"] = "published", ["key"] = key, ["id"] = id.ToString() });
+        }
+        await host.StopAsync();
+        Emit(new() { ["event"] = "done", ["published"] = orders.Length });
+        return 0;
+    }
+
+    private static async Task<int> ConsumeTyped(Args a)
+    {
+        var topic = a.Req("topic");
+        var expect = a.Int("expect", 1);
+        var seen = 0;
+        var reached = new TaskCompletionSource();
+        var builder = NewBuilder(a, topic, a.Int("partitions", 1), a.Req("consumer"));
+        builder.AddStream(topic, (batch, _) =>
+        {
+            for (var i = 0; i < batch.Length; i++)
+            {
+                var m = batch.Span[i];
+                var order = m.Deserialize(Interop.TypedOrderJson.Default.TypedOrder)
+                    ?? throw new InvalidOperationException("the body decoded to null");
+                Emit(new()
+                {
+                    ["event"] = "typed",
+                    ["key"] = m.PartitionKey,
+                    ["type"] = m.Type,
+                    ["order_id"] = order.OrderId,
+                    ["quantity"] = order.Quantity,
+                    ["price"] = (double)order.Price,
+                    ["status"] = (int)order.Status,
+                    ["placed_at"] = order.PlacedAt.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture),
+                    ["tags"] = order.Tags,
+                    ["customer"] = order.Customer.Name,
+                    ["note"] = order.Note,
+                });
+                if (Interlocked.Increment(ref seen) >= expect) reached.TrySetResult();
+            }
+            return ValueTask.CompletedTask;
+        });
+        using var host = builder.Build();
+        await host.StartAsync();
+        var winner = await Task.WhenAny(reached.Task, Task.Delay(TimeSpan.FromSeconds(a.Int("timeout", 30))));
+        await host.StopAsync();
+        var timedOut = winner != reached.Task;
+        Emit(new() { ["event"] = "done", ["consumed"] = seen, ["timed_out"] = timedOut });
+        return timedOut ? 2 : 0;
+    }
+
+    private static (string Field, string Value) Pair(string raw, string flag)
+    {
+        var i = raw.IndexOf('=', StringComparison.Ordinal);
+        if (i < 0) throw new CliException($"--{flag} needs field=value, got '{raw}'");
+        return (raw[..i], raw[(i + 1)..]);
+    }
+
+    private static async Task<int> GuardedOutbox(Args a)
+    {
+        var topic = a.Req("topic");
+        RedisKey state = Outbox.StateKey(topic, a.Req("state"));
+        var (field, value) = Pair(a.Req("set"), "set");
+        var conditions = new List<Condition>();
+        foreach (var c in a.All("if-equal"))
+        {
+            var (f, v) = Pair(c, "if-equal");
+            conditions.Add(Condition.HashEqual(state, f, v));
+        }
+        foreach (var f in a.All("if-field-absent")) conditions.Add(Condition.HashNotExists(state, f));
+        if (a.Flag("if-key-absent")) conditions.Add(Condition.KeyNotExists(state));
+
+        var opts = new PublishOptions(a.Opt("correlation"));
+        using var redis = (ConnectionMultiplexer)await Connect(a);
+        var id = await Outbox.WriteAndPublishAsync(
+            redis.GetDatabase(),
+            tran => _ = tran.HashSetAsync(state, field, value),
+            topic,
+            a.Req("key"),
+            Convert.FromBase64String(a.Opt("body-b64") ?? ""),
+            a.Req("type"),
+            opts,
+            conditions,
+            [state],
+            new TopicOptions { Partitions = a.Int("partitions", 1) });
+        Emit(new() { ["event"] = "outbox", ["applied"] = id is not null, ["id"] = id?.ToString() });
+        return 0;
+    }
+
+    // Moves `version` up by one, --count times, guarded on the value it read: a loser re-reads. Two
+    // of these in two languages on one state key must never lose or repeat a version.
+    private static async Task<int> OutboxRace(Args a)
+    {
+        var topic = a.Req("topic");
+        var key = a.Req("key");
+        RedisKey state = Outbox.StateKey(topic, a.Req("state"));
+        var options = new TopicOptions { Partitions = 1 };
+        using var redis = (ConnectionMultiplexer)await Connect(a);
+        var db = redis.GetDatabase();
+        var (wins, losses, count) = (0, 0, a.Int("count", 1));
+        var wait = DateTimeOffset.FromUnixTimeMilliseconds(long.Parse(a.Req("start-at-ms"), System.Globalization.CultureInfo.InvariantCulture)) - DateTimeOffset.UtcNow;
+        if (wait > TimeSpan.Zero) await Task.Delay(wait);
+        while (wins < count)
+        {
+            var current = await db.HashGetAsync(state, "version");
+            var next = (current.IsNull ? 0 : (long)current) + 1;
+            Condition guard = current.IsNull ? Condition.HashNotExists(state, "version") : Condition.HashEqual(state, "version", current);
+            var id = await Outbox.WriteAndPublishAsync(
+                db,
+                tran => _ = tran.HashSetAsync(state, "version", next),
+                topic,
+                key,
+                Encoding.UTF8.GetBytes(next.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                "Interop.Versioned",
+                default,
+                [guard],
+                [state],
+                options);
+            if (id is null) losses++;
+            else wins++;
+        }
+        Emit(new() { ["event"] = "done", ["wins"] = wins, ["losses"] = losses });
+        return 0;
     }
 
     private static async Task<IConnectionMultiplexer> Connect(Args a) =>

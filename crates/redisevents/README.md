@@ -625,7 +625,7 @@ use redisevents::producer::{Outbox, OutboxPublish, PublishOptions};
 use redisevents::wire::Keys;
 use redisevents::{Connection, StreamId};
 
-async fn place_order(conn: Connection, order_id: &str, body: &[u8]) -> redisevents::Result<StreamId> {
+async fn place_order(conn: Connection, order_id: &str, body: &[u8]) -> redisevents::Result<Option<StreamId>> {
     let keys = Keys::from_env();
     let outbox = Outbox::new(conn, keys.clone());
     let state_key = Outbox::state_key(&keys, "orders", &format!("order:{order_id}"))?;
@@ -645,6 +645,7 @@ async fn place_order(conn: Connection, order_id: &str, body: &[u8]) -> rediseven
                 tx.hset(&state_key, "status", "placed").ignore();
             },
             &publish,
+            &[], // no conditions, so the result is always `Some`
             &[&state_key],
         )
         .await
@@ -666,8 +667,16 @@ Four things about it are load-bearing:
    `WATCH`-style connection state must not be shared. Pass the `Connection`; the outbox takes care of
    the rest.
 
-Optimistic concurrency is different in this crate. The outbox has no `conditions` argument. For
-"append only if the stream is still at version N", use `StreamStore`, which is the event-sourcing
+Conditions make a call optimistic, as in C#: `Condition::hash_equal(&state_key, "version", "3")`,
+`Condition::hash_not_exists` and `Condition::key_not_exists`. If any fails, nothing is applied and
+the call returns `Ok(None)`. Unlike C#, which uses `WATCH`, a conditional call runs as one script on
+the shared connection, so it reports a conflict only when the value differs. Three things follow: each
+state write must name its key as its first argument, in the stream's slot; a state write failing at
+run time stops the script there, keeping the writes before it and not publishing; and the state
+writes run after the checks with no other client in between. C# writers on the same keys see these
+as ordinary writes.
+
+For "append only if the stream is still at version N", use `StreamStore`, which is the event-sourcing
 primitive (`append_and_publish` returns `None` when the version moved, and nothing is written):
 
 ```rust

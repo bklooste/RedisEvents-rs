@@ -15,8 +15,8 @@ use bytes::Bytes;
 use redis::aio::ConnectionManager;
 use redisevents::config::{TopicOptions, TrimMode};
 use redisevents::producer::{
-    ForwardedMessage, Idempotency, Outbox, OutboxPublish, PublishOptions, StateEvent, StreamStore,
-    TopicForwarder,
+    Condition, ForwardedMessage, Idempotency, Outbox, OutboxPublish, PublishOptions, StateEvent,
+    StreamStore, TopicForwarder,
 };
 use redisevents::wire::codec::{CODEC_VERSION, decode};
 use redisevents::wire::{StreamId, StreamMsg};
@@ -508,10 +508,12 @@ async fn write_and_publish_many_returns_one_id_per_publish_in_order() {
                 pipe.cmd("SET").arg(&state_key).arg("v").ignore();
             },
             &publishes,
+            &[],
             &[&state_key],
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("no conditions");
     assert_eq!(ids.len(), 3);
     assert_eq!(
         calls, 1,
@@ -560,10 +562,12 @@ async fn write_and_publish_reuses_its_dedicated_connection_across_calls() {
                     options: &none,
                     topic_options: &o,
                 },
+                &[],
                 &[&counter],
             )
             .await
-            .unwrap();
+            .unwrap()
+            .expect("no conditions");
     }
     let mut conn = raw(redis).await;
     let n: u64 = redis::cmd("GET")
@@ -599,6 +603,7 @@ async fn a_failed_exec_is_wrapped_as_a_transport_failure_that_names_the_batch() 
                 topic_options: &o,
             },
             &[],
+            &[],
         )
         .await
         .unwrap_err();
@@ -608,6 +613,305 @@ async fn a_failed_exec_is_wrapped_as_a_transport_failure_that_names_the_batch() 
     );
     let mut conn = raw(redis).await;
     assert_eq!(xlen(&mut conn, &keys.stream(&topic, 0, true)).await, 0);
+}
+
+// Conditional outbox: a failed condition applies nothing, a passing one applies everything.
+
+struct Guarded {
+    outbox: Outbox,
+    conn: ConnectionManager,
+    topic: String,
+    state: String,
+    stream: String,
+    options: TopicOptions,
+    publish: PublishOptions,
+}
+
+impl Guarded {
+    async fn new(redis: &RedisFixture) -> Self {
+        let topic = redis.new_topic("guarded");
+        let keys = redis.keys();
+        Self {
+            outbox: Outbox::new(redis.connect().await, keys.clone()),
+            conn: raw(redis).await,
+            state: Outbox::state_key(&keys, &topic, "bet-1").unwrap(),
+            stream: keys.stream(&topic, 0, true),
+            topic,
+            options: options(),
+            publish: PublishOptions::new()
+                .correlation_id("corr-1")
+                .header("h", "v"),
+        }
+    }
+
+    /// One guarded write of `version` = `to`.
+    async fn write(&self, to: &str, conditions: &[Condition]) -> Option<StreamId> {
+        self.outbox
+            .write_and_publish(
+                |pipe| {
+                    pipe.cmd("HSET").arg(&self.state).arg("version").arg(to);
+                },
+                &OutboxPublish {
+                    topic: &self.topic,
+                    partition_key: "bet-1",
+                    body: to.as_bytes(),
+                    msg_type: "BetChanged",
+                    options: &self.publish,
+                    topic_options: &self.options,
+                },
+                conditions,
+                &[&self.state],
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn version(&mut self) -> Option<String> {
+        redis::cmd("HGET")
+            .arg(&self.state)
+            .arg("version")
+            .query_async(&mut self.conn)
+            .await
+            .unwrap()
+    }
+
+    /// Asserts the state and the stream both show exactly these writes.
+    async fn assert_writes(&mut self, version: Option<&str>, bodies: &[&str]) {
+        assert_eq!(self.version().await.as_deref(), version);
+        let stream = self.stream.clone();
+        let got = entries(&mut self.conn, &stream).await;
+        assert_eq!(got.iter().map(|(m, _)| text(m)).collect::<Vec<_>>(), bodies);
+    }
+}
+
+#[tokio::test]
+async fn a_passing_condition_writes_state_and_publishes_the_same_entry_as_multi_exec() {
+    let redis = redisevents_test_support::require_redis!();
+    let mut g = Guarded::new(redis).await;
+    let id = g
+        .write("1", &[Condition::key_not_exists(g.state.as_str())])
+        .await
+        .expect("the key does not exist");
+    g.assert_writes(Some("1"), &["1"]).await;
+
+    let stream = g.stream.clone();
+    let got = entries(&mut g.conn, &stream).await;
+    let (m, _) = &got[0];
+    assert_eq!(m.id(), id);
+    assert_eq!(m.msg_type(), "BetChanged");
+    assert_eq!(m.partition_key(), "bet-1");
+    assert_eq!(m.correlation_id(), "corr-1");
+    assert_eq!(m.headers().get("h").unwrap().as_deref(), Some("v"));
+}
+
+#[tokio::test]
+async fn a_failed_key_not_exists_applies_nothing() {
+    let redis = redisevents_test_support::require_redis!();
+    let mut g = Guarded::new(redis).await;
+    let nokey = [Condition::key_not_exists(g.state.as_str())];
+    assert!(g.write("1", &nokey).await.is_some());
+    assert!(g.write("2", &nokey).await.is_none());
+    g.assert_writes(Some("1"), &["1"]).await;
+}
+
+#[tokio::test]
+async fn a_failed_hash_equal_applies_nothing_and_a_missing_field_fails_it() {
+    let redis = redisevents_test_support::require_redis!();
+    let mut g = Guarded::new(redis).await;
+    let state = g.state.clone();
+    let expect = |v: &str| [Condition::hash_equal(state.as_str(), "version", v)];
+    assert!(g.write("1", &expect("0")).await.is_none(), "no field yet");
+    g.assert_writes(None, &[]).await;
+
+    assert!(g.write("1", &[]).await.is_some());
+    assert!(g.write("9", &expect("0")).await.is_none(), "stale");
+    g.assert_writes(Some("1"), &["1"]).await;
+
+    assert!(g.write("2", &expect("1")).await.is_some());
+    g.assert_writes(Some("2"), &["1", "2"]).await;
+}
+
+#[tokio::test]
+async fn a_failed_hash_not_exists_applies_nothing() {
+    let redis = redisevents_test_support::require_redis!();
+    let mut g = Guarded::new(redis).await;
+    let unset = [Condition::hash_not_exists(g.state.as_str(), "version")];
+    assert!(g.write("1", &unset).await.is_some(), "a missing key passes");
+    assert!(g.write("2", &unset).await.is_none());
+    g.assert_writes(Some("1"), &["1"]).await;
+}
+
+#[tokio::test]
+async fn every_condition_must_hold() {
+    let redis = redisevents_test_support::require_redis!();
+    let mut g = Guarded::new(redis).await;
+    assert!(g.write("1", &[]).await.is_some());
+    let mixed = [
+        Condition::hash_equal(g.state.as_str(), "version", "1"),
+        Condition::hash_not_exists(g.state.as_str(), "version"),
+    ];
+    assert!(g.write("2", &mixed).await.is_none());
+    g.assert_writes(Some("1"), &["1"]).await;
+}
+
+#[tokio::test]
+async fn a_failed_condition_publishes_none_of_many() {
+    let redis = redisevents_test_support::require_redis!();
+    let mut g = Guarded::new(redis).await;
+    assert!(g.write("1", &[]).await.is_some());
+    let one = OutboxPublish {
+        topic: &g.topic,
+        partition_key: "bet-1",
+        body: b"m",
+        msg_type: "T",
+        options: &g.publish,
+        topic_options: &g.options,
+    };
+    let stale = [Condition::hash_equal(g.state.as_str(), "version", "0")];
+    let lost = g
+        .outbox
+        .write_and_publish_many(|_| {}, &[one, one], &stale, &[])
+        .await
+        .unwrap();
+    assert!(lost.is_none());
+    let current = [Condition::hash_equal(g.state.as_str(), "version", "1")];
+    let ids = g
+        .outbox
+        .write_and_publish_many(|_| {}, &[one, one], &current, &[])
+        .await
+        .unwrap()
+        .expect("the version is current");
+    assert_eq!(ids.len(), 2);
+    assert!(ids[0] < ids[1]);
+    g.assert_writes(Some("1"), &["1", "m", "m"]).await;
+}
+
+/// Writers on separate connections racing on one expected version: exactly one wins each round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn racing_conditional_writers_leave_exactly_one_winner() {
+    let redis = redisevents_test_support::require_redis!();
+    let mut g = Guarded::new(redis).await;
+    let rival = Guarded {
+        outbox: Outbox::new(redis.connect().await, redis.keys()),
+        conn: raw(redis).await,
+        topic: g.topic.clone(),
+        state: g.state.clone(),
+        stream: g.stream.clone(),
+        options: options(),
+        publish: PublishOptions::new(),
+    };
+    assert!(g.write("0", &[]).await.is_some());
+    let mut bodies = vec!["0".to_owned()];
+    for round in 0..20 {
+        let (from, to) = (round.to_string(), (round + 1).to_string());
+        let guard = [Condition::hash_equal(g.state.as_str(), "version", from)];
+        let (one, two) = tokio::join!(g.write(&to, &guard), rival.write(&to, &guard));
+        assert_eq!(
+            usize::from(one.is_some()) + usize::from(two.is_some()),
+            1,
+            "round {round}"
+        );
+        bodies.push(to);
+    }
+    let refs: Vec<&str> = bodies.iter().map(String::as_str).collect();
+    g.assert_writes(Some("20"), &refs).await;
+}
+
+#[tokio::test]
+async fn a_condition_or_state_write_outside_the_stream_slot_is_refused_before_anything_is_sent() {
+    let redis = redisevents_test_support::require_redis!();
+    let mut g = Guarded::new(redis).await;
+    let publish = OutboxPublish {
+        topic: &g.topic,
+        partition_key: "k",
+        body: b"m",
+        msg_type: "T",
+        options: &g.publish,
+        topic_options: &g.options,
+    };
+    let foreign = Condition::key_not_exists("customer:1");
+    let err = g
+        .outbox
+        .write_and_publish(|_| {}, &publish, &[foreign], &[])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::Config(ref m) if m.contains("customer:1")),
+        "{err}"
+    );
+
+    let guard = [Condition::key_not_exists(g.state.as_str())];
+    let err = g
+        .outbox
+        .write_and_publish(
+            |pipe| {
+                pipe.cmd("SET").arg("customer:1").arg("v");
+            },
+            &publish,
+            &guard,
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::Config(ref m) if m.contains("customer:1")),
+        "{err}"
+    );
+
+    let err = g
+        .outbox
+        .write_and_publish(
+            |pipe| {
+                pipe.cmd("PING");
+            },
+            &publish,
+            &guard,
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::InvalidArgument(_)), "{err}");
+    g.assert_writes(None, &[]).await;
+}
+
+/// The difference from `MULTI`/`EXEC`, on purpose: a run-time failure stops the script, so the event
+/// announcing a state change that did not happen is not published.
+#[tokio::test]
+async fn a_conditional_state_write_failing_at_run_time_stops_before_the_publish() {
+    let redis = redisevents_test_support::require_redis!();
+    let mut g = Guarded::new(redis).await;
+    let string_key = Outbox::state_key(&redis.keys(), &g.topic, "a-string").unwrap();
+    let _: () = redis::cmd("SET")
+        .arg(&string_key)
+        .arg("v")
+        .query_async(&mut g.conn)
+        .await
+        .unwrap();
+    let publish = OutboxPublish {
+        topic: &g.topic,
+        partition_key: "k",
+        body: b"m",
+        msg_type: "T",
+        options: &g.publish,
+        topic_options: &g.options,
+    };
+    let err = g
+        .outbox
+        .write_and_publish(
+            |pipe| {
+                pipe.cmd("HSET").arg(&string_key).arg("f").arg("v");
+            },
+            &publish,
+            &[Condition::key_not_exists(g.state.as_str())],
+            &[],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::Transport { ref message, .. } if message.contains("conditional outbox")),
+        "{err}"
+    );
+    g.assert_writes(None, &[]).await;
 }
 
 // ------------------------------------------------------------------------------------------------

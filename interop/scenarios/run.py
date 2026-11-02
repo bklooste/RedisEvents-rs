@@ -539,6 +539,130 @@ def work_queue_dead_member(ctx: Ctx):
     check(claimed_after >= 29, f"claimed after {claimed_after:.1f}s, before the 30 s threshold")
 
 
+# --------------------------------------------------------------------------------- G4 typed JSON
+TYPED_ORDERS = [
+    {"order_id": "order-Zoë-注文", "quantity": 9007199254740993, "price": 12.5, "status": 2,
+     "placed_at": "2026-11-02T03:04:05Z", "tags": ["a", "b"], "customer": "Ann", "note": None},
+    {"order_id": "order-2", "quantity": 0, "price": 0.25, "status": 0,
+     "placed_at": "2026-11-02T03:04:06Z", "tags": [], "customer": "", "note": "with a note"},
+]
+
+
+@scenario("typed_json_payload", gate="G4")
+def typed_json_payload(ctx: Ctx):
+    # A casing or shape difference does not fail on the wire: C# reads a mismatched body as an object
+    # of defaults. So every decoded field is compared, and the body itself is checked for its shape.
+    topic = ctx.topic("typed")
+    ctx.p.run("publish-typed", "--topic", topic, "--partitions", "4", "--key", "order-key")
+    rc, lines = ctx.c.run("consume-typed", "--topic", topic, "--consumer", "g", "--partitions", "4",
+                          "--expect", "2", "--timeout", "20")
+    got = [m for m in lines if m.get("event") == "typed"]
+    check(len(got) == 2, f"expected 2 typed messages, got {lines}")
+    for m, want in zip(got, TYPED_ORDERS):
+        check(m["key"] == "order-key", f"key {m['key']}")
+        check(m["type"] == "Interop.TypedOrder", f"type {m['type']}")
+        for field, value in want.items():
+            check(m[field] == value, f"{field}: got {m[field]!r}, want {value!r}")
+
+    entries = [e for p in range(4) for _, e in ctx.redis.xrange(ctx.stream_key(topic, p))]
+    check(len(entries) == 2, f"expected 2 entries, got {len(entries)}")
+    for fields in entries:
+        body = json.loads(fields["b"])
+        check(set(body) == {"OrderId", "Quantity", "Price", "Status", "PlacedAt", "Tags", "Customer", "Note"},
+              f"body keys {sorted(body)}")
+        check(set(body["Customer"]) == {"Name"}, f"nested keys {sorted(body['Customer'])}")
+        check(isinstance(body["Status"], int), f"Status is not a number: {body['Status']!r}")
+
+
+# --------------------------------------------------------------------------------- G5 guarded outbox
+def _outbox(ctx: Ctx, host: Host, topic: str, state: str, to: str, *conditions: str) -> bool:
+    _, lines = host.run("outbox", "--topic", topic, "--partitions", "4", "--key", "bet-1", "--type", "BetChanged",
+                        "--body-b64", b64(to), "--correlation", "corr-" + to, "--state", state,
+                        "--set", f"version={to}", *conditions)
+    return lines[-1]["applied"]
+
+
+@scenario("guarded_outbox", gate="G5")
+def guarded_outbox(ctx: Ctx):
+    # Here the pair is two writers on one state key; each must honour what the other wrote.
+    topic, state = ctx.topic("guard"), "bet-1"
+    state_key = f"{ctx.prefix}{{{topic}}}:state:{state}"
+    stream_keys = [ctx.stream_key(topic, p) for p in range(4)]
+
+    def expect(version: str | None, bodies: list[str]) -> None:
+        got = ctx.redis.hgetall(state_key).get("version")
+        check(got == (version.encode() if version else None), f"state {got}, want {version}")
+        entries = sorted((e for k in stream_keys for e in ctx.redis.xrange(k)), key=lambda e: e[0])
+        check([e[1]["b"].decode() for e in entries] == bodies, f"stream {entries}, want {bodies}")
+
+    a, b = ctx.p, ctx.c
+    check(_outbox(ctx, a, topic, state, "1", "--if-key-absent"), "a: the key is absent")
+    expect("1", ["1"])
+    check(not _outbox(ctx, b, topic, state, "9", "--if-key-absent"), "b: the key now exists")
+    expect("1", ["1"])
+    check(not _outbox(ctx, b, topic, state, "9", "--if-equal", "version=0"), "b: stale version")
+    expect("1", ["1"])
+    check(not _outbox(ctx, a, topic, state, "9", "--if-equal", "missing=1"), "a: a missing field never equals")
+    expect("1", ["1"])
+    check(_outbox(ctx, b, topic, state, "2", "--if-equal", "version=1"), "b: current version")
+    expect("2", ["1", "2"])
+    check(not _outbox(ctx, a, topic, state, "9", "--if-equal", "version=1"), "a: b moved the version on")
+    expect("2", ["1", "2"])
+    check(not _outbox(ctx, a, topic, state, "9", "--if-field-absent", "version"), "a: the field exists")
+    expect("2", ["1", "2"])
+    check(not _outbox(ctx, a, topic, state, "9", "--if-equal", "version=2", "--if-key-absent"),
+          "a: every condition must hold")
+    expect("2", ["1", "2"])
+    check(_outbox(ctx, a, topic, state, "3", "--if-equal", "version=2", "--if-field-absent", "claimed"),
+          "a: both conditions hold")
+    expect("3", ["1", "2", "3"])
+
+    fresh, fresh_key = "bet-2", f"{ctx.prefix}{{{topic}}}:state:bet-2"
+    check(_outbox(ctx, b, topic, fresh, "4", "--if-field-absent", "version"), "b: a missing key has no field")
+    check(ctx.redis.hgetall(fresh_key) == {"version": b"4"}, "b: fresh state")
+
+    # Each language's consumer reads the other's guarded publishes as ordinary entries.
+    for who, host in (("a", a), ("b", b)):
+        _, msgs = ctx.consume(host, topic, f"g-{who}", 4, 4)
+        check(sorted(base64.b64decode(m["body_b64"]).decode() for m in msgs) == ["1", "2", "3", "4"],
+              f"{host.lang} consumed {msgs}")
+        for m in msgs:
+            body = base64.b64decode(m["body_b64"]).decode()
+            check(m["key"] == "bet-1" and m["type"] == "BetChanged", f"{host.lang}: {m}")
+            check(m["correlation"] == "corr-" + body, f"{host.lang}: {m}")
+
+
+@scenario("guarded_outbox_race", gate="G5")
+def guarded_outbox_race(ctx: Ctx):
+    # Two writers, in two languages when the pair differs, compare-and-set one version. C# guards with
+    # WATCH and Rust with a script: neither may overwrite the other or publish a losing write, so the
+    # stream holds every version exactly once, in order, and it matches the state.
+    topic, state, per_writer = ctx.topic("race"), "counter", 3000
+    # A shared start time: C# takes far longer to start, and a writer finished by then races nobody.
+    start_at = int((time.time() + 3) * 1000)
+    args = ["--topic", topic, "--key", "k", "--state", state, "--count", str(per_writer),
+            "--start-at-ms", str(start_at)]
+    procs = [ctx.p.spawn("outbox-race", *args), ctx.c.spawn("outbox-race", *args)]
+    lines = []
+    for pr in procs:
+        stdout, _ = pr.communicate(timeout=120)
+        lines.append([json.loads(ln) for ln in stdout.splitlines() if ln.strip().startswith("{")])
+    for pr, ls in zip(procs, lines):
+        if pr.returncode == NOT_IMPLEMENTED:
+            raise Skip("outbox-race")
+        check(pr.returncode == 0, f"writer exited {pr.returncode}: {ls}")
+        check(ls[-1].get("wins") == per_writer, f"writer finished with {ls[-1]}")
+    # Both must have lost at least once: a writer that never lost either raced nobody or ignores its guard.
+    losses = [ls[-1]["losses"] for ls in lines]
+    print(f"    writer losses: {ctx.p.lang}={losses[0]} {ctx.c.lang}={losses[1]}")
+    check(all(losses), f"a writer never lost a compare-and-set: {losses}")
+    total = per_writer * 2
+    version = ctx.redis.hgetall(f"{ctx.prefix}{{{topic}}}:state:{state}").get("version")
+    check(version == str(total).encode(), f"state version {version}, want {total}")
+    bodies = [int(e["b"]) for _, e in ctx.redis.xrange(ctx.stream_key(topic, 0))]
+    check(bodies == list(range(1, total + 1)), f"stream versions wrong: {bodies}")
+
+
 # --------------------------------------------------------------------------------- main
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
