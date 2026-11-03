@@ -177,6 +177,42 @@ buffer), where C# returns the field array that StackExchange.Redis serializes la
 encode rows are not quite like for like. Decode is cheap because the body and the packed headers
 move into `Bytes` without being copied. Routing allocates nothing.
 
+### RedisEvents-rs vs ZeroMQ
+
+ZeroMQ (`zmq`/`czmq`) is the fastest practical choice for raw message passing: no broker process
+at all, nanosecond-scale buffer hand-off over TCP/IPC/inproc, and well over 100,000 msg/s on a
+single unpipelined socket. That's a different question from the one this library answers —
+"Kafka-shaped guarantees, running nothing but Redis" — so the comparison below is honest about
+where each one wins.
+
+| Metric | ZeroMQ (zmq-rs/czmq) | RedisEvents-rs |
+| --- | --- | --- |
+| Pipelined / batched throughput | ~500,000+ msg/s | ~470,000 – 570,000 msg/s (batches of 500–2,000) |
+| Unpipelined (direct) throughput | ~100,000+ msg/s (raw TCP/IPC) | ~6,000 – 6,700 msg/s (bound by the Redis round trip) |
+| End-to-end consume | ~500,000+ msg/s | ~375,000 – 427,000 msg/s |
+| Low-level micro-latency | nanosecond scale (raw buffer pass) | ~82 – 216 ns (command encoding) |
+| Bottleneck | application-level processing logic | redis-rs's RESP parsing ceiling |
+| Durable consumer positions | none — build your own | built in, per partition (`XRANGE` replay from any point) |
+| Per-key ordering | none — a socket pattern, not a guarantee | guaranteed within a partition |
+| At-least-once delivery | none — frame and ack it yourself | built in, with an explicit error contract |
+| Broker process to run | none, but no persistence either | none beyond the Redis you likely already run |
+| Cross-language wire format | design and maintain it yourself | wire-compatible with the C# library out of the box, checked in CI |
+
+Read the throughput rows carefully: only the unpipelined row is a fair "library vs library"
+comparison, and that's the one ZeroMQ wins by over an order of magnitude, because a single `XADD`
+pays a full Redis round trip (~150μs) that a raw socket write doesn't. The moment either side
+batches — which is how real producers actually run — RedisEvents-rs lands in the same
+few-hundred-thousand-msg/s band ZeroMQ advertises, because pipelining removes exactly the round
+trip that created the gap.
+
+If you want the fastest possible point-to-point messaging, use ZeroMQ — that's what it's for, and
+nothing built on a Redis round trip is going to beat a raw socket. What you give up for that speed
+is everything the table's bottom half doesn't show: durability, ordering, replay and at-least-once
+delivery aren't ZeroMQ features, they're work taken on per socket pattern (PUB/SUB drops messages
+under a slow subscriber, nothing survives a process restart without a store bolted on yourself).
+RedisEvents-rs trades a small amount of raw throughput for a lot of built-in correctness — and once
+you pipeline, which is how real producers run, even that trade mostly disappears.
+
 ## Building
 
 ```bash
