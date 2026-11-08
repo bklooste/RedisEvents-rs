@@ -72,7 +72,8 @@ impl Keys {
     }
 
     /// The same keys with hash-tagging set as given: `true` wraps each topic in a `{...}` cluster hash tag,
-    /// `false` leaves the bare topic, for single-instance Redis. See [`hash_tag_enabled`] and `STREAMS_HASH_TAG`.
+    /// `false` leaves the bare topic, for single-instance Redis. [`Keys::from_env`] resolves this from
+    /// `STREAMS_HASH_TAG`.
     #[must_use]
     pub fn with_hash_tag(mut self, hash_tag: bool) -> Self {
         self.hash_tag = hash_tag;
