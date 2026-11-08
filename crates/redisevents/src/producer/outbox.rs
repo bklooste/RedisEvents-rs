@@ -325,7 +325,13 @@ impl Outbox {
             }
             None
         } else {
-            Some(guarded_outbox(conditions, &pipe, &plans, publishes, self.keys.hash_tag())?)
+            Some(guarded_outbox(
+                conditions,
+                &pipe,
+                &plans,
+                publishes,
+                self.keys.hash_tag(),
+            )?)
         };
 
         let msg_type = (count == 1).then_some(publishes[0].msg_type);

@@ -147,7 +147,11 @@ impl Keys {
     /// View hash: `<prefix>{topic}:view:<owner>:<view_name>`.
     #[must_use]
     pub fn view(&self, topic: &str, owner: &str, view_name: &str) -> String {
-        format!("{}{}:view:{owner}:{view_name}", self.prefix, self.tag(topic))
+        format!(
+            "{}{}:view:{owner}:{view_name}",
+            self.prefix,
+            self.tag(topic)
+        )
     }
 
     /// Dedupe claim: `<prefix>dedupe:{scope}:<id>`.
@@ -237,11 +241,26 @@ mod tests {
     fn hash_tag_on_by_default_wraps_every_family() {
         let k = Keys::with_prefix("re:");
         assert!(k.hash_tag());
-        assert_eq!(k.stream("dev:bet:core-es", 0, true), "re:s:{dev:bet:core-es}:0");
-        assert_eq!(k.positions("dev:bet:core-es", "c"), "re:p:{dev:bet:core-es}:c");
-        assert_eq!(k.state("dev:bet:core-es", "Bet:42"), "re:{dev:bet:core-es}:state:Bet:42");
-        assert_eq!(k.view("dev:bet:core-es", "o", "v"), "re:{dev:bet:core-es}:view:o:v");
-        assert_eq!(k.dedupe("dev:bet:core-es", "evt-1").unwrap(), "re:dedupe:{dev:bet:core-es}:evt-1");
+        assert_eq!(
+            k.stream("dev:bet:core-es", 0, true),
+            "re:s:{dev:bet:core-es}:0"
+        );
+        assert_eq!(
+            k.positions("dev:bet:core-es", "c"),
+            "re:p:{dev:bet:core-es}:c"
+        );
+        assert_eq!(
+            k.state("dev:bet:core-es", "Bet:42"),
+            "re:{dev:bet:core-es}:state:Bet:42"
+        );
+        assert_eq!(
+            k.view("dev:bet:core-es", "o", "v"),
+            "re:{dev:bet:core-es}:view:o:v"
+        );
+        assert_eq!(
+            k.dedupe("dev:bet:core-es", "evt-1").unwrap(),
+            "re:dedupe:{dev:bet:core-es}:evt-1"
+        );
     }
 
     #[test]
@@ -268,6 +287,9 @@ mod tests {
         assert_eq!(k.stream(topic, 0, true), "re:s:dev:bet:core-es:0");
         assert_eq!(k.state(topic, "Bet:42"), "re:dev:bet:core-es:state:Bet:42");
         assert_eq!(k.view(topic, "o", "v"), "re:dev:bet:core-es:view:o:v");
-        assert_eq!(k.dedupe(topic, "evt-1").unwrap(), "re:dedupe:dev:bet:core-es:evt-1");
+        assert_eq!(
+            k.dedupe(topic, "evt-1").unwrap(),
+            "re:dedupe:dev:bet:core-es:evt-1"
+        );
     }
 }
