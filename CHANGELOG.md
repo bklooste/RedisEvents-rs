@@ -5,6 +5,19 @@ and the crates follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added: `STREAMS_HASH_TAG=false` for single-instance Redis
+
+- `Keys::from_env`/`from_lookup` now also read `STREAMS_HASH_TAG`: on unless the value is a falsey word
+  (`false`/`0`/`no`/`off`), the same rule and variable as the C# library (`KeyNamespace.HashTagTopics`,
+  bklooste/RedisEvents#59). When off, no key family wraps the topic in a `{...}` cluster hash tag —
+  `stream`, `positions`, `positions_meta`, `ownership`, `topic_meta`, `state`, `view`, `dedupe` and the
+  scan patterns all emit the bare topic (`re:s:dev:bet:core-es:0`, `re:dev:bet:core-es:state:…`), and the
+  outbox's cross-slot guards are skipped because a single node is one slot. Additive: the default is on,
+  so nothing changes for a cluster deployment.
+- `Keys::with_hash_tag(bool)`, `Keys::hash_tag() -> bool` and `Keys::tag(topic) -> Cow<str>` are new.
+  `tag` gives a topic as it appears inside a key (`{topic}` or bare), for a service that co-locates its
+  own keys with a topic's streams.
+
 ### Changed: `Outbox` takes conditions (breaking: 0.5)
 
 - `Outbox::write_and_publish` and `write_and_publish_many` take `conditions: &[Condition]` and return
