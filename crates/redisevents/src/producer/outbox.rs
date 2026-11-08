@@ -239,6 +239,7 @@ impl Outbox {
             topic,
             co_locate_partitions,
             state_keys,
+            keys.hash_tag(),
         )
     }
 
@@ -324,7 +325,13 @@ impl Outbox {
             }
             None
         } else {
-            Some(guarded_outbox(conditions, &pipe, &plans, publishes)?)
+            Some(guarded_outbox(
+                conditions,
+                &pipe,
+                &plans,
+                publishes,
+                self.keys.hash_tag(),
+            )?)
         };
 
         let msg_type = (count == 1).then_some(publishes[0].msg_type);
@@ -392,6 +399,7 @@ fn guarded_outbox(
     pipe: &redis::Pipeline,
     plans: &[Planned],
     publishes: &[OutboxPublish<'_>],
+    hash_tag_on: bool,
 ) -> Result<Guarded> {
     let mut script = Guarded::new();
     for condition in conditions {
@@ -400,7 +408,9 @@ fn guarded_outbox(
     let stream_tag = hash_tag(&plans[0].stream);
     for (i, cmd) in pipe.cmd_iter().enumerate() {
         let (name, key, args) = split_state_write(cmd, i)?;
-        if hash_tag(&key) != stream_tag {
+        // On single-instance Redis (hash-tagging off) every key is in the one slot, and braceless keys never
+        // share a tag, so the cross-slot check does not apply — the script still runs as one MULTI/EXEC.
+        if hash_tag_on && hash_tag(&key) != stream_tag {
             return Err(Error::config(format!(
                 "Outbox: conditional state write {i} ({name}) has first argument '{key}', which is not in the slot of stream key '{}'. A conditional state write runs in a script, so it must name a key sharing the stream's hash tag first: build it with Outbox::state_key.",
                 plans[0].stream
@@ -487,12 +497,13 @@ fn plan_publishes(
             trace,
         )?);
     }
-    require_stream_keys_in_one_slot(&plans, publishes)?;
+    require_stream_keys_in_one_slot(&plans, publishes, keys.hash_tag())?;
     require_state_keys_in_slot(
         &plans[0].stream,
         publishes[0].topic,
         publishes[0].topic_options.co_locate_partitions,
         state_keys,
+        keys.hash_tag(),
     )?;
     Ok(plans)
 }
@@ -668,7 +679,12 @@ fn hash_tag(key: &str) -> &str {
 fn require_stream_keys_in_one_slot(
     plans: &[Planned],
     publishes: &[OutboxPublish<'_>],
+    hash_tag_on: bool,
 ) -> Result<()> {
+    // Single-instance Redis (hash-tagging off): one slot, so partitions and topics never span slots.
+    if !hash_tag_on {
+        return Ok(());
+    }
     let reference = &plans[0].stream;
     let tag = hash_tag(reference);
     for (i, plan) in plans.iter().enumerate().skip(1) {
@@ -697,7 +713,10 @@ fn require_state_keys_in_slot(
     topic: &str,
     co_locate_partitions: bool,
     state_keys: &[&str],
+    hash_tag_on: bool,
 ) -> Result<()> {
+    // Single-instance Redis (hash-tagging off): one slot. An empty declared key is still a caller mistake, so
+    // that check stays; the cross-slot comparison does not apply, since braceless keys never share a tag.
     let tag = hash_tag(stream_key);
     for (i, key) in state_keys.iter().enumerate() {
         if key.is_empty() {
@@ -705,7 +724,7 @@ fn require_state_keys_in_slot(
                 "Outbox: state key {i} is empty. Declare the keys the state-write delegate actually touches, or declare none at all."
             )));
         }
-        if hash_tag(key) == tag {
+        if !hash_tag_on || hash_tag(key) == tag {
             continue;
         }
         let spread = if co_locate_partitions {
